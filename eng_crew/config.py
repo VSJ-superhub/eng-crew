@@ -103,3 +103,8 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
 
 
 settings: Settings = load_settings()
+
+# Module-level constants the tracker and dashboard routers import directly.
+DATA_DIR = settings.data_dir
+DB_PATH = settings.data_dir / "tracking.db"
+CLAUDE_WEEKLY_BUDGET: float = float(os.environ.get("ENG_CREW_WEEKLY_BUDGET", 0.0))

@@ -44,6 +44,13 @@ def _read_file(path: Path, max_bytes: int = _MAX_FILE_BYTES) -> str:
         return ""
 
 
+def resolve_context_md_path(project_path: str | Path, claude_md_path: str | None = None) -> str:
+    """Return CLAUDE.md path for a project, falling back to project_path/CLAUDE.md."""
+    if claude_md_path:
+        return claude_md_path
+    return str(Path(project_path).expanduser().resolve() / "CLAUDE.md")
+
+
 def load_project_context(
     project_path: str | Path,
     extra_files: Optional[list[str]] = None,

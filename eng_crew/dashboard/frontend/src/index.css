@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #0f1117;
+  color: #e2e8f0;
+  font-family: Inter, -apple-system, system-ui, sans-serif;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0f1117; }
+::-webkit-scrollbar-thumb { background: #2d3748; border-radius: 3px; }
+
+dialog {
+  background: #161927;
+  border: 1px solid #2d3748;
+  border-radius: 8px;
+  color: #e2e8f0;
+  padding: 0;
+  max-width: 90vw;
+  max-height: 90vh;
+}
+dialog::backdrop {
+  background: rgba(0,0,0,0.7);
+}

@@ -27,6 +27,15 @@ def get_provider(name: str) -> Provider:
         raise ValueError(f"Unknown provider: {name!r}. Available: {', '.join(PROVIDER_REGISTRY.keys())}")
     return provider_cls()
 
+def has_credentials(provider: str) -> bool:
+    """Return True if the provider has credentials available."""
+    try:
+        p = get_provider(provider)
+        return bool(p.has_credentials())
+    except Exception:
+        return False
+
+
 def call_llm(provider: str, model: str, prompt: str, **kwargs) -> LLMResult:
     try:
         p_instance = get_provider(provider)
