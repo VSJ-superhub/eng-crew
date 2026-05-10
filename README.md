@@ -15,7 +15,7 @@ pip install eng-crew
 Or run from source:
 
 ```bash
-git clone https://github.com/anthropics/eng-crew
+git clone https://github.com/VSJ-superhub/eng-crew
 cd eng-crew
 pip install -e ".[dev]"
 ```

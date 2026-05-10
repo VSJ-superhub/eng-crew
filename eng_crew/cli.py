@@ -131,6 +131,65 @@ def sprint(
     console.print(table)
 
 
+@app.command()
+def resume(
+    run_id: int = typer.Argument(..., help="Run ID to resume (shown in dashboard or terminal output)."),
+    env_file: Optional[Path] = typer.Option(None, "--env", help="Path to .env file."),
+) -> None:
+    """Resume an interrupted run from its last checkpoint."""
+    cfg = load_settings(env_file)
+    console.print(f"[bold]Resuming run {run_id}...[/]")
+    try:
+        from eng_crew.run import resume_run  # type: ignore[import]
+
+        ok = resume_run(run_id)
+        if not ok:
+            console.print(f"[red]Run {run_id} not found or could not be resumed.[/red]")
+            raise typer.Exit(1)
+    except ImportError:
+        console.print("[red]Pipeline modules not available. Run `pip install eng-crew`.[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def status(
+    limit: int = typer.Option(10, "--limit", "-n", help="Number of recent runs to show."),
+    env_file: Optional[Path] = typer.Option(None, "--env", help="Path to .env file."),
+) -> None:
+    """Show recent runs and their status."""
+    cfg = load_settings(env_file)
+    try:
+        from eng_crew.tracker import list_runs  # type: ignore[import]
+
+        runs = list_runs(limit=limit)
+    except ImportError:
+        console.print("[red]Tracker module not available.[/red]")
+        raise typer.Exit(1)
+
+    if not runs:
+        console.print("[dim]No runs found.[/dim]")
+        return
+
+    table = Table(title="Recent runs")
+    table.add_column("ID", style="bold cyan")
+    table.add_column("Status")
+    table.add_column("Task")
+    table.add_column("Project")
+    table.add_column("Started")
+    for r in runs:
+        status_color = {"completed": "green", "failed": "red", "running": "yellow"}.get(
+            str(r.get("status", "")), "white"
+        )
+        table.add_row(
+            str(r.get("id", "")),
+            f"[{status_color}]{r.get('status', '')}[/{status_color}]",
+            str(r.get("task_text", ""))[:60],
+            str(r.get("project_path", ""))[-30:],
+            str(r.get("started_at", ""))[:19],
+        )
+    console.print(table)
+
+
 def _list_projects(cfg: object) -> None:
     try:
         from eng_crew.registry import list_projects  # type: ignore[import]
