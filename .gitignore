@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# eng-crew runtime data
+.eng-crew/
+logs/
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Node (dashboard frontend, if added later)
+node_modules/
+.next/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Entroly index
+.entroly/
