@@ -9,10 +9,12 @@ from langgraph.graph import END, StateGraph
 
 from eng_crew import git_skill, hitl as hitl_mod, tracker
 from eng_crew.agents.architect import ArchitectAgent
+from eng_crew.agents.complexity_classifier import ComplexityClassifierAgent
 from eng_crew.agents.dispatcher import DispatcherAgent
 from eng_crew.agents.executor import ExecutorAgent
 from eng_crew.agents.orchestrator import OrchestratorAgent
 from eng_crew.agents.reviewer import ReviewerAgent
+from eng_crew.agents.simple_executor import SimpleExecutorAgent
 from eng_crew.config import Settings
 from eng_crew.project_context import load_project_context
 from eng_crew.state import TeamState
@@ -21,11 +23,22 @@ log = logging.getLogger(__name__)
 
 
 def _build_graph(settings: Settings) -> Any:
+    classifier = ComplexityClassifierAgent(settings)
     orchestrator = OrchestratorAgent(settings)
     architect = ArchitectAgent(settings)
     dispatcher = DispatcherAgent(settings)
     reviewer = ReviewerAgent(settings)
     executor = ExecutorAgent(settings)
+    simple_executor = SimpleExecutorAgent(settings)
+
+    def classify_node(state: TeamState) -> dict:
+        return classifier.run(state)
+
+    def simple_execute_node(state: TeamState) -> dict:
+        return simple_executor.run(state)
+
+    def _route_classify(state: TeamState) -> str:
+        return state.get("_next") or "full"
 
     def orchestrator_node(state: TeamState) -> dict:
         return orchestrator.run(state)
@@ -64,6 +77,8 @@ def _build_graph(settings: Settings) -> Any:
         return state.get("_next") or "done"
 
     graph = StateGraph(TeamState)
+    graph.add_node("classify", classify_node)
+    graph.add_node("simple_execute", simple_execute_node)
     graph.add_node("orchestrator", orchestrator_node)
     graph.add_node("architect", architect_node)
     graph.add_node("hitl_gate", hitl_gate_node)
@@ -71,7 +86,12 @@ def _build_graph(settings: Settings) -> Any:
     graph.add_node("reviewer", reviewer_node)
     graph.add_node("executor", executor_node)
 
-    graph.set_entry_point("orchestrator")
+    graph.set_entry_point("classify")
+    graph.add_conditional_edges("classify", _route_classify, {
+        "simple": "simple_execute",
+        "full":   "orchestrator",
+    })
+    graph.add_edge("simple_execute", END)
 
     graph.add_conditional_edges(
         "orchestrator",

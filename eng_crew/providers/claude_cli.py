@@ -35,6 +35,9 @@ class ClaudeCLIProvider(Provider):
             "--model", model,
             "--dangerously-skip-permissions",
         ]
+        allowed_tools = kwargs.get("allowed_tools")
+        if allowed_tools:
+            cmd.extend(["--allowedTools", allowed_tools])
         
         try:
             result = subprocess.run(

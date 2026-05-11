@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     executor_provider: Optional[str] = None
     executor_model: Optional[str] = None
 
+    # --- Simple Executor (short-circuit path for simple tasks) ---
+    simple_executor_provider: Optional[str] = None
+    simple_executor_model: Optional[str] = None
+
     # --- General ---
     budget_usd: float = 5.0
     max_tokens: int = 8192
