@@ -144,6 +144,85 @@ eng-crew resume <run-id>
 ```
 Run IDs are shown in the dashboard and in terminal output.
 
+## Optional MCP integrations
+
+eng-crew works alongside a set of MCP servers that give the agents and your Claude/Gemini CLI sessions persistent memory, smart task prioritisation, and structured reasoning. All three are optional but recommended for the best experience.
+
+---
+
+### yourmemory — persistent memory across sessions
+
+A local, offline-first memory store built in Rust. Any Claude Code or Gemini CLI session running in your project directory shares the same memory — agents remember past decisions, context, and lessons without re-reading files from scratch each time.
+
+**Install:**
+```bash
+cargo install yourmemory        # installs yourmemory + yourmemory-mcp binaries
+cd /your/project
+yourmemory init                 # creates .yourmemory/ in the project
+yourmemory setup claude         # wires the MCP server into Claude Code
+```
+
+Open a new Claude Code session and memory is active. Source: [github.com/VSJ-superhub/rusty-mempalace](https://github.com/VSJ-superhub/rusty-mempalace)
+
+---
+
+### decisions — task ranking and agent routing
+
+A stateless decisioning engine (Python + Rust core) that ranks task lists, recommends the next highest-value action, and tells you which agent type should handle a given task. Useful when you have a backlog and want the pipeline to work in the right order.
+
+**Install:**
+```bash
+git clone https://github.com/VSJ-superhub/decisions
+cd decisions
+maturin develop --release       # builds the Rust scoring core
+pip install "mcp[cli]>=1.0"
+mcp run src/server.py           # starts the MCP server
+```
+
+**Register with Claude Code** (`~/.claude/settings.json`):
+```json
+{
+  "mcpServers": {
+    "decisions": {
+      "command": "python",
+      "args": ["/path/to/decisions/src/server.py"]
+    }
+  }
+}
+```
+
+**Tools exposed:** `score_tasks`, `next_action`, `route_to_agent`, `plan_sprint`
+
+---
+
+### cognitive-stack — structured reasoning layers
+
+A meta-router MCP server that sits in front of 7 cognitive layers (memory, perception, reasoning, decision, planning, action, communication). Call a single `route(task)` tool and it fans out to the right layers in the right order, returning a unified result. Useful for complex architectural decisions or multi-step analysis tasks.
+
+**Install:**
+```bash
+git clone https://github.com/VSJ-superhub/cognitive-stack
+cd cognitive-stack
+pip install -e .
+python src/server.py            # starts the MCP server
+```
+
+**Register with Claude Code** (`~/.claude/settings.json`):
+```json
+{
+  "mcpServers": {
+    "cognitive_stack": {
+      "command": "python",
+      "args": ["/path/to/cognitive-stack/src/server.py"]
+    }
+  }
+}
+```
+
+**Tools exposed:** `route(task)`, `status`
+
+---
+
 ## License
 
 MIT
