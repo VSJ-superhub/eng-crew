@@ -26,14 +26,47 @@ pip install -e ".[dev]"
 cp .env.example .env
 ```
 
-Open `.env` and set your LLM provider and API key:
+**Free option — Claude CLI (no API key needed):**
 
 ```dotenv
-ENG_CREW_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-...
+ENG_CREW_PROVIDER=claude_cli
 ```
 
-Supported providers: `anthropic`, `openrouter`, `gemini`
+Requires [Claude Code CLI](https://claude.ai/code) installed and authenticated:
+
+```bash
+npm install -g @anthropic-ai/claude-code
+claude   # follow the login prompt once
+```
+
+**Free option — Gemini CLI (no API key needed):**
+
+```dotenv
+ENG_CREW_PROVIDER=gemini_cli
+```
+
+Requires [Gemini CLI](https://github.com/google-gemini/gemini-cli) installed and authenticated:
+
+```bash
+npm install -g @google/gemini-cli
+gemini   # follow the Google login prompt once
+```
+
+**Paid API options:**
+
+```dotenv
+# Anthropic API
+ENG_CREW_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Google Gemini API
+ENG_CREW_PROVIDER=gemini
+GEMINI_API_KEY=...
+
+# OpenRouter (access many models via one key)
+ENG_CREW_PROVIDER=openrouter
+OPENROUTER_API_KEY=...
+```
 
 ### 3. Run a task
 
@@ -69,10 +102,10 @@ All settings are environment variables (see `.env.example` for the full list).
 
 | Variable | Default | Description |
 |---|---|---|
-| `ENG_CREW_PROVIDER` | `anthropic` | LLM provider: `anthropic`, `openrouter`, `gemini` |
-| `ANTHROPIC_API_KEY` | — | Anthropic API key |
-| `OPENROUTER_API_KEY` | — | OpenRouter API key |
-| `GEMINI_API_KEY` | — | Google Gemini API key |
+| `ENG_CREW_PROVIDER` | `claude_cli` | LLM provider: `claude_cli`, `gemini_cli`, `anthropic`, `gemini`, `openrouter` |
+| `ANTHROPIC_API_KEY` | — | Anthropic API key (only needed for `anthropic` provider) |
+| `GEMINI_API_KEY` | — | Google Gemini API key (only needed for `gemini` provider) |
+| `OPENROUTER_API_KEY` | — | OpenRouter API key (only needed for `openrouter` provider) |
 | `ENG_CREW_ARCHITECT_MODEL` | `claude-sonnet-4-6` | Model for architect agent |
 | `ENG_CREW_CODER_MODEL` | `claude-sonnet-4-6` | Model for coder agents |
 | `ENG_CREW_REVIEWER_MODEL` | `claude-sonnet-4-6` | Model for reviewer agent |
