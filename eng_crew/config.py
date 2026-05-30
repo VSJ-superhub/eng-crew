@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     stack: str = "quality"
 
     # --- Global Defaults (used if agent-specific ones are missing) ---
+    provider: Optional[str] = Field(default=None, alias="ENG_CREW_PROVIDER")
     default_provider: str = "anthropic"
     default_model: str = "claude-sonnet-4-6"
 
@@ -59,7 +60,7 @@ class Settings(BaseSettings):
     data_dir: Path = Path(".eng-crew")
 
     # --- Dashboard ---
-    dashboard_port: int = 9001
+    dashboard_port: int = 9000
     dashboard_host: str = "127.0.0.1"
 
     # --- Pipeline ---
@@ -89,9 +90,12 @@ class Settings(BaseSettings):
                 "model":    m or stack_cfg[role]["model"]
             }
 
-        # 3. Fallback to defaults
+        # 3. Use global provider override (ENG_CREW_PROVIDER) if set, else default_provider
+        effective_provider = self.provider or self.default_provider
+
+        # 4. Fallback to defaults
         return {
-            "provider": p or self.default_provider,
+            "provider": p or effective_provider,
             "model":    m or self.default_model
         }
 

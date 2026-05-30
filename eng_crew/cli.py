@@ -39,6 +39,13 @@ def run(
 
     console.print(Panel(f"[bold green]Task:[/] {task}\n[bold blue]Project:[/] {project_path}", title="eng-crew run"))
 
+    if cfg.require_approval:
+        dashboard_url = f"http://{cfg.dashboard_host}:{cfg.dashboard_port}"
+        console.print(f"\n[bold yellow]ℹ️  This run requires approval.[/]")
+        console.print(f"[dim]Start the dashboard in another terminal:[/]")
+        console.print(f"  [cyan]eng-crew dashboard[/] (or [cyan]eng-crew dashboard --port {cfg.dashboard_port}[/])")
+        console.print(f"[dim]Then visit:[/] [bold cyan]{dashboard_url}[/]\n")
+
     try:
         from eng_crew.pipeline import run_pipeline  # type: ignore[import]
 

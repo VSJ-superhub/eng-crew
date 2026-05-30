@@ -382,7 +382,7 @@ def create_run(task_text: str, project_path: str, log_path: str | None = None) -
         with _connect() as conn:
             cur = conn.execute(
                 "INSERT INTO runs (task_text, project_path, started_at, log_path) VALUES (?, ?, ?, ?)",
-                (task_text[:500], project_path, _now(), log_path),
+                (task_text, project_path, _now(), log_path),
             )
             return cur.lastrowid
 
