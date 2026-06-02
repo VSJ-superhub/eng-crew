@@ -164,6 +164,22 @@ yourmemory setup claude         # wires the MCP server into Claude Code
 
 Open a new Claude Code session and memory is active. Source: [github.com/VSJ-superhub/rusty-mempalace](https://github.com/VSJ-superhub/rusty-mempalace)
 
+**One canonical palace across all projects (recommended).** `yourmemory setup claude` wires the server automatically, but by default each project's `.yourmemory/` is a separate store — so lessons scatter instead of compounding. To make every project share **one cross-project brain** (the substrate that lets the crew actually get better over time), pin the palace with `YOURMEMORY_PALACE` in `~/.claude/settings.json`:
+```json
+{
+  "mcpServers": {
+    "yourmemory": {
+      "command": "yourmemory-mcp",
+      "args": [],
+      "env": { "YOURMEMORY_PALACE": "/absolute/path/to/your/.yourmemory" }
+    }
+  }
+}
+```
+> `YOURMEMORY_PALACE` points at the directory holding `palace.db`. When set, every project's agents read and write the same shared palace regardless of working directory; unset, the server falls back to per-project walk-up resolution.
+
+**Tools exposed:** `wakeup`, `search`, `store_fact`, `recall` (plus `persist`, `update_fact`, `invalidate_fact`, knowledge-graph and maintenance tools).
+
 ---
 
 ### decisions — task ranking and agent routing
