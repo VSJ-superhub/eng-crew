@@ -7,6 +7,14 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _entropy_engine_available() -> bool:
+    try:
+        import entropy_engine  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="ENG_CREW_",
@@ -58,6 +66,9 @@ class Settings(BaseSettings):
     budget_usd: float = 5.0
     max_tokens: int = 8192
     data_dir: Path = Path(".eng-crew")
+
+    # --- Rust entropy engine (auto-on when entropy_engine is installed) ---
+    entropy_engine_enabled: bool = Field(default_factory=lambda: _entropy_engine_available())
 
     # --- Dashboard ---
     dashboard_port: int = 9000

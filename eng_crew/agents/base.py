@@ -40,7 +40,29 @@ class BaseAgent:
             raise
 
     def count_tokens(self, text: str) -> int:
-        return len(text) // 4
+        try:
+            from entropy_engine import count_tokens as _ct
+            return _ct(text)
+        except ImportError:
+            return len(text) // 4
+
+    def truncate_to_tokens(self, text: str, max_tokens: int) -> str:
+        """Truncate text to max_tokens using BPE when available, char proxy otherwise."""
+        try:
+            from entropy_engine import count_tokens as _ct
+            if _ct(text) <= max_tokens:
+                return text
+            lo, hi = 0, len(text)
+            while hi - lo > 64:
+                mid = (lo + hi) // 2
+                if _ct(text[:mid]) <= max_tokens:
+                    lo = mid
+                else:
+                    hi = mid
+            return text[:lo] + "\n... [truncated]"
+        except ImportError:
+            cutoff = max_tokens * 4
+            return text if len(text) <= cutoff else text[:cutoff] + "\n... [truncated]"
 
     def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         return state
