@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import random
 import re
+import threading
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Optional
@@ -217,3 +218,46 @@ class ProjectIndex:
                 for i in range(_N_PROJECTIONS):
                     dots[i] += weight * pw[i]
         return bytes(1 if d >= 0 else 0 for d in dots)
+
+
+# ── Module-level search() with per-project index caching ─────────────────────
+
+_cache: dict[str, ProjectIndex] = {}
+_cache_lock = threading.Lock()
+
+
+def search(project_path: str, query: str, top_k: int = 6) -> list[str]:
+    """Return relative paths of up to top_k files most relevant to query.
+
+    Builds and caches a ProjectIndex per project_path on first call.
+    Returns [] if query is empty or indexing fails.
+    """
+    if not query or not query.strip():
+        return []
+
+    abs_path = str(Path(project_path).expanduser().resolve())
+
+    with _cache_lock:
+        idx = _cache.get(abs_path)
+        if idx is None:
+            idx = ProjectIndex()
+            try:
+                idx.index(abs_path)
+            except Exception:
+                return []
+            _cache[abs_path] = idx
+
+    try:
+        results = idx.search(query, k=top_k)
+        return [path for path, _score in results]
+    except Exception:
+        return []
+
+
+def invalidate_cache(project_path: Optional[str] = None) -> None:
+    """Drop cached index for a project (or all projects)."""
+    with _cache_lock:
+        if project_path is None:
+            _cache.clear()
+        else:
+            _cache.pop(str(Path(project_path).expanduser().resolve()), None)

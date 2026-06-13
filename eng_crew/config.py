@@ -70,6 +70,13 @@ class Settings(BaseSettings):
     # --- Rust entropy engine (auto-on when entropy_engine is installed) ---
     entropy_engine_enabled: bool = Field(default_factory=lambda: _entropy_engine_available())
 
+    # --- RAG (LSH file search per subtask) ---
+    rag_enabled: bool = True
+    rag_top_k: int = 6          # max extra files surfaced per subtask
+
+    # --- Context token budget for entropy_select ---
+    token_budget: int = 3000    # tokens; BPE-accurate when entropy_engine installed
+
     # --- Dashboard ---
     dashboard_port: int = 9000
     dashboard_host: str = "127.0.0.1"
