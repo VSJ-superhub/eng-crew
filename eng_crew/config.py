@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     def resolve_data_dir(cls, v: object) -> Path:
         return Path(str(v)).expanduser().resolve()
 
+    _CLI_ONLY_ROLES: frozenset = frozenset({"executor", "simple_executor"})
+    _CLI_PROVIDERS: frozenset = frozenset({"claude_cli", "gemini_cli"})
+    _CLI_FALLBACK_PROVIDER: str = "claude_cli"
+    _CLI_FALLBACK_MODEL: str = "claude-haiku-4-5-20251001"
+
     def get_agent_config(self, role: str) -> Dict[str, str]:
         """Return {provider, model} for a given agent role."""
         # 1. Check agent-specific settings in env/config
@@ -97,25 +102,34 @@ class Settings(BaseSettings):
         m = getattr(self, f"{role}_model", None)
 
         if p and m:
-            return {"provider": p, "model": m}
+            cfg = {"provider": p, "model": m}
+        else:
+            # 2. Check active stack
+            from .stacks import get_stack_config
+            stack_cfg = get_stack_config(self.stack)
+            if role in stack_cfg:
+                cfg = {
+                    "provider": p or stack_cfg[role]["provider"],
+                    "model":    m or stack_cfg[role]["model"],
+                }
+            else:
+                # 3. Use global provider override (ENG_CREW_PROVIDER) if set, else default_provider
+                effective_provider = self.provider or self.default_provider
+                cfg = {
+                    "provider": p or effective_provider,
+                    "model":    m or self.default_model,
+                }
 
-        # 2. Check active stack
-        from .stacks import get_stack_config
-        stack_cfg = get_stack_config(self.stack)
-        if role in stack_cfg:
-            return {
-                "provider": p or stack_cfg[role]["provider"],
-                "model":    m or stack_cfg[role]["model"]
-            }
+        # Executor roles must use a CLI provider — they drive agentic file edits.
+        if role in self._CLI_ONLY_ROLES and cfg["provider"] not in self._CLI_PROVIDERS:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Role %r configured with non-CLI provider %r — overriding to %r/%r",
+                role, cfg["provider"], self._CLI_FALLBACK_PROVIDER, self._CLI_FALLBACK_MODEL,
+            )
+            cfg = {"provider": self._CLI_FALLBACK_PROVIDER, "model": self._CLI_FALLBACK_MODEL}
 
-        # 3. Use global provider override (ENG_CREW_PROVIDER) if set, else default_provider
-        effective_provider = self.provider or self.default_provider
-
-        # 4. Fallback to defaults
-        return {
-            "provider": p or effective_provider,
-            "model":    m or self.default_model
-        }
+        return cfg
 
     def ensure_data_dir(self) -> Path:
         self.data_dir.mkdir(parents=True, exist_ok=True)

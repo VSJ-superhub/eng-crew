@@ -4,41 +4,43 @@ from __future__ import annotations
 import os
 from typing import Any
 
+_CLI_PROVIDERS = frozenset({"claude_cli", "gemini_cli"})
+
 STACKS: dict[str, dict[str, Any]] = {
     "quality": {
         "description": "Max quality - Claude Sonnet everywhere",
-        "orchestrator":    {"provider": "anthropic", "model": "claude-sonnet-4-6"},
-        "architect":       {"provider": "anthropic", "model": "claude-sonnet-4-6"},
-        "coder":           {"provider": "anthropic", "model": "claude-sonnet-4-6"},
-        "reviewer":        {"provider": "anthropic", "model": "claude-sonnet-4-6"},
-        "executor":        {"provider": "anthropic", "model": "claude-haiku-4-5-20251001"},
+        "orchestrator":    {"provider": "anthropic",  "model": "claude-sonnet-4-6"},
+        "architect":       {"provider": "anthropic",  "model": "claude-sonnet-4-6"},
+        "coder":           {"provider": "anthropic",  "model": "claude-sonnet-4-6"},
+        "reviewer":        {"provider": "anthropic",  "model": "claude-sonnet-4-6"},
+        "executor":        {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
         "simple_executor": {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
     },
     "fast": {
         "description": "Speed-optimised - Gemini Flash everywhere",
-        "orchestrator":    {"provider": "gemini", "model": "gemini-2.0-flash"},
-        "architect":       {"provider": "gemini", "model": "gemini-2.0-flash"},
-        "coder":           {"provider": "gemini", "model": "gemini-2.0-flash"},
-        "reviewer":        {"provider": "gemini", "model": "gemini-2.0-flash"},
-        "executor":        {"provider": "gemini", "model": "gemini-2.0-flash"},
-        "simple_executor": {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
+        "orchestrator":    {"provider": "gemini",     "model": "gemini-2.0-flash"},
+        "architect":       {"provider": "gemini",     "model": "gemini-2.0-flash"},
+        "coder":           {"provider": "gemini",     "model": "gemini-2.0-flash"},
+        "reviewer":        {"provider": "gemini",     "model": "gemini-2.0-flash"},
+        "executor":        {"provider": "gemini_cli", "model": "gemini-2.0-flash"},
+        "simple_executor": {"provider": "gemini_cli", "model": "gemini-2.0-flash"},
     },
     "local": {
         "description": "Local-first - Ollama coders, Gemini for planning",
-        "orchestrator":    {"provider": "gemini",  "model": "gemini-2.0-flash"},
-        "architect":       {"provider": "gemini",  "model": "gemini-2.0-flash"},
-        "coder":           {"provider": "ollama",  "model": "qwen2.5-coder:32b"},
-        "reviewer":        {"provider": "gemini",  "model": "gemini-2.0-flash"},
-        "executor":        {"provider": "ollama",  "model": "qwen2.5-coder:7b"},
+        "orchestrator":    {"provider": "gemini",     "model": "gemini-2.0-flash"},
+        "architect":       {"provider": "gemini",     "model": "gemini-2.0-flash"},
+        "coder":           {"provider": "ollama",     "model": "qwen2.5-coder:32b"},
+        "reviewer":        {"provider": "gemini",     "model": "gemini-2.0-flash"},
+        "executor":        {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
         "simple_executor": {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
     },
     "deepseek": {
         "description": "DeepSeek R1 reasoning for all tasks",
-        "orchestrator":    {"provider": "deepseek", "model": "deepseek-chat"},
-        "architect":       {"provider": "deepseek", "model": "deepseek-chat"},
-        "coder":           {"provider": "deepseek", "model": "deepseek-reasoner"},
-        "reviewer":        {"provider": "deepseek", "model": "deepseek-chat"},
-        "executor":        {"provider": "deepseek", "model": "deepseek-chat"},
+        "orchestrator":    {"provider": "deepseek",   "model": "deepseek-chat"},
+        "architect":       {"provider": "deepseek",   "model": "deepseek-chat"},
+        "coder":           {"provider": "deepseek",   "model": "deepseek-reasoner"},
+        "reviewer":        {"provider": "deepseek",   "model": "deepseek-chat"},
+        "executor":        {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
         "simple_executor": {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
     },
     "free": {
@@ -47,10 +49,32 @@ STACKS: dict[str, dict[str, Any]] = {
         "architect":       {"provider": "openrouter", "model": "google/gemma-2-9b-it:free"},
         "coder":           {"provider": "openrouter", "model": "qwen/qwen3-coder:free"},
         "reviewer":        {"provider": "openrouter", "model": "google/gemma-2-9b-it:free"},
-        "executor":        {"provider": "openrouter", "model": "qwen/qwen3-coder:free"},
+        "executor":        {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
         "simple_executor": {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
     },
 }
+
+
+# Downgrade map: (provider, model) -> cheaper model for medium-complexity subtasks.
+# Stack-agnostic — applies whenever a resolved (provider, model) pair appears.
+#
+# Note: this targets the "medium" tier, NOT "simple". Simple tasks short-circuit
+# to the simple_executor (already on the cheapest CLI model) and never reach the
+# specialist coder. The coder only runs on the full pipeline path, which is taken
+# for "medium" and "complex" tiers — so "medium" is the tier where a cheaper coder
+# actually saves money. "complex" keeps the top model.
+_MEDIUM_DOWNGRADE: dict[tuple[str, str], str] = {
+    ("deepseek",   "deepseek-reasoner"):             "deepseek-chat",
+    ("gemini",     "gemini-2.5-pro"):                "gemini-2.0-flash",
+    ("anthropic",  "claude-sonnet-4-6"):             "claude-haiku-4-5-20251001",
+}
+
+
+def downgrade_for_tier(provider: str, model: str, tier: str) -> str:
+    """Return a cheaper model for medium-complexity subtasks, unchanged otherwise."""
+    if tier != "medium":
+        return model
+    return _MEDIUM_DOWNGRADE.get((provider, model), model)
 
 
 AVAILABLE_MODELS: dict[str, list[str]] = {

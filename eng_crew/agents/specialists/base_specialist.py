@@ -105,5 +105,6 @@ class SpecialistAgent(BaseAgent):
             role="coder",
             run_id=state.get("run_id") or 0,
             subtask_idx=subtask.get("index", 0),
+            complexity_tier=state.get("complexity_tier", "medium"),
         )
         return result.text

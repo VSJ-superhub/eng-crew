@@ -73,7 +73,25 @@ class ClaudeCLIProvider(Provider):
                     break
                 print(f"[claude_cli] Empty output (attempt {attempt + 1}/{_MAX_RETRIES})", file=sys.stderr)
             else:
-                # Fall back to stdout if stderr is empty
+                # Soft-stop: max-turns exhausted but partial output may be usable
+                try:
+                    outer = json.loads(result.stdout)
+                    if outer.get("subtype") == "error_max_turns":
+                        partial = outer.get("result", outer.get("content", "")) or ""
+                        usage = outer.get("usage") or {}
+                        input_tokens = int(usage.get("input_tokens", 0) or 0)
+                        output_tokens = int(usage.get("output_tokens", 0) or 0)
+                        cost_usd = float(outer.get("total_cost_usd") or calculate_cost(model, input_tokens, output_tokens))
+                        print(
+                            f"[claude_cli] max-turns reached after {outer.get('num_turns', '?')} turns"
+                            f" — using partial output ({len(partial)} chars)",
+                            file=sys.stderr,
+                        )
+                        text = partial
+                        break
+                except Exception:
+                    pass
+                # Hard failure — log and retry
                 err_detail = (result.stderr or result.stdout or "")[:400].strip()
                 print(f"[claude_cli] Error (code {result.returncode}): {err_detail} (attempt {attempt + 1}/{_MAX_RETRIES})", file=sys.stderr)
 

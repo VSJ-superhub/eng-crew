@@ -20,6 +20,7 @@ class BaseAgent:
         role: Optional[str] = None,
         subtask_idx: int = 0,
         run_id: int = 0,
+        complexity_tier: str = "medium",
     ) -> LLMResult:
         role = role or self.agent_type
         if self.settings is not None:
@@ -29,6 +30,15 @@ class BaseAgent:
             cfg = _global.get_agent_config(role)
         provider = cfg["provider"]
         model = cfg["model"]
+
+        from ..stacks import downgrade_for_tier
+        downgraded = downgrade_for_tier(provider, model, complexity_tier)
+        if downgraded != model:
+            print(
+                f"[{self.agent_type}] routing: {complexity_tier} tier → {provider}/{downgraded}",
+                file=sys.stderr,
+            )
+            model = downgraded
 
         try:
             result = call_llm(provider, model, prompt)
