@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     simple_executor_provider: Optional[str] = None
     simple_executor_model: Optional[str] = None
 
+    # --- Single Agent (middle tier for medium tasks: one capable call) ---
+    single_agent_provider: Optional[str] = None
+    single_agent_model: Optional[str] = None
+
     # --- General ---
     budget_usd: float = 5.0
     max_tokens: int = 8192
@@ -90,7 +94,7 @@ class Settings(BaseSettings):
     def resolve_data_dir(cls, v: object) -> Path:
         return Path(str(v)).expanduser().resolve()
 
-    _CLI_ONLY_ROLES: frozenset = frozenset({"executor", "simple_executor"})
+    _CLI_ONLY_ROLES: frozenset = frozenset({"executor", "simple_executor", "single_agent"})
     _CLI_PROVIDERS: frozenset = frozenset({"claude_cli", "gemini_cli"})
     _CLI_FALLBACK_PROVIDER: str = "claude_cli"
     _CLI_FALLBACK_MODEL: str = "claude-haiku-4-5-20251001"

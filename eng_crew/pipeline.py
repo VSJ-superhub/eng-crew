@@ -15,6 +15,7 @@ from eng_crew.agents.executor import ExecutorAgent
 from eng_crew.agents.orchestrator import OrchestratorAgent
 from eng_crew.agents.reviewer import ReviewerAgent
 from eng_crew.agents.simple_executor import SimpleExecutorAgent
+from eng_crew.agents.single_agent import SingleAgentEngineer
 from eng_crew.config import Settings
 from eng_crew.project_context import load_project_context
 from eng_crew.state import TeamState
@@ -30,12 +31,16 @@ def _build_graph(settings: Settings) -> Any:
     reviewer = ReviewerAgent(settings)
     executor = ExecutorAgent(settings)
     simple_executor = SimpleExecutorAgent(settings)
+    single_agent = SingleAgentEngineer(settings)
 
     def classify_node(state: TeamState) -> dict:
         return classifier.run(state)
 
     def simple_execute_node(state: TeamState) -> dict:
         return simple_executor.run(state)
+
+    def single_execute_node(state: TeamState) -> dict:
+        return single_agent.run(state)
 
     def _route_classify(state: TeamState) -> str:
         return state.get("_next") or "full"
@@ -79,6 +84,7 @@ def _build_graph(settings: Settings) -> Any:
     graph = StateGraph(TeamState)
     graph.add_node("classify", classify_node)
     graph.add_node("simple_execute", simple_execute_node)
+    graph.add_node("single_execute", single_execute_node)
     graph.add_node("orchestrator", orchestrator_node)
     graph.add_node("architect", architect_node)
     graph.add_node("hitl_gate", hitl_gate_node)
@@ -89,9 +95,11 @@ def _build_graph(settings: Settings) -> Any:
     graph.set_entry_point("classify")
     graph.add_conditional_edges("classify", _route_classify, {
         "simple": "simple_execute",
+        "single": "single_execute",
         "full":   "orchestrator",
     })
     graph.add_edge("simple_execute", END)
+    graph.add_edge("single_execute", END)
 
     graph.add_conditional_edges(
         "orchestrator",

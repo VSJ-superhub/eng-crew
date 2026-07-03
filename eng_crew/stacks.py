@@ -15,6 +15,7 @@ STACKS: dict[str, dict[str, Any]] = {
         "reviewer":        {"provider": "anthropic",  "model": "claude-sonnet-4-6"},
         "executor":        {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
         "simple_executor": {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
+        "single_agent":    {"provider": "claude_cli", "model": "claude-sonnet-4-6"},
     },
     "fast": {
         "description": "Speed-optimised - Gemini Flash everywhere",
@@ -24,6 +25,7 @@ STACKS: dict[str, dict[str, Any]] = {
         "reviewer":        {"provider": "gemini",     "model": "gemini-2.0-flash"},
         "executor":        {"provider": "gemini_cli", "model": "gemini-2.0-flash"},
         "simple_executor": {"provider": "gemini_cli", "model": "gemini-2.0-flash"},
+        "single_agent":    {"provider": "gemini_cli", "model": "gemini-2.0-flash"},
     },
     "local": {
         "description": "Local-first - Ollama coders, Gemini for planning",
@@ -33,6 +35,7 @@ STACKS: dict[str, dict[str, Any]] = {
         "reviewer":        {"provider": "gemini",     "model": "gemini-2.0-flash"},
         "executor":        {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
         "simple_executor": {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
+        "single_agent":    {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
     },
     "deepseek": {
         "description": "DeepSeek R1 reasoning for all tasks",
@@ -42,6 +45,7 @@ STACKS: dict[str, dict[str, Any]] = {
         "reviewer":        {"provider": "deepseek",   "model": "deepseek-chat"},
         "executor":        {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
         "simple_executor": {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
+        "single_agent":    {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
     },
     "free": {
         "description": "Zero API cost - OpenRouter free-tier models",
@@ -51,6 +55,7 @@ STACKS: dict[str, dict[str, Any]] = {
         "reviewer":        {"provider": "openrouter", "model": "google/gemma-2-9b-it:free"},
         "executor":        {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
         "simple_executor": {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
+        "single_agent":    {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
     },
 }
 
@@ -58,11 +63,12 @@ STACKS: dict[str, dict[str, Any]] = {
 # Downgrade map: (provider, model) -> cheaper model for medium-complexity subtasks.
 # Stack-agnostic — applies whenever a resolved (provider, model) pair appears.
 #
-# Note: this targets the "medium" tier, NOT "simple". Simple tasks short-circuit
-# to the simple_executor (already on the cheapest CLI model) and never reach the
-# specialist coder. The coder only runs on the full pipeline path, which is taken
-# for "medium" and "complex" tiers — so "medium" is the tier where a cheaper coder
-# actually saves money. "complex" keeps the top model.
+# NOTE (tier routing, updated): with the single-agent middle tier, "medium" tasks
+# now short-circuit to `single_execute` (one capable CLI call) and no longer run
+# the specialist coder — only "complex" tasks take the full pipeline that reaches
+# the coder. This downgrade therefore no longer fires on the coder path in normal
+# routing; it is retained as a defensive no-op for any caller that still passes a
+# "medium" tier to a coder-model pair. The single-agent tier is the cheaper win.
 _MEDIUM_DOWNGRADE: dict[tuple[str, str], str] = {
     ("deepseek",   "deepseek-reasoner"):             "deepseek-chat",
     ("gemini",     "gemini-2.5-pro"):                "gemini-2.0-flash",
