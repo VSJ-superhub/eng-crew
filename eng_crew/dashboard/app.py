@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 # Mark this process as the dashboard so run_sprint uses dashboard HITL (in-process events).
 os.environ["_DASHBOARD_PROCESS"] = "1"
 
-from .routers import intake, projects, runs, system
+from .routers import intake, manager, projects, runs, system
 
 app = FastAPI(title="eng-crew Dashboard", docs_url=None, redoc_url=None)
 
@@ -29,6 +29,7 @@ def _spa():
 
 app.include_router(system.router)
 app.include_router(intake.router)
+app.include_router(manager.router)
 app.include_router(projects.router)
 app.include_router(runs.router)
 

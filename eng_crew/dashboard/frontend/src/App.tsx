@@ -7,6 +7,7 @@ import Backlog from './pages/Backlog'
 import Projects from './pages/Projects'
 import ProjectTasks from './pages/ProjectTasks'
 import Intake from './pages/Intake'
+import Ideate from './pages/Ideate'
 import Stacks from './pages/Stacks'
 import Review from './pages/Review'
 
@@ -62,6 +63,7 @@ export default function App() {
             <Route path='projects' element={<Projects />} />
             <Route path='projects/:id/tasks' element={<ProjectTasks />} />
             <Route path='intake' element={<Intake />} />
+            <Route path='ideate' element={<Ideate />} />
             <Route path='stacks' element={<Stacks />} />
             <Route path='review' element={<Review />} />
           </Route>

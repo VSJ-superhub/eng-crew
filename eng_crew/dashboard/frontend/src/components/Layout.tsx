@@ -6,6 +6,7 @@ import { getStacks, getAwaitingApproval, getAwaitingSubtaskReview } from '../api
 
 const NAV = [
   { to: '/', label: 'Dashboard', exact: true },
+  { to: '/ideate', label: 'Ideate', exact: false },
   { to: '/projects', label: 'Projects', exact: false },
   { to: '/review', label: 'Review', exact: false },
   { to: '/intake', label: 'Intake', exact: false },
