@@ -137,6 +137,9 @@ def _build_graph(settings: Settings) -> Any:
 
 def run_pipeline(task: str, project_path: str, settings: Settings) -> TeamState:
     """Create git branch, build graph, run agents, finalize tracker."""
+    # Callers (CLI/typer with resolve_path, dashboard) may pass a Path object.
+    # Coerce once at the boundary so tracker binds, state, and git all see a str.
+    project_path = str(project_path)
     run_id = tracker.create_run(task, project_path)
     tracker.update_run_status(run_id, "running")
 
