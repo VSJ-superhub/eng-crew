@@ -49,3 +49,6 @@ Thumbs.db
 
 # Entroly index
 .entroly/
+
+# MCP server runtime state
+.services_state.json
