@@ -1,0 +1,27 @@
+{
+  "resolvemind": {
+    "name": "ResolveMind",
+    "path": "C:/Users/alway/Projects/ResolveMind",
+    "claude_md": "C:/Users/alway/Projects/ResolveMind/CLAUDE.md"
+  },
+  "aiTutor": {
+    "name": "AI Tutor",
+    "path": "C:/Users/alway/Projects/Ai Tutor/Dev",
+    "claude_md": "C:/Users/alway/Projects/Ai Tutor/Dev/CLAUDE.md"
+  },
+  "sylvan": {
+    "name": "Sylvan Frontend",
+    "path": "C:/Users/alway/Projects/sylvan-frontend",
+    "claude_md": "C:/Users/alway/Projects/sylvan-frontend/CLAUDE.md"
+  },
+  "mkt": {
+    "name": "Storm Call Machine",
+    "path": "C:/Users/alway/Projects/syl-rcpnst-main/mkt-team",
+    "claude_md": "C:/Users/alway/Projects/syl-rcpnst-main/mkt-team/CLAUDE.md"
+  },
+  "billing": {
+    "name": "Billing System for Food Truck India",
+    "path": "C:/Users/alway/Projects/billing_system",
+    "claude_md": "C:/Users/alway/Projects/billing_system/ARCHITECTURE.md"
+  }
+}
