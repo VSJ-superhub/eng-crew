@@ -100,9 +100,21 @@ class ComplexityClassifierAgent(BaseAgent):
     def run(self, state: TeamState) -> dict:
         task = state.get("raw_task", "")
         tier = classify(task)
+        allow_full = getattr(self.settings, "enable_multi_agent", False)
         print(f"[complexity] tier={tier!r} for task: {task[:80]!r}", file=sys.stderr)
         # simple  -> single-shot executor (trivial edits)
         # medium  -> single-agent tier (one capable call, plans+codes+tests)
-        # complex -> full multi-agent graph (architect/critic/HITL/reviewer fan-out)
-        next_step = {"simple": "simple", "medium": "single", "complex": "full"}[tier]
+        # complex -> single-agent by default; the full multi-agent graph
+        #            (architect/critic/HITL/reviewer fan-out) is an explicit
+        #            opt-in via settings.enable_multi_agent. Keyword heuristics
+        #            are too coarse to justify silently switching into a much
+        #            more expensive, lossier execution mode.
+        complex_step = "full" if allow_full else "single"
+        next_step = {"simple": "simple", "medium": "single", "complex": complex_step}[tier]
+        if tier == "complex" and not allow_full:
+            print(
+                "[complexity] 'complex' task handled by single-agent tier "
+                "(multi-agent graph disabled; set ENG_CREW_ENABLE_MULTI_AGENT=true to opt in)",
+                file=sys.stderr,
+            )
         return {**state, "complexity_tier": tier, "_next": next_step}

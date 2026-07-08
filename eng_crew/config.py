@@ -89,6 +89,16 @@ class Settings(BaseSettings):
     branch_prefix: str = "ai-team"
     require_approval: bool = True
 
+    # Full multi-agent decomposition (architect -> critic -> HITL -> specialist
+    # coders -> reviewer -> executor) is an explicit opt-in escape hatch. By
+    # default every task runs on the single-agent tier: one capable agentic CLI
+    # call that plans, codes, and tests in a single context. Multi-agent
+    # orchestration adds token cost, latency, and lossy handoffs between agents;
+    # it rarely beats a single strong agent on real coding tasks. Set this to
+    # true (ENG_CREW_ENABLE_MULTI_AGENT=true) only when you specifically want the
+    # decomposition graph for large, parallelizable work.
+    enable_multi_agent: bool = False
+
     @field_validator("data_dir", mode="before")
     @classmethod
     def resolve_data_dir(cls, v: object) -> Path:
