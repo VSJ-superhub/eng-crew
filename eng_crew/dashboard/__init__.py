@@ -8,61 +8,17 @@ if TYPE_CHECKING:
     from eng_crew.config import Settings
 
 
-def create_app(settings: "Settings") -> "FastAPI":
-    from fastapi import FastAPI
-    from fastapi.responses import JSONResponse
+def create_app(settings: "Settings | None" = None) -> "FastAPI":
+    """Return the canonical eng-crew dashboard app.
 
-    from eng_crew import tracker
+    The full dashboard (SPA + system/intake/projects/runs routers, including the
+    HITL approve flow) is defined as a module-level app in
+    ``eng_crew.dashboard.app``. This factory exists so callers such as the CLI
+    (`eng-crew dashboard`) get exactly the same app as
+    ``python -m eng_crew.dashboard`` instead of a divergent stub.
 
-    app = FastAPI(title="eng-crew dashboard", version="0.1.0")
-
-    @app.get("/health")
-    def health():
-        return {"status": "ok"}
-
-    @app.get("/api/runs")
-    def list_runs(limit: int = 50):
-        try:
-            import sqlite3
-            db = settings.data_dir / "tracking.db"
-            if not db.exists():
-                return []
-            conn = sqlite3.connect(str(db))
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (limit,)
-            ).fetchall()
-            conn.close()
-            return [dict(r) for r in rows]
-        except Exception as exc:
-            return JSONResponse({"error": str(exc)}, status_code=500)
-
-    @app.post("/api/runs/{run_id}/approve")
-    def approve_run(run_id: int):
-        import json
-        import sqlite3
-        db = settings.data_dir / "tracking.db"
-        conn = sqlite3.connect(str(db))
-        conn.execute(
-            "UPDATE runs SET hitl_decision=? WHERE id=?",
-            (json.dumps({"approved": True}), run_id),
-        )
-        conn.commit()
-        conn.close()
-        return {"approved": True}
-
-    @app.post("/api/runs/{run_id}/reject")
-    def reject_run(run_id: int, feedback: str = ""):
-        import json
-        import sqlite3
-        db = settings.data_dir / "tracking.db"
-        conn = sqlite3.connect(str(db))
-        conn.execute(
-            "UPDATE runs SET hitl_decision=? WHERE id=?",
-            (json.dumps({"approved": False, "feedback": feedback}), run_id),
-        )
-        conn.commit()
-        conn.close()
-        return {"approved": False}
-
+    ``settings`` is accepted for backward compatibility; the app reads its
+    configuration from the environment via ``eng_crew.config`` at import time.
+    """
+    from eng_crew.dashboard.app import app
     return app
