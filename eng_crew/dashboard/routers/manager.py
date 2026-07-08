@@ -28,6 +28,12 @@ class ManagerDispatchPayload(BaseModel):
     project_path: str
 
 
+class ManagerRememberPayload(BaseModel):
+    project_path: str
+    history: List[dict] = []
+    project_name: str = ""
+
+
 @router.post("/chat")
 async def api_manager_chat(payload: ManagerChatPayload):
     """One grounded manager turn. Returns {reply, proposal} where proposal is
@@ -67,3 +73,20 @@ async def api_manager_dispatch(payload: ManagerDispatchPayload):
         return JSONResponse({"error": str(e)}, status_code=500)
 
     return JSONResponse({"run_id": run_id})
+
+
+@router.post("/remember")
+async def api_manager_remember(payload: ManagerRememberPayload):
+    """Distill an ideation session into the project's persistent vision memory.
+    Best-effort; called on session end (e.g. the Ideate page reset)."""
+    if not payload.project_path or not payload.history:
+        return JSONResponse({"ok": True, "skipped": True})
+    from ...manager import remember
+
+    try:
+        await asyncio.to_thread(
+            remember, payload.project_path, payload.history, payload.project_name
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"ok": True})

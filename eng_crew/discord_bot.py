@@ -411,9 +411,22 @@ async def cmd_ideate(interaction: discord.Interaction, project: str):
 async def cmd_endideate(interaction: discord.Interaction):
     cid = interaction.channel_id
     _ideate_mode.discard(cid)
-    _ideate_history.pop(cid, None)
-    _ideate_project.pop(cid, None)
-    await interaction.response.send_message("Exited ideation mode. Back to direct dispatch.")
+    history = _ideate_history.pop(cid, None)
+    cfg = _ideate_project.pop(cid, None)
+    # Distill this session into the project's persistent vision memory (background).
+    if history and cfg:
+        loop = asyncio.get_running_loop()
+
+        def _remember():
+            from . import manager
+            manager.remember(cfg["path"], history, cfg.get("name", ""))
+
+        loop.run_in_executor(bot.executor, _remember)
+        await interaction.response.send_message(
+            "Exited ideation mode — I'll remember what we discussed. Back to direct dispatch."
+        )
+    else:
+        await interaction.response.send_message("Exited ideation mode. Back to direct dispatch.")
 
 
 def main() -> None:

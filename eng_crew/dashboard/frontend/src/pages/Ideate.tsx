@@ -109,7 +109,23 @@ export default function Ideate() {
     }
   };
 
+  const rememberSession = () => {
+    // Distill this session into the project's persistent vision memory (best-effort).
+    if (messages.length && selectedProject?.project_path) {
+      fetch('/api/manager/remember', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_path: selectedProject.project_path,
+          history: messages.map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content })),
+          project_name: selectedProject.name ?? '',
+        }),
+      }).catch(() => {});
+    }
+  };
+
   const reset = () => {
+    rememberSession();
     setMessages([]); setProposal(null); setBuilds([]); setError(''); setInput('');
   };
 

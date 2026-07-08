@@ -90,8 +90,13 @@ def _extract_proposal(text: str) -> tuple[str, Optional[dict]]:
     return reply, {"task": task, "rationale": str(obj.get("rationale", "")).strip()}
 
 
-def _build_prompt(history: list[dict], message: str, project_context: str) -> str:
+def _build_prompt(history: list[dict], message: str, project_context: str, vision: str) -> str:
     parts = [_SYSTEM]
+    if vision:
+        parts.append(
+            "\n=== REMEMBERED PRODUCT VISION (from prior conversations; your evolving "
+            "understanding of what the user wants — build on it, refine it) ===\n" + vision
+        )
     if project_context:
         parts.append(f"\n=== PROJECT ORIENTATION (for context; verify against the code) ===\n{project_context}")
     if history:
@@ -120,7 +125,9 @@ def chat(
 
     Returns a ManagerReply(reply, proposal).
     """
-    prompt = _build_prompt(history or [], message, project_context)
+    from . import vision as _vision
+    remembered = _vision.get_vision(project_path)
+    prompt = _build_prompt(history or [], message, project_context, remembered)
     result = call_llm(
         MANAGER_PROVIDER,
         MANAGER_MODEL,
@@ -147,6 +154,13 @@ def dispatch(task: str, project_path: str, *, claude_md_path: str = "") -> int:
     settings = load_settings().model_copy(update={"require_approval": False})
     run_id = tracker.create_run(task, project_path)
 
+    # Remember the dispatched work as part of the product vision.
+    try:
+        from . import vision as _vision
+        _vision.record_build(project_path, task)
+    except Exception:
+        pass
+
     def _bg() -> None:
         try:
             run_task(task=task, project_path=project_path, run_id=run_id, settings=settings)
@@ -164,3 +178,13 @@ def status(run_id: int) -> Optional[dict]:
     """Current status/detail for a dispatched build."""
     from . import tracker
     return tracker.get_run_detail(run_id)
+
+
+def remember(project_path: str, history: list[dict], project_name: str = "") -> str:
+    """Distill an ideation conversation into the project's persistent vision memory.
+
+    Call this at session end (e.g. Discord /endideate, dashboard reset). Blocking —
+    surfaces should run it on a background thread. Returns the updated vision text.
+    """
+    from . import vision as _vision
+    return _vision.remember(project_path, history or [], project_name)
