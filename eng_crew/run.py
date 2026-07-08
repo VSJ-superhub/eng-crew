@@ -18,10 +18,16 @@ def run_task(
     claude_md_path: str = "",
     *,
     settings=None,
+    run_id: int | None = None,
 ) -> TeamState:
-    """Run a single task end-to-end. Blocking."""
+    """Run a single task end-to-end. Blocking.
+
+    ``run_id`` lets a caller (e.g. the Discord bot) pre-create the run row so
+    it can bridge the HITL approval gate via tracker.set_hitl_decision while
+    the pipeline polls with tracker.get_hitl_decision.
+    """
     cfg = settings or load_settings()
-    return run_pipeline(task=task, project_path=project_path, settings=cfg)
+    return run_pipeline(task=task, project_path=project_path, settings=cfg, run_id=run_id)
 
 
 def run_project(

@@ -30,6 +30,8 @@ from ...tracker import (
     set_pause_requested,
     get_project_by_path,
     get_pending_subtask_reviews,
+    set_hitl_decision,
+    get_runs_by_status,
 )
 from ...config import CLAUDE_WEEKLY_BUDGET
 
@@ -239,37 +241,43 @@ async def api_backlog_run(item_id: int):
 
 @router.post("/runs/{run_id}/approve")
 async def api_run_approve(run_id: int, payload: ApprovePayload):
-    from ...hitl import resolve_dashboard
-    resolve_dashboard(run_id, payload.approved, payload.feedback, payload.selected_task_ids, payload.task_comments)
+    # HITL is bridged through the DB: the pipeline's hitl_gate_node polls
+    # tracker.get_hitl_decision while it waits at "awaiting_approval".
+    set_hitl_decision(run_id, {
+        "approved": payload.approved,
+        "feedback": payload.feedback or None,
+        "selected_task_ids": payload.selected_task_ids,
+        "task_comments": payload.task_comments,
+    })
     return JSONResponse({"ok": True})
 
 @router.get("/runs/awaiting-approval")
 async def api_runs_awaiting():
-    from ...hitl import pending_run_ids
-    return JSONResponse(pending_run_ids())
+    return JSONResponse([r["id"] for r in get_runs_by_status("awaiting_approval")])
 
 @router.get("/runs/awaiting-subtask-review")
 async def api_runs_awaiting_subtask_review():
-    from ...hitl import pending_subtask_review_ids
-    return JSONResponse({"run_ids": pending_subtask_review_ids(), "reviews": get_pending_subtask_reviews()})
+    # Per-subtask human review is not wired into the current pipeline graph
+    # (dispatcher -> reviewer -> executor -> orchestrator), so there is never
+    # anything pending here. Kept as a stable endpoint for the frontend poller.
+    return JSONResponse({"run_ids": [], "reviews": get_pending_subtask_reviews()})
 
 @router.post("/runs/{run_id}/subtask-review")
 async def api_subtask_review(run_id: int, payload: SubtaskReviewPayload):
-    from ...hitl import resolve_subtask_review
-    resolve_subtask_review(run_id, payload.approved)
+    # No-op: subtask-review is not part of the active pipeline (see above).
     return JSONResponse({"ok": True})
 
 @router.post("/runs/{run_id}/retry")
 async def api_run_retry(run_id: int):
     from ...run import run_task as _run_task
-    from ...hitl import dashboard_prompt
     run = get_run_detail(run_id)
     if not run: return JSONResponse({"error": "not found"}, status_code=404)
     def _bg():
         try:
-            from ...hitl import dashboard_subtask_review
-            _run_task(task=run["task_text"], project_path=run["project_path"], claude_md_path=run["claude_md_path"], 
-                      hitl_fn=dashboard_prompt, subtask_review_fn=dashboard_subtask_review)
+            # The pipeline's hitl_gate_node handles approval via the DB-poll
+            # bridge automatically; no callbacks need to be passed in.
+            _run_task(task=run["task_text"], project_path=run["project_path"],
+                      claude_md_path=run.get("claude_md_path") or "")
         except Exception: pass
     threading.Thread(target=_bg, daemon=True).start()
     return JSONResponse({"ok": True})
