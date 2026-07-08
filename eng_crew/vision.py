@@ -12,6 +12,9 @@ can read or hand-edit it. Kept concise and LLM-maintained (merged, not appended)
 from __future__ import annotations
 
 import hashlib
+import os
+import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,5 +100,47 @@ def remember(project_path: str, history: list[dict], project_name: str = "") -> 
     updated = distill(get_vision(project_path), convo, project_name)
     if updated:
         set_vision(project_path, updated)
+        # Local file is the Manager's fast working memory; also mirror the
+        # distilled snapshot into the yourmemory palace as the canonical,
+        # cross-project system of record. Best-effort, off the critical path.
+        sync_to_palace(project_path, project_name, updated)
         return updated
     return get_vision(project_path)
+
+
+# ── yourmemory palace sync (best-effort) ────────────────────────────────────────
+
+def _yourmemory_bin() -> str | None:
+    """Resolve the yourmemory CLI: env override -> known build -> PATH."""
+    cand = os.environ.get("YOURMEMORY_BIN")
+    if cand and Path(cand).exists():
+        return cand
+    known = Path("C:/Users/alway/Projects/yourmemory/target/debug/yourmemory.exe")
+    if known.exists():
+        return str(known)
+    return shutil.which("yourmemory")
+
+
+def sync_to_palace(project_path: str, project_name: str, vision_text: str) -> None:
+    """Mirror the distilled vision into the yourmemory palace as a fact.
+
+    Best-effort: never raises, short timeout. The local vision file remains the
+    source the Manager reads on every turn; the palace is the durable,
+    cross-project record.
+    """
+    if not (vision_text or "").strip():
+        return
+    binp = _yourmemory_bin()
+    if not binp:
+        return
+    header = f"[eng-crew product vision — {project_name or project_path}]"
+    fact = f"{header}\n{vision_text.strip()}"
+    try:
+        subprocess.run(
+            [binp, "persist", fact],
+            capture_output=True,
+            timeout=20,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+    except Exception as e:
+        print(f"[vision] palace sync skipped: {e}", file=sys.stderr)
