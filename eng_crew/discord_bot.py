@@ -31,6 +31,13 @@ from discord import app_commands
 
 BOT_CONFIG_PATH = Path(__file__).parent / "bot_config.json"
 
+# ── Per-channel ideation state ──────────────────────────────────────────────────
+# When a channel is in ideation mode, @mention/DM messages are routed to the
+# grounded manager instead of being dispatched as a task.
+_ideate_project: dict[int, dict] = {}   # channel_id -> project cfg
+_ideate_history: dict[int, list] = {}   # channel_id -> [{"role","content"}]
+_ideate_mode: set[int] = set()          # channel_ids currently in ideation mode
+
 
 # ── Project resolution ──────────────────────────────────────────────────────────
 def load_projects() -> dict:
@@ -182,6 +189,72 @@ async def _post_confirm(target, projects: dict, project_key: str, task: str) -> 
     await target.reply(embed=embed, view=ConfirmView(cfg, task))
 
 
+# ── Ideation mode (grounded manager) ────────────────────────────────────────────
+
+class IdeateBuildView(discord.ui.View):
+    """Shown on a manager build proposal — dispatch it or keep ideating."""
+    def __init__(self, cfg: dict, task: str):
+        super().__init__(timeout=600)
+        self._cfg = cfg
+        self._task = task
+
+    @discord.ui.button(label="🚀 Build it", style=discord.ButtonStyle.success)
+    async def build(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.defer()
+            for item in self.children:
+                item.disabled = True
+            await interaction.edit_original_response(content="🚀 Dispatching to eng-crew...", view=self)
+            loop = asyncio.get_running_loop()
+            asyncio.create_task(_execute(interaction.channel, self._cfg, self._task, loop))
+            self.stop()
+        except Exception as e:
+            try:
+                await interaction.edit_original_response(content=f"❌ Error: {e}", view=None)
+            except Exception:
+                pass
+
+    @discord.ui.button(label="✏️ Keep refining", style=discord.ButtonStyle.secondary)
+    async def refine(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="Keep going — tell me more.", view=self)
+        self.stop()
+
+
+async def _handle_ideate(message: discord.Message, text: str) -> None:
+    """Route a message to the grounded manager for the channel's active project."""
+    cfg = _ideate_project[message.channel.id]
+    history = _ideate_history.setdefault(message.channel.id, [])
+    loop = asyncio.get_running_loop()
+
+    def _call():
+        from . import manager
+        return manager.chat(text, list(history), cfg["path"], cfg.get("name", ""))
+
+    async with message.channel.typing():
+        try:
+            reply = await loop.run_in_executor(bot.executor, _call)
+        except Exception as e:
+            await message.reply(f"❌ Manager error: {e}")
+            return
+
+    history.append({"role": "user", "content": text})
+    history.append({"role": "assistant", "content": reply.reply})
+
+    body = reply.reply or "(no response)"
+    for chunk in [body[i:i + 1900] for i in range(0, len(body), 1900)]:
+        await message.channel.send(chunk)
+
+    if reply.proposal and reply.proposal.get("task"):
+        prop = reply.proposal
+        desc = prop["task"]
+        if prop.get("rationale"):
+            desc += f"\n\n*{prop['rationale']}*"
+        embed = discord.Embed(title="💡 Ready to build", description=desc, color=discord.Color.purple())
+        await message.channel.send(embed=embed, view=IdeateBuildView(cfg, prop["task"]))
+
+
 # ── Bot ─────────────────────────────────────────────────────────────────────────
 class EngCrewBot(discord.Client):
     def __init__(self):
@@ -211,6 +284,15 @@ class EngCrewBot(discord.Client):
         for m in message.mentions:
             content = content.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
         content = content.strip()
+
+        # Ideation mode: route everything to the grounded manager.
+        cid = message.channel.id
+        if cid in _ideate_mode and cid in _ideate_project:
+            if not content:
+                await message.reply("Describe an idea, or use `/task` for direct dispatch / `/endideate` to exit.")
+                return
+            await _handle_ideate(message, content)
+            return
 
         projects = load_projects()
         if not content:
@@ -301,6 +383,37 @@ async def cmd_projects(interaction: discord.Interaction):
         return
     lines = [f"`{k}` — {v.get('name', k)}\n    `{v['path']}`" for k, v in projects.items()]
     await interaction.response.send_message("**Projects:**\n" + "\n".join(lines))
+
+
+@bot.tree.command(name="ideate", description="Start an ideation session with the AI manager on a project")
+@app_commands.describe(project="Project alias (see /projects)")
+async def cmd_ideate(interaction: discord.Interaction, project: str):
+    projects = load_projects()
+    if project not in projects:
+        keys = ", ".join(f"`{k}`" for k in projects) or "none — edit eng_crew/bot_config.json"
+        await interaction.response.send_message(
+            f"❓ Unknown project `{project}`. Available: {keys}", ephemeral=True
+        )
+        return
+    cfg = projects[project]
+    cid = interaction.channel_id
+    _ideate_project[cid] = cfg
+    _ideate_history[cid] = []
+    _ideate_mode.add(cid)
+    await interaction.response.send_message(
+        f"💡 **Ideation mode on {cfg.get('name', project)}.** Talk through an idea — I'll ground it "
+        f"in the real code, ask a question or two, and propose something to build.\n"
+        f"`/task` still works for direct dispatch · `/endideate` to exit."
+    )
+
+
+@bot.tree.command(name="endideate", description="Exit ideation mode in this channel")
+async def cmd_endideate(interaction: discord.Interaction):
+    cid = interaction.channel_id
+    _ideate_mode.discard(cid)
+    _ideate_history.pop(cid, None)
+    _ideate_project.pop(cid, None)
+    await interaction.response.send_message("Exited ideation mode. Back to direct dispatch.")
 
 
 def main() -> None:
