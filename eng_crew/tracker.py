@@ -67,6 +67,22 @@ def close_connection() -> None:
             print(f"[tracker] close_connection error: {e}", file=sys.stderr)
 
 
+def _alter(conn, sql: str) -> None:
+    """Apply one schema migration.
+
+    Each statement is isolated: these all used to share a single try/except, so
+    the first failure — reliably "duplicate column name: type" — skipped every
+    migration after it, and a fresh database ended up missing later columns such
+    as runs.log_path. An already-applied column is the normal case, not a
+    problem worth reporting.
+    """
+    try:
+        conn.execute(sql)
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e).lower():
+            print(f"[tracker] MIGRATION WARNING: {sql[:70]}: {e}", file=sys.stderr)
+
+
 def _init_db():
     with _connect() as _conn:
         _conn.executescript("""
@@ -228,26 +244,26 @@ def _init_db():
             _mig = _connect()
             se_cols = [r[1] for r in _mig.execute("PRAGMA table_info(subtask_events)").fetchall()]
             if "specialist_name" not in se_cols:
-                _mig.execute("ALTER TABLE subtask_events ADD COLUMN specialist_name TEXT DEFAULT ''")
+                _alter(_mig, "ALTER TABLE subtask_events ADD COLUMN specialist_name TEXT DEFAULT ''")
             if "result_text" not in se_cols:
-                _mig.execute("ALTER TABLE subtask_events ADD COLUMN result_text TEXT DEFAULT ''")
+                _alter(_mig, "ALTER TABLE subtask_events ADD COLUMN result_text TEXT DEFAULT ''")
             run_cols = [r[1] for r in _mig.execute("PRAGMA table_info(runs)").fetchall()]
             if "final_summary" not in run_cols:
-                _mig.execute("ALTER TABLE runs ADD COLUMN final_summary TEXT")
+                _alter(_mig, "ALTER TABLE runs ADD COLUMN final_summary TEXT")
             if "current_subtask_idx" not in run_cols:
-                _mig.execute("ALTER TABLE runs ADD COLUMN current_subtask_idx INTEGER DEFAULT 0")
+                _alter(_mig, "ALTER TABLE runs ADD COLUMN current_subtask_idx INTEGER DEFAULT 0")
             if "current_subtask_desc" not in run_cols:
-                _mig.execute("ALTER TABLE runs ADD COLUMN current_subtask_desc TEXT")
+                _alter(_mig, "ALTER TABLE runs ADD COLUMN current_subtask_desc TEXT")
             sp_cols = [r[1] for r in _mig.execute("PRAGMA table_info(sprint_plans)").fetchall()]
             if "design_text" not in sp_cols:
-                _mig.execute("ALTER TABLE sprint_plans ADD COLUMN design_text TEXT DEFAULT ''")
+                _alter(_mig, "ALTER TABLE sprint_plans ADD COLUMN design_text TEXT DEFAULT ''")
             if "critique_text" not in sp_cols:
-                _mig.execute("ALTER TABLE sprint_plans ADD COLUMN critique_text TEXT DEFAULT ''")
+                _alter(_mig, "ALTER TABLE sprint_plans ADD COLUMN critique_text TEXT DEFAULT ''")
             bl_cols = [r[1] for r in _mig.execute("PRAGMA table_info(backlog_items)").fetchall()]
             if "type" not in bl_cols:
-                _mig.execute("ALTER TABLE backlog_items ADD COLUMN type TEXT DEFAULT 'feature'")
+                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN type TEXT DEFAULT 'feature'")
             if "project_id" not in bl_cols:
-                _mig.execute("ALTER TABLE backlog_items ADD COLUMN project_id INTEGER REFERENCES projects(id)")
+                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN project_id INTEGER REFERENCES projects(id)")
                 # Back-fill project_id from project_path
                 _mig.execute("""
                     UPDATE backlog_items SET project_id = (
@@ -255,61 +271,61 @@ def _init_db():
                     ) WHERE project_id IS NULL
                 """)
             if "run_id" not in bl_cols:
-                _mig.execute("ALTER TABLE backlog_items ADD COLUMN run_id INTEGER REFERENCES runs(id)")
+                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN run_id INTEGER REFERENCES runs(id)")
             if "subtask_id" not in bl_cols:
-                _mig.execute("ALTER TABLE backlog_items ADD COLUMN subtask_id TEXT")
+                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN subtask_id TEXT")
             if "type" not in bl_cols:
-                _mig.execute("ALTER TABLE backlog_items ADD COLUMN type TEXT DEFAULT 'issue'")
+                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN type TEXT DEFAULT 'issue'")
             if "parent_issue_id" not in bl_cols:
-                _mig.execute("ALTER TABLE backlog_items ADD COLUMN parent_issue_id INTEGER")
+                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN parent_issue_id INTEGER")
             if "active_sprint_id" not in bl_cols:
-                _mig.execute("ALTER TABLE backlog_items ADD COLUMN active_sprint_id INTEGER")
+                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN active_sprint_id INTEGER")
             if "agent_type" not in bl_cols:
-                _mig.execute("ALTER TABLE backlog_items ADD COLUMN agent_type TEXT DEFAULT ''")
+                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN agent_type TEXT DEFAULT ''")
             if "target_files" not in bl_cols:
-                _mig.execute("ALTER TABLE backlog_items ADD COLUMN target_files TEXT DEFAULT ''")
+                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN target_files TEXT DEFAULT ''")
             if "pause_requested" not in run_cols:
-                _mig.execute("ALTER TABLE runs ADD COLUMN pause_requested INTEGER DEFAULT 0")
+                _alter(_mig, "ALTER TABLE runs ADD COLUMN pause_requested INTEGER DEFAULT 0")
             ps_cols = [r[1] for r in _mig.execute("PRAGMA table_info(plan_sprints)").fetchall()]
             if "acceptance_criteria" not in ps_cols:
-                _mig.execute("ALTER TABLE plan_sprints ADD COLUMN acceptance_criteria TEXT DEFAULT ''")
+                _alter(_mig, "ALTER TABLE plan_sprints ADD COLUMN acceptance_criteria TEXT DEFAULT ''")
             if "scope_hints" not in ps_cols:
-                _mig.execute("ALTER TABLE plan_sprints ADD COLUMN scope_hints TEXT DEFAULT '[]'")
+                _alter(_mig, "ALTER TABLE plan_sprints ADD COLUMN scope_hints TEXT DEFAULT '[]'")
             if "replans" not in sp_cols:
-                _mig.execute("ALTER TABLE sprint_plans ADD COLUMN replans TEXT DEFAULT '[]'")
+                _alter(_mig, "ALTER TABLE sprint_plans ADD COLUMN replans TEXT DEFAULT '[]'")
             if "complexity" not in ps_cols:
-                _mig.execute("ALTER TABLE plan_sprints ADD COLUMN complexity TEXT DEFAULT 'medium'")
+                _alter(_mig, "ALTER TABLE plan_sprints ADD COLUMN complexity TEXT DEFAULT 'medium'")
             if "risk_flags" not in ps_cols:
-                _mig.execute("ALTER TABLE plan_sprints ADD COLUMN risk_flags TEXT DEFAULT '[]'")
+                _alter(_mig, "ALTER TABLE plan_sprints ADD COLUMN risk_flags TEXT DEFAULT '[]'")
             pp_cols = [r[1] for r in _mig.execute("PRAGMA table_info(project_plans)").fetchall()]
             if "review_result" not in pp_cols:
-                _mig.execute("ALTER TABLE project_plans ADD COLUMN review_result TEXT DEFAULT ''")
+                _alter(_mig, "ALTER TABLE project_plans ADD COLUMN review_result TEXT DEFAULT ''")
             ps_run_cols = [r[1] for r in _mig.execute("PRAGMA table_info(plan_sprints)").fetchall()]
             if "run_id" not in ps_run_cols:
-                _mig.execute("ALTER TABLE plan_sprints ADD COLUMN run_id INTEGER REFERENCES runs(id)")
+                _alter(_mig, "ALTER TABLE plan_sprints ADD COLUMN run_id INTEGER REFERENCES runs(id)")
             if "preprocessor_details" not in se_cols:
-                _mig.execute("ALTER TABLE subtask_events ADD COLUMN preprocessor_details TEXT")
+                _alter(_mig, "ALTER TABLE subtask_events ADD COLUMN preprocessor_details TEXT")
             if "business_summary" not in sp_cols:
-                _mig.execute("ALTER TABLE sprint_plans ADD COLUMN business_summary TEXT DEFAULT ''")
+                _alter(_mig, "ALTER TABLE sprint_plans ADD COLUMN business_summary TEXT DEFAULT ''")
             # Re-fetch ps_cols in case it was fetched before plan_sprints migration ran
             ps_cols = [r[1] for r in _mig.execute("PRAGMA table_info(plan_sprints)").fetchall()]
             if "business_summary" not in ps_cols:
-                _mig.execute("ALTER TABLE plan_sprints ADD COLUMN business_summary TEXT DEFAULT ''")
+                _alter(_mig, "ALTER TABLE plan_sprints ADD COLUMN business_summary TEXT DEFAULT ''")
             run_cols = [r[1] for r in _mig.execute("PRAGMA table_info(runs)").fetchall()]
             if "hitl_decision" not in run_cols:
-                _mig.execute("ALTER TABLE runs ADD COLUMN hitl_decision TEXT DEFAULT NULL")
+                _alter(_mig, "ALTER TABLE runs ADD COLUMN hitl_decision TEXT DEFAULT NULL")
             bl_cols = [r[1] for r in _mig.execute("PRAGMA table_info(backlog_items)").fetchall()]
             if "diff_text" not in bl_cols:
-                _mig.execute("ALTER TABLE backlog_items ADD COLUMN diff_text TEXT DEFAULT ''")
+                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN diff_text TEXT DEFAULT ''")
             sr_cols = [r[1] for r in _mig.execute("PRAGMA table_info(subtask_reviews)").fetchall()]
             if "clarification_question" not in sr_cols:
-                _mig.execute("ALTER TABLE subtask_reviews ADD COLUMN clarification_question TEXT")
+                _alter(_mig, "ALTER TABLE subtask_reviews ADD COLUMN clarification_question TEXT")
             if "clarification_response" not in sr_cols:
-                _mig.execute("ALTER TABLE subtask_reviews ADD COLUMN clarification_response TEXT")
+                _alter(_mig, "ALTER TABLE subtask_reviews ADD COLUMN clarification_response TEXT")
             if "clarification_options" not in sr_cols:
-                _mig.execute("ALTER TABLE subtask_reviews ADD COLUMN clarification_options TEXT")
+                _alter(_mig, "ALTER TABLE subtask_reviews ADD COLUMN clarification_options TEXT")
             if "log_path" not in run_cols:
-                _mig.execute("ALTER TABLE runs ADD COLUMN log_path TEXT")
+                _alter(_mig, "ALTER TABLE runs ADD COLUMN log_path TEXT")
             _mig.commit()
             # NB: no close() — the handle is pooled and reused (see _connect).
         except Exception as e:

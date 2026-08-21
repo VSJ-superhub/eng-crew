@@ -115,3 +115,112 @@ def commit_all(
         return None
     _git(["commit", "-m", message], cwd=root)
     return _git(["rev-parse", "HEAD"], cwd=root)
+
+
+# ── Worktree isolation ──────────────────────────────────────────────────────────
+#
+# Without this, a run calls ensure_branch(), which stashes the developer's
+# uncommitted work and switches the checkout they are sitting in onto a new
+# branch. A worktree gives the run its own directory and branch, and leaves the
+# main checkout — branch, working tree, and stash — untouched.
+
+def repo_root(project_path: str | Path) -> Path:
+    """Absolute path of the repository's top level."""
+    root = Path(project_path).expanduser().resolve()
+    return Path(_git(["rev-parse", "--show-toplevel"], cwd=root))
+
+
+def default_worktree_dir(project_path: str | Path) -> Path:
+    """Where worktrees live: a sibling of the repo, never inside it.
+
+    Inside the repo they would show up as untracked files in the main checkout.
+    """
+    root = repo_root(project_path)
+    return root.parent / ".eng-crew-worktrees" / root.name
+
+
+def create_worktree(
+    project_path: str | Path,
+    branch: str,
+    *,
+    worktree_dir: str | Path | None = None,
+    base: str = "HEAD",
+) -> Path:
+    """Create a worktree on a new branch. Returns its path."""
+    root = repo_root(project_path)
+    parent = Path(worktree_dir).expanduser().resolve() if worktree_dir else default_worktree_dir(root)
+    parent.mkdir(parents=True, exist_ok=True)
+    target = parent / branch.replace("/", "_")
+
+    if target.exists():
+        raise GitError(f"worktree path already exists: {target}")
+
+    _git(["worktree", "add", "-b", branch, str(target), base], cwd=root)
+    return target
+
+
+def list_worktrees(project_path: str | Path) -> list[dict]:
+    """Return [{path, branch}] for every worktree of this repo."""
+    root = repo_root(project_path)
+    out = _git(["worktree", "list", "--porcelain"], cwd=root)
+    entries: list[dict] = []
+    current: dict = {}
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            if current:
+                entries.append(current)
+            current = {"path": line[len("worktree "):]}
+        elif line.startswith("branch "):
+            current["branch"] = line[len("branch "):].replace("refs/heads/", "")
+    if current:
+        entries.append(current)
+    return entries
+
+
+def remove_worktree(project_path: str | Path, worktree_path: str | Path, *, force: bool = False) -> None:
+    """Remove a worktree. force discards uncommitted changes inside it."""
+    root = repo_root(project_path)
+    args = ["worktree", "remove"]
+    if force:
+        args.append("--force")
+    args.append(str(Path(worktree_path).expanduser().resolve()))
+    _git(args, cwd=root)
+
+
+def link_into_worktree(main_root: str | Path, worktree: str | Path, names: list[str]) -> list[str]:
+    """Link build/dependency dirs from the main checkout into a worktree.
+
+    A fresh worktree has no .venv or node_modules, so a project's tests cannot
+    run there. Linking rather than copying keeps it cheap. Best-effort: a name
+    that is missing, already present, or unlinkable is skipped, since a missing
+    link degrades verification rather than breaking the run.
+
+    Returns the names actually linked.
+    """
+    import os
+
+    main_root = Path(main_root).expanduser().resolve()
+    worktree = Path(worktree).expanduser().resolve()
+    linked: list[str] = []
+
+    for name in names:
+        source = main_root / name
+        dest = worktree / name
+        if not source.is_dir() or dest.exists():
+            continue
+        try:
+            os.symlink(source, dest, target_is_directory=True)
+            linked.append(name)
+            continue
+        except (OSError, NotImplementedError):
+            pass
+        # Windows without developer mode refuses symlinks; junctions need no
+        # elevation and behave the same for directory reads.
+        if os.name == "nt":
+            result = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(dest), str(source)],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                linked.append(name)
+    return linked

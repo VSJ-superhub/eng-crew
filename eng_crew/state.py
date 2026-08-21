@@ -50,3 +50,5 @@ class TeamState(TypedDict):
     verification_unverified: Optional[bool]
     verify_fix_count: int
     cli_session_id: Optional[str]
+    worktree_path: Optional[str]
+    main_project_path: Optional[str]

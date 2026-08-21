@@ -66,6 +66,13 @@ class Settings(BaseSettings):
     single_agent_provider: Optional[str] = None
     single_agent_model: Optional[str] = None
 
+    # --- Worktree isolation ---
+    # Each run gets its own git worktree and branch, so it never stashes the
+    # developer's changes or moves the branch they are working on.
+    worktree_isolation: bool = True
+    worktree_dir: str = ""                       # default: sibling of the repo
+    worktree_link_dirs: str = ".venv,venv,node_modules"
+
     # --- Verification gate ---
     # Runs the project's own tests/build after the agent tiers and decides the
     # run's final status. Disable only for a project with no runnable checks.

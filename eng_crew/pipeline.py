@@ -163,19 +163,49 @@ def run_pipeline(
     tracker.update_run_status(run_id, "running")
 
     branch: str | None = None
-    try:
-        branch = git_skill.ensure_branch(project_path, settings.branch_prefix, task[:48])
-    except Exception as exc:
-        log.warning("git branch creation failed: %s", exc)
+    worktree_path: str | None = None
+    main_project_path = project_path
+    # work_path is where the agents actually edit. With worktree isolation that
+    # is a private checkout; without it, the project itself.
+    work_path = project_path
 
-    ctx = load_project_context(project_path)
+    if settings.worktree_isolation and git_skill.is_git_repo(project_path):
+        try:
+            branch = git_skill.make_branch_name(settings.branch_prefix, task[:48])
+            wt = git_skill.create_worktree(
+                project_path, branch,
+                worktree_dir=settings.worktree_dir or None,
+            )
+            worktree_path = str(wt)
+            work_path = worktree_path
+            names = [n.strip() for n in settings.worktree_link_dirs.split(",") if n.strip()]
+            linked = git_skill.link_into_worktree(
+                git_skill.repo_root(project_path), wt, names
+            )
+            log.info(
+                "worktree %s on branch %s (linked: %s)",
+                wt, branch, ", ".join(linked) or "nothing",
+            )
+        except Exception as exc:
+            # Isolation is a safety improvement, not a precondition — fall back
+            # to the in-place branch rather than failing the run.
+            log.warning("worktree creation failed (%s) — falling back to in-place branch", exc)
+            branch, worktree_path, work_path = None, None, project_path
+
+    if branch is None:
+        try:
+            branch = git_skill.ensure_branch(project_path, settings.branch_prefix, task[:48])
+        except Exception as exc:
+            log.warning("git branch creation failed: %s", exc)
+
+    ctx = load_project_context(work_path)
     project_context = ctx.render()
-    claude_md_path = str(Path(project_path).expanduser().resolve() / "CLAUDE.md")
+    claude_md_path = str(Path(work_path).expanduser().resolve() / "CLAUDE.md")
 
     initial_state: TeamState = {
         "run_id": run_id,
         "raw_task": task,
-        "project_path": project_path,
+        "project_path": work_path,
         "claude_md_path": claude_md_path,
         "project_context": project_context,
         "git_branch": branch,
@@ -204,12 +234,16 @@ def run_pipeline(
         "verification_unverified": None,
         "verify_fix_count": 0,
         "cli_session_id": None,
+        "worktree_path": worktree_path,
+        "main_project_path": main_project_path,
     }
 
     compiled = _build_graph(settings)
     try:
         final_state: TeamState = compiled.invoke(initial_state)
         summary = final_state.get("final_summary") or "Pipeline completed."
+        if worktree_path:
+            summary = f"{summary}\n\nWorktree: {worktree_path} (branch {branch})"
         # The verification gate, not the absence of an exception, decides success.
         verified = final_state.get("verification_passed")
         status = "failed" if verified is False else "completed"
