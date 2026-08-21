@@ -5,8 +5,11 @@ Thin, single-agent-first bot:
   /task project:<alias> task:<desc>   Dispatch a task (with a Run/Cancel confirm)
   /status                             Recent and active runs
   /projects                           Configured project aliases
-  @mention / DM                       Name a project alias in your message; the
-                                      rest is treated as the task.
+  /newtopic                           Forget this channel's conversation
+  @mention / DM                       Ask anything and it is a conversation.
+                                      Name a project alias with a directive
+                                      ("resolvemind add a logout button") and it
+                                      becomes a build, behind a confirm button.
 
 There is no plan-approval gate: eng-crew's default single-agent tier plans
 internally and applies the change on an isolated ai-team/* branch. You review
@@ -37,6 +40,11 @@ BOT_CONFIG_PATH = Path(__file__).parent / "bot_config.json"
 _ideate_project: dict[int, dict] = {}   # channel_id -> project cfg
 _ideate_history: dict[int, list] = {}   # channel_id -> [{"role","content"}]
 _ideate_mode: set[int] = set()          # channel_ids currently in ideation mode
+
+# ── Per-channel discussion memory ───────────────────────────────────────────────
+# Anything that is not a build request is a conversation, and conversations need
+# continuity — "why?" as a follow-up has to know what it follows.
+_chat_history: dict[int, list] = {}     # channel_id -> [{"role","content"}]
 
 
 # ── Project resolution ──────────────────────────────────────────────────────────
@@ -222,6 +230,38 @@ class IdeateBuildView(discord.ui.View):
         self.stop()
 
 
+async def _handle_discuss(message, text: str, project) -> None:
+    """Answer a question. Read-only; nothing here can start a build."""
+    from . import discuss as discuss_mod
+
+    history = _chat_history.setdefault(message.channel.id, [])
+    loop = asyncio.get_running_loop()
+
+    def _call():
+        return discuss_mod.discuss(
+            text,
+            list(history),
+            project_path=(project or {}).get("path", ""),
+            project_name=(project or {}).get("name", ""),
+        )
+
+    async with message.channel.typing():
+        try:
+            reply = await loop.run_in_executor(bot.executor, _call)
+        except Exception as e:
+            await message.reply(f"❌ {e}")
+            return
+
+    history.append({"role": "user", "content": text})
+    history.append({"role": "assistant", "content": reply.reply})
+    # Trim in place so a long-lived channel does not grow without bound.
+    _chat_history[message.channel.id] = discuss_mod.trim_history(history)
+
+    body = reply.reply or "(no response)"
+    for chunk in [body[i:i + 1900] for i in range(0, len(body), 1900)]:
+        await message.channel.send(chunk)
+
+
 async def _handle_ideate(message: discord.Message, text: str) -> None:
     """Route a message to the grounded manager for the channel's active project."""
     cfg = _ideate_project[message.channel.id]
@@ -297,8 +337,8 @@ class EngCrewBot(discord.Client):
         projects = load_projects()
         if not content:
             await message.reply(
-                "Name a project and describe the task, e.g. "
-                "`resolvemind add a logout button`. Projects: "
+                "Ask me anything, or name a project and describe a task to build, "
+                "e.g. `resolvemind add a logout button`. Projects: "
                 + (", ".join(f"`{k}`" for k in projects) or "none configured")
                 + "\nOr use `/task`."
             )
@@ -311,12 +351,13 @@ class EngCrewBot(discord.Client):
              or projects[k].get("name", "").lower() in lowered),
             None,
         )
-        if not matched:
-            await message.reply(
-                "I couldn't tell which project. Name one of: "
-                + (", ".join(f"`{k}`" for k in projects) or "none configured")
-                + " — or use `/task project:<alias> task:<desc>`."
-            )
+        # A question is a conversation, even when it names a project: "how does
+        # resolvemind handle auth?" asks about the code, it does not order a
+        # change. Building requires a named project AND a directive.
+        from .discuss import is_question
+
+        if is_question(content) or not matched:
+            await _handle_discuss(message, content, projects.get(matched) if matched else None)
             return
 
         # Strip the alias token from the task text.
@@ -405,6 +446,15 @@ async def cmd_ideate(interaction: discord.Interaction, project: str):
         f"in the real code, ask a question or two, and propose something to build.\n"
         f"`/task` still works for direct dispatch · `/endideate` to exit."
     )
+
+
+@bot.tree.command(name="newtopic", description="Forget this channel's conversation and start fresh")
+async def cmd_newtopic(interaction: discord.Interaction):
+    had = len(_chat_history.pop(interaction.channel_id, []))
+    if had:
+        await interaction.response.send_message(f"Forgot {had // 2} exchange(s). Fresh start.")
+    else:
+        await interaction.response.send_message("Nothing to forget — this channel has no conversation yet.")
 
 
 @bot.tree.command(name="endideate", description="Exit ideation mode in this channel")
