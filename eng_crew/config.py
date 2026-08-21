@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     # Old worktrees are pruned at the start of a run. Only ones that are clean
     # and fully merged are ever removed — an uncommitted worktree is a run's
     # output, so it is kept until you deal with it.
+    # Commit whatever a run produced, in the worktree, after verification.
+    # Without this the single-agent tier's output is only uncommitted changes.
+    commit_run_output: bool = True
     worktree_auto_prune: bool = True
     worktree_keep_last: int = 5
     worktree_retention_days: float = 7.0

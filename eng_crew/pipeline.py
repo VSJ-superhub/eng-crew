@@ -142,6 +142,35 @@ def _build_graph(settings: Settings) -> Any:
     return graph.compile()
 
 
+def _commit_run_output(work_path: str, task: str, run_id: int, final_state: dict) -> str | None:
+    """Commit whatever the run produced. Returns the SHA, or None.
+
+    The single-agent tier edits files and never commits, so without this a run's
+    entire output lives as uncommitted changes in a worktree: not reviewable as
+    a diff, and never safe to prune. Committing runs after the verification gate
+    so the commit captures the repaired state rather than the broken one.
+
+    A failed run is committed too — the work is still worth keeping and its
+    branch stays unmerged, which is what keeps pruning away from it.
+    """
+    verified = final_state.get("verification_passed")
+    if verified is False:
+        outcome = "verification FAILED"
+    elif final_state.get("verification_unverified"):
+        outcome = "unverified"
+    else:
+        outcome = "verified"
+
+    subject = " ".join(task.split())[:68]
+    message = f"eng-crew: {subject}\n\nRun {run_id} - {outcome}."
+    try:
+        return git_skill.commit_all(work_path, message, add_all=True)
+    except Exception as exc:
+        # Unconfigured git identity, hooks, anything — the work stays on disk.
+        log.warning("could not commit run output: %s", exc)
+        return None
+
+
 def run_pipeline(
     task: str,
     project_path: str,
@@ -257,6 +286,12 @@ def run_pipeline(
         summary = final_state.get("final_summary") or "Pipeline completed."
         if worktree_path:
             summary = f"{summary}\n\nWorktree: {worktree_path} (branch {branch})"
+        if settings.commit_run_output:
+            sha = _commit_run_output(work_path, task, run_id, final_state)
+            if sha:
+                summary = f"{summary}\nCommit: {sha[:12]}"
+                log.info("committed run output as %s", sha[:12])
+
         # The verification gate, not the absence of an exception, decides success.
         verified = final_state.get("verification_passed")
         status = "failed" if verified is False else "completed"
