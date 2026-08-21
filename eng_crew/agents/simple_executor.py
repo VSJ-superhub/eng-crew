@@ -32,7 +32,7 @@ Be minimal — only change what the task requires. When done, briefly describe w
         result = call_llm(
             cfg["provider"], cfg["model"], prompt,
             allowed_tools="Glob,Grep,Read,Edit,Write",
-            max_turns=10,
+            max_turns=25,
             cwd=project_path,
         )
 

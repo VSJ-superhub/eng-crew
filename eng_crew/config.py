@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # --- Global Defaults (used if agent-specific ones are missing) ---
     provider: Optional[str] = Field(default=None, alias="ENG_CREW_PROVIDER")
     default_provider: str = "anthropic"
-    default_model: str = "claude-sonnet-4-6"
+    default_model: str = "claude-sonnet-5"
 
     # --- API keys ---
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
@@ -107,7 +107,7 @@ class Settings(BaseSettings):
     _CLI_ONLY_ROLES: frozenset = frozenset({"executor", "simple_executor", "single_agent"})
     _CLI_PROVIDERS: frozenset = frozenset({"claude_cli", "gemini_cli"})
     _CLI_FALLBACK_PROVIDER: str = "claude_cli"
-    _CLI_FALLBACK_MODEL: str = "claude-haiku-4-5-20251001"
+    _CLI_FALLBACK_MODEL: str = "claude-sonnet-5"
 
     def get_agent_config(self, role: str) -> Dict[str, str]:
         """Return {provider, model} for a given agent role."""

@@ -4,13 +4,26 @@ import threading
 from dataclasses import dataclass, field
 from typing import Literal
 
-# Pricing per million tokens (USD). Updated for Claude 4.x family (2026).
+# Pricing per million tokens (USD). Updated for the Claude 5 family (2026-08).
+# cache_read = 0.1x input, cache_write = 1.25x input.
 _PRICING: dict[str, dict[str, float]] = {
+    "claude-opus-5": {
+        "input": 5.00,
+        "output": 25.00,
+        "cache_read": 0.50,
+        "cache_write": 6.25,
+    },
+    "claude-sonnet-5": {
+        "input": 3.00,
+        "output": 15.00,
+        "cache_read": 0.30,
+        "cache_write": 3.75,
+    },
     "claude-opus-4-7": {
-        "input": 15.00,
-        "output": 75.00,
-        "cache_read": 1.50,
-        "cache_write": 18.75,
+        "input": 5.00,
+        "output": 25.00,
+        "cache_read": 0.50,
+        "cache_write": 6.25,
     },
     "claude-sonnet-4-6": {
         "input": 3.00,
@@ -19,13 +32,15 @@ _PRICING: dict[str, dict[str, float]] = {
         "cache_write": 3.75,
     },
     "claude-haiku-4-5": {
-        "input": 0.80,
-        "output": 4.00,
-        "cache_read": 0.08,
-        "cache_write": 1.00,
+        "input": 1.00,
+        "output": 5.00,
+        "cache_read": 0.10,
+        "cache_write": 1.25,
     },
 }
-_DEFAULT_PRICING = _PRICING["claude-sonnet-4-6"]
+# The CLI stacks pin the dated Haiku id; price it the same as the alias.
+_PRICING["claude-haiku-4-5-20251001"] = _PRICING["claude-haiku-4-5"]
+_DEFAULT_PRICING = _PRICING["claude-sonnet-5"]
 
 AgentRole = Literal["architect", "critic", "coder", "reviewer", "executor", "orchestrator"]
 

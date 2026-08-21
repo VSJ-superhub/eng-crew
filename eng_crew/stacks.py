@@ -8,14 +8,14 @@ _CLI_PROVIDERS = frozenset({"claude_cli", "gemini_cli"})
 
 STACKS: dict[str, dict[str, Any]] = {
     "quality": {
-        "description": "Max quality - Claude Sonnet everywhere",
-        "orchestrator":    {"provider": "anthropic",  "model": "claude-sonnet-4-6"},
-        "architect":       {"provider": "anthropic",  "model": "claude-sonnet-4-6"},
-        "coder":           {"provider": "anthropic",  "model": "claude-sonnet-4-6"},
-        "reviewer":        {"provider": "anthropic",  "model": "claude-sonnet-4-6"},
-        "executor":        {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
+        "description": "Max quality - Claude 5 family (Opus 5 on the agentic path)",
+        "orchestrator":    {"provider": "anthropic",  "model": "claude-sonnet-5"},
+        "architect":       {"provider": "anthropic",  "model": "claude-sonnet-5"},
+        "coder":           {"provider": "anthropic",  "model": "claude-sonnet-5"},
+        "reviewer":        {"provider": "anthropic",  "model": "claude-sonnet-5"},
+        "executor":        {"provider": "claude_cli", "model": "claude-sonnet-5"},
         "simple_executor": {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
-        "single_agent":    {"provider": "claude_cli", "model": "claude-sonnet-4-6"},
+        "single_agent":    {"provider": "claude_cli", "model": "claude-opus-5"},
     },
     "fast": {
         "description": "Speed-optimised - Gemini Flash everywhere",
@@ -35,7 +35,7 @@ STACKS: dict[str, dict[str, Any]] = {
         "reviewer":        {"provider": "gemini",     "model": "gemini-2.0-flash"},
         "executor":        {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
         "simple_executor": {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
-        "single_agent":    {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
+        "single_agent":    {"provider": "claude_cli", "model": "claude-sonnet-5"},
     },
     "deepseek": {
         "description": "DeepSeek R1 reasoning for all tasks",
@@ -45,7 +45,7 @@ STACKS: dict[str, dict[str, Any]] = {
         "reviewer":        {"provider": "deepseek",   "model": "deepseek-chat"},
         "executor":        {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
         "simple_executor": {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
-        "single_agent":    {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
+        "single_agent":    {"provider": "claude_cli", "model": "claude-sonnet-5"},
     },
     "free": {
         "description": "Zero API cost - OpenRouter free-tier models",
@@ -55,7 +55,7 @@ STACKS: dict[str, dict[str, Any]] = {
         "reviewer":        {"provider": "openrouter", "model": "google/gemma-2-9b-it:free"},
         "executor":        {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
         "simple_executor": {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
-        "single_agent":    {"provider": "claude_cli", "model": "claude-haiku-4-5-20251001"},
+        "single_agent":    {"provider": "claude_cli", "model": "claude-sonnet-5"},
     },
 }
 
@@ -73,6 +73,7 @@ _MEDIUM_DOWNGRADE: dict[tuple[str, str], str] = {
     ("deepseek",   "deepseek-reasoner"):             "deepseek-chat",
     ("gemini",     "gemini-2.5-pro"):                "gemini-2.0-flash",
     ("anthropic",  "claude-sonnet-4-6"):             "claude-haiku-4-5-20251001",
+    ("anthropic",  "claude-sonnet-5"):               "claude-haiku-4-5-20251001",
 }
 
 
@@ -84,12 +85,12 @@ def downgrade_for_tier(provider: str, model: str, tier: str) -> str:
 
 
 AVAILABLE_MODELS: dict[str, list[str]] = {
-    "anthropic":   ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
+    "anthropic":   ["claude-opus-5", "claude-sonnet-5", "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
     "gemini":      ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"],
     "openrouter":  ["openai/gpt-4o", "anthropic/claude-3.5-sonnet", "qwen/qwen3-coder:free"],
     "deepseek":    ["deepseek-chat", "deepseek-reasoner"],
     "ollama":      ["qwen2.5-coder:32b", "qwen2.5-coder:7b", "llama3.2"],
-    "claude_cli":  ["claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
+    "claude_cli":  ["claude-opus-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
     "gemini_cli":  ["gemini-2.5-flash", "gemini-2.0-flash"],
 }
 

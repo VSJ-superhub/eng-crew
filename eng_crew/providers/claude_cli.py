@@ -87,7 +87,10 @@ class ClaudeCLIProvider(Provider):
                             f" — using partial output ({len(partial)} chars)",
                             file=sys.stderr,
                         )
-                        text = partial
+                        text = (
+                            "[TRUNCATED: max turns reached — the implementation may be "
+                            "incomplete]\n" + partial
+                        )
                         break
                 except Exception:
                     pass

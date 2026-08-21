@@ -29,7 +29,7 @@ from .providers import call_llm
 
 # Grounded ideation: strong reasoning, read-only tools, room to explore a few files.
 MANAGER_PROVIDER = "claude_cli"
-MANAGER_MODEL = "claude-sonnet-4-6"
+MANAGER_MODEL = "claude-sonnet-5"
 MANAGER_TOOLS = "Read,Grep,Glob"
 MANAGER_MAX_TURNS = 10
 

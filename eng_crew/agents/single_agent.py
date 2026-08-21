@@ -21,7 +21,9 @@ class SingleAgentEngineer(BaseAgent):
 
     # Budget for the project-context orientation block (kept lean on purpose).
     CONTEXT_TOKEN_BUDGET = 1200
-    MAX_TURNS = 16
+    # Long-horizon agentic runs need room; a low cap silently truncates the
+    # implementation (see claude_cli's max-turns soft-stop).
+    MAX_TURNS = 60
 
     def run(self, state: TeamState) -> dict:
         task = state.get("raw_task", "")
@@ -47,12 +49,16 @@ Approach:
 3. If the project has tests for the area you changed, run them with Bash and fix failures. Do not add new test infrastructure unless the task asks for it.
 4. When done, give a short summary (2-4 sentences) of what you changed and how you verified it.
 
+If the change fans out into independent pieces (several unrelated files, a wide
+search, a batch of mechanical edits), delegate those to subagents with the Task
+tool and keep the integration work in your own context.
+
 Be decisive. Prefer editing existing files over creating new ones."""
 
         cfg = self.settings.get_agent_config("single_agent")
         result = call_llm(
             cfg["provider"], cfg["model"], prompt,
-            allowed_tools="Glob,Grep,Read,Edit,Write,Bash",
+            allowed_tools="Glob,Grep,Read,Edit,Write,Bash,Task,TodoWrite,WebSearch,WebFetch",
             max_turns=self.MAX_TURNS,
             cwd=project_path,
         )
