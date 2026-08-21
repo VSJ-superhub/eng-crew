@@ -36,6 +36,7 @@ dependencies = [
     "structlog>=24.1.0",
     "jinja2>=3.1",
     "langgraph>=0.2.0",
+    "aiosqlite>=0.20.0",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +49,16 @@ dev = [
 ]
 docker = [
     "docker>=7.1.0",
+]
+# Optional entrypoints — eng_crew.discord_bot and eng_crew.mcp_server import
+# these at module level, so each is required to run that surface.
+discord = [
+    "discord.py>=2.4.0",
+]
+mcp = [
+    # mcp_server.py imports mcp.server.fastmcp, which newer SDKs moved to
+    # mcp.server.mcpserver. Pin below that break until the server is ported.
+    "mcp>=1.2.0,<2.0",
 ]
 
 [project.scripts]
