@@ -28,7 +28,14 @@ import sys
 import time
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+# The MCP Python SDK renamed the high-level server in 2.0: mcp.server.fastmcp.FastMCP
+# became mcp.server.mcpserver.MCPServer. The surface this module uses — construction
+# by name, the @tool() decorator, and run() over stdio — is identical on both, so
+# support either rather than forcing every deployment onto one SDK generation.
+try:  # mcp >= 2.0
+    from mcp.server.mcpserver import MCPServer as _ServerClass
+except ImportError:  # mcp < 2.0
+    from mcp.server.fastmcp import FastMCP as _ServerClass
 
 # ── Paths ───────────────────────────────────────────────────────────────────────
 _PKG_DIR = Path(__file__).resolve().parent          # .../eng-crew/eng_crew
@@ -49,7 +56,7 @@ if _env_path.exists():
 
 _DEFAULT_DASH_PORT = int(_base_env.get("ENG_CREW_DASHBOARD_PORT", 9000))
 
-mcp = FastMCP("project-starter")
+mcp = _ServerClass("project-starter")
 
 
 # ── State helpers ───────────────────────────────────────────────────────────────

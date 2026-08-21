@@ -56,9 +56,9 @@ discord = [
     "discord.py>=2.4.0",
 ]
 mcp = [
-    # mcp_server.py imports mcp.server.fastmcp, which newer SDKs moved to
-    # mcp.server.mcpserver. Pin below that break until the server is ported.
-    "mcp>=1.2.0,<2.0",
+    # mcp_server.py imports whichever high-level server class the installed SDK
+    # provides (FastMCP on 1.x, MCPServer on 2.x), so either generation works.
+    "mcp>=1.2.0",
 ]
 
 [project.scripts]
