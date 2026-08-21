@@ -127,66 +127,38 @@ def test_allowed_tools_and_max_turns_are_forwarded():
 
 
 def _fresh_db(tmp_path, monkeypatch):
-    """Point tracker at an empty DB holding one run row, and return its id.
-
-    The schema is created with a connection this test owns and closes, rather
-    than via tracker._init_db(): tracker leaves its connections open, and under
-    WAL those open handles block the next writer.
-    """
-    import sqlite3
-
+    """Point tracker at an empty DB holding one run row, and return its id."""
     from eng_crew import tracker
 
-    db = tmp_path / "runs.db"
-    conn = sqlite3.connect(db)
-    try:
-        conn.execute("""
-            CREATE TABLE runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_text TEXT NOT NULL,
-                project_path TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'running',
-                current_subtask_idx INTEGER DEFAULT 0,
-                current_subtask_desc TEXT
-            )
-        """)
+    monkeypatch.setattr(tracker, "DB_PATH", tmp_path / "runs.db")
+    tracker.close_connection()          # drop any handle bound to the old path
+    tracker._init_db()
+    conn = tracker._connect()
+    with conn:
         run_id = conn.execute(
-            "INSERT INTO runs (task_text, project_path, started_at) VALUES (?,?,?)",
-            ("a task", str(tmp_path), "now"),
+            "INSERT INTO runs (task_text, project_path, started_at, status) VALUES (?,?,?,?)",
+            ("a task", str(tmp_path), "now", "running"),
         ).lastrowid
-        conn.commit()
-    finally:
-        conn.close()
-
-    monkeypatch.setattr(tracker, "DB_PATH", db)
     return tracker, run_id
 
 
-def _read(db_path, run_id, column):
-    import sqlite3
-
-    conn = sqlite3.connect(db_path)
-    try:
-        return conn.execute(
-            f"SELECT {column} FROM runs WHERE id=?", (run_id,)
-        ).fetchone()[0]
-    finally:
-        conn.close()
+def _read(tracker, run_id, column):
+    return tracker._connect().execute(
+        f"SELECT {column} FROM runs WHERE id=?", (run_id,)
+    ).fetchone()[0]
 
 
 def test_update_run_progress_persists_the_line(tmp_path, monkeypatch):
     tracker, run_id = _fresh_db(tmp_path, monkeypatch)
     tracker.update_run_progress(run_id, 3, "single-agent: Edit src/app.py")
-    db = tmp_path / "runs.db"
-    assert _read(db, run_id, "current_subtask_idx") == 3
-    assert _read(db, run_id, "current_subtask_desc") == "single-agent: Edit src/app.py"
+    assert _read(tracker, run_id, "current_subtask_idx") == 3
+    assert _read(tracker, run_id, "current_subtask_desc") == "single-agent: Edit src/app.py"
 
 
 def test_update_run_progress_truncates_a_long_line(tmp_path, monkeypatch):
     tracker, run_id = _fresh_db(tmp_path, monkeypatch)
     tracker.update_run_progress(run_id, 0, "x" * 5000)
-    assert len(_read(tmp_path / "runs.db", run_id, "current_subtask_desc")) <= 500
+    assert len(_read(tracker, run_id, "current_subtask_desc")) <= 500
 
 
 def test_update_run_progress_is_a_noop_without_a_run_id():

@@ -22,11 +22,49 @@ except Exception as _e:
 _lock = threading.Lock()
 
 
+_local = threading.local()
+
+
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    """Return this thread's connection, opening it on first use.
+
+    Previously this opened a fresh connection on every call and nothing ever
+    closed it — `with _connect() as conn:` commits but leaves the handle open.
+    Those accumulated: in a long-lived dashboard process the count grows without
+    bound, and under WAL the open handles block later writers ("database is
+    locked").
+
+    One connection per thread, reused, is enough: no tracker function opens a
+    connection inside another's `with` block, so sharing cannot collapse two
+    nested transactions into one. The handle is keyed by DB_PATH so repointing
+    the database (tests, a different data dir) opens a fresh connection instead
+    of silently reusing the old file's.
+    """
+    path = str(DB_PATH)
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        if getattr(_local, "path", None) == path:
+            return conn
+        close_connection()  # DB_PATH moved — drop the stale handle
+
+    conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    _local.conn = conn
+    _local.path = path
     return conn
+
+
+def close_connection() -> None:
+    """Close this thread's connection, if it has one. Never raises."""
+    conn = getattr(_local, "conn", None)
+    _local.conn = None
+    _local.path = None
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception as e:
+            print(f"[tracker] close_connection error: {e}", file=sys.stderr)
 
 
 def _init_db():
@@ -273,7 +311,7 @@ def _init_db():
             if "log_path" not in run_cols:
                 _mig.execute("ALTER TABLE runs ADD COLUMN log_path TEXT")
             _mig.commit()
-            _mig.close()
+            # NB: no close() — the handle is pooled and reused (see _connect).
         except Exception as e:
             print(f"[tracker] MIGRATION WARNING: {e}", file=sys.stderr)
 
@@ -1204,13 +1242,11 @@ def append_sprint_plan_replan(run_id: int, replan_entry: dict) -> None:
         (run_id,),
     ).fetchone()
     if not row:
-        con.close()
         return
     replans = json.loads(row["replans"] or "[]")
     replans.append(replan_entry)
     con.execute("UPDATE sprint_plans SET replans=? WHERE id=?", (json.dumps(replans), row["id"]))
     con.commit()
-    con.close()
 
 
 def get_sprint_plan(run_id: int) -> dict | None:
