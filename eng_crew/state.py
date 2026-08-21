@@ -45,3 +45,7 @@ class TeamState(TypedDict):
     _test_failed: Optional[bool]
     clarification_requested: Optional[bool]
     complexity_tier: Optional[str]
+    verification_passed: Optional[bool]
+    verification_summary: Optional[str]
+    verification_unverified: Optional[bool]
+    verify_fix_count: int

@@ -66,6 +66,13 @@ class Settings(BaseSettings):
     single_agent_provider: Optional[str] = None
     single_agent_model: Optional[str] = None
 
+    # --- Verification gate ---
+    # Runs the project's own tests/build after the agent tiers and decides the
+    # run's final status. Disable only for a project with no runnable checks.
+    verification_enabled: bool = True
+    verification_max_fix_attempts: int = 1
+    verification_timeout: int = 300
+
     # --- General ---
     budget_usd: float = 5.0
     max_tokens: int = 8192

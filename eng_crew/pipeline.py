@@ -15,6 +15,7 @@ from eng_crew.agents.executor import ExecutorAgent
 from eng_crew.agents.orchestrator import OrchestratorAgent
 from eng_crew.agents.reviewer import ReviewerAgent
 from eng_crew.agents.simple_executor import SimpleExecutorAgent
+from eng_crew.agents.verifier import VerifierAgent
 from eng_crew.agents.single_agent import SingleAgentEngineer
 from eng_crew.config import Settings
 from eng_crew.project_context import load_project_context
@@ -32,6 +33,7 @@ def _build_graph(settings: Settings) -> Any:
     executor = ExecutorAgent(settings)
     simple_executor = SimpleExecutorAgent(settings)
     single_agent = SingleAgentEngineer(settings)
+    verifier = VerifierAgent(settings)
 
     def classify_node(state: TeamState) -> dict:
         return classifier.run(state)
@@ -41,6 +43,9 @@ def _build_graph(settings: Settings) -> Any:
 
     def single_execute_node(state: TeamState) -> dict:
         return single_agent.run(state)
+
+    def verify_node(state: TeamState) -> dict:
+        return verifier.run(state)
 
     def _route_classify(state: TeamState) -> str:
         return state.get("_next") or "full"
@@ -91,6 +96,7 @@ def _build_graph(settings: Settings) -> Any:
     graph.add_node("dispatcher", dispatcher_node)
     graph.add_node("reviewer", reviewer_node)
     graph.add_node("executor", executor_node)
+    graph.add_node("verify", verify_node)
 
     graph.set_entry_point("classify")
     graph.add_conditional_edges("classify", _route_classify, {
@@ -98,8 +104,9 @@ def _build_graph(settings: Settings) -> Any:
         "single": "single_execute",
         "full":   "orchestrator",
     })
-    graph.add_edge("simple_execute", END)
-    graph.add_edge("single_execute", END)
+    graph.add_edge("simple_execute", "verify")
+    graph.add_edge("single_execute", "verify")
+    graph.add_edge("verify", END)
 
     graph.add_conditional_edges(
         "orchestrator",
@@ -107,7 +114,7 @@ def _build_graph(settings: Settings) -> Any:
         {
             "architect": "architect",
             "dispatcher": "dispatcher",
-            "done": END,
+            "done": "verify",
         },
     )
     graph.add_edge("architect", "hitl_gate")
@@ -192,13 +199,25 @@ def run_pipeline(
         "_test_failed": None,
         "clarification_requested": None,
         "complexity_tier": None,
+        "verification_passed": None,
+        "verification_summary": None,
+        "verification_unverified": None,
+        "verify_fix_count": 0,
     }
 
     compiled = _build_graph(settings)
     try:
         final_state: TeamState = compiled.invoke(initial_state)
         summary = final_state.get("final_summary") or "Pipeline completed."
-        tracker.finish_run(run_id, status="completed", final_summary=summary)
+        # The verification gate, not the absence of an exception, decides success.
+        verified = final_state.get("verification_passed")
+        status = "failed" if verified is False else "completed"
+        if verified is False:
+            log.warning(
+                "Run %s failed verification: %s",
+                run_id, final_state.get("verification_summary"),
+            )
+        tracker.finish_run(run_id, status=status, final_summary=summary)
         return final_state
     except Exception as exc:
         log.exception("Pipeline failed: %s", exc)
