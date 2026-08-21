@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -224,3 +226,102 @@ def link_into_worktree(main_root: str | Path, worktree: str | Path, names: list[
             if result.returncode == 0:
                 linked.append(name)
     return linked
+
+
+def worktree_status(project_path: str | Path, worktree_path: str | Path) -> dict:
+    """Describe a worktree well enough to decide whether losing it is safe.
+
+    ``dirty``    — uncommitted changes. On the single-agent tier nothing commits,
+                   so these ARE the run's output. Never discard them silently.
+    ``unmerged`` — commits on its branch that no other branch contains.
+    ``age_days`` — age of the worktree directory.
+    """
+    root = repo_root(project_path)
+    wt = Path(worktree_path).expanduser().resolve()
+    info: dict = {"path": str(wt), "exists": wt.is_dir(), "dirty": False,
+                  "unmerged": 0, "age_days": 0.0, "branch": None}
+    if not info["exists"]:
+        return info
+
+    try:
+        info["branch"] = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=wt)
+        info["dirty"] = bool(_git(["status", "--porcelain"], cwd=wt))
+        # Commits on this branch that exist on no other branch. Ask by branch
+        # name, not HEAD — this runs in the main checkout, where HEAD is its own
+        # branch, and would always report zero.
+        branch = info["branch"]
+        if branch and branch != "HEAD":
+            out = _git(
+                ["log", "--oneline", branch, "--not", "--exclude=" + branch, "--branches"],
+                cwd=root,
+            )
+            info["unmerged"] = len([ln for ln in out.splitlines() if ln.strip()])
+    except GitError:
+        # An unreadable worktree is not a safe deletion candidate.
+        info["dirty"] = True
+
+    try:
+        info["age_days"] = (time.time() - wt.stat().st_mtime) / 86400.0
+    except OSError:
+        pass
+    return info
+
+
+def prunable_worktrees(
+    project_path: str | Path,
+    *,
+    keep_last: int = 5,
+    max_age_days: float = 7.0,
+) -> list[dict]:
+    """Worktrees that are safe to delete, oldest first.
+
+    Safe means: not the main worktree, no uncommitted changes, no commits that
+    exist nowhere else, and older than max_age_days. The newest ``keep_last``
+    are held back regardless of age so recent work stays reviewable.
+    """
+    root = repo_root(project_path)
+    entries = []
+    for wt in list_worktrees(project_path):
+        path = Path(wt["path"]).resolve()
+        if path == root.resolve():
+            continue                      # never the checkout you work in
+        entries.append(worktree_status(root, path))
+
+    entries.sort(key=lambda e: e["age_days"])          # newest first
+    candidates = entries[keep_last:]                   # hold back the newest N
+    return sorted(
+        [
+            e for e in candidates
+            if not e["dirty"] and e["unmerged"] == 0 and e["age_days"] >= max_age_days
+        ],
+        key=lambda e: -e["age_days"],
+    )
+
+
+def prune_worktrees(
+    project_path: str | Path,
+    *,
+    keep_last: int = 5,
+    max_age_days: float = 7.0,
+    dry_run: bool = False,
+) -> list[str]:
+    """Remove worktrees that are safe to remove. Returns the paths handled."""
+    root = repo_root(project_path)
+    removed: list[str] = []
+    for entry in prunable_worktrees(root, keep_last=keep_last, max_age_days=max_age_days):
+        if dry_run:
+            removed.append(entry["path"])
+            continue
+        try:
+            remove_worktree(root, entry["path"])
+            removed.append(entry["path"])
+        except GitError as exc:
+            print(f"[git_skill] could not remove {entry['path']}: {exc}", file=sys.stderr)
+
+    if not dry_run:
+        try:
+            # Clear admin records for directories deleted outside git.
+            _git(["worktree", "prune"], cwd=root)
+        except GitError:
+            pass
+    return removed

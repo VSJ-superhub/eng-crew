@@ -170,6 +170,19 @@ def run_pipeline(
     work_path = project_path
 
     if settings.worktree_isolation and git_skill.is_git_repo(project_path):
+        if settings.worktree_auto_prune:
+            # Prune before creating this run's worktree, never after — the run's
+            # own output must not be a pruning candidate.
+            try:
+                pruned = git_skill.prune_worktrees(
+                    project_path,
+                    keep_last=settings.worktree_keep_last,
+                    max_age_days=settings.worktree_retention_days,
+                )
+                if pruned:
+                    log.info("pruned %d stale worktree(s)", len(pruned))
+            except Exception as exc:
+                log.warning("worktree prune failed: %s", exc)
         try:
             branch = git_skill.make_branch_name(settings.branch_prefix, task[:48])
             wt = git_skill.create_worktree(

@@ -218,6 +218,69 @@ def _list_projects(cfg: object) -> None:
     console.print(table)
 
 
+@app.command()
+def worktrees(
+    project_path: Path = typer.Argument(Path("."), help="Project to inspect."),
+) -> None:
+    """List run worktrees and whether each is safe to remove."""
+    from eng_crew import git_skill
+
+    if not git_skill.is_git_repo(project_path):
+        console.print("[red]Not a git repository.[/red]")
+        raise typer.Exit(1)
+
+    root = git_skill.repo_root(project_path)
+    entries = [w for w in git_skill.list_worktrees(root)
+               if Path(w["path"]).resolve() != root.resolve()]
+    if not entries:
+        console.print("No run worktrees.")
+        return
+
+    for w in entries:
+        st = git_skill.worktree_status(root, w["path"])
+        if st["dirty"]:
+            state, colour = "uncommitted changes", "yellow"
+        elif st["unmerged"]:
+            state, colour = f"{st['unmerged']} unmerged commit(s)", "yellow"
+        else:
+            state, colour = "clean", "green"
+        console.print(
+            f"[{colour}]{state:24}[/{colour}] {st['age_days']:5.1f}d  "
+            f"{w.get('branch', '?')}" + chr(10) + f"    {w['path']}"
+        )
+
+
+@app.command()
+def prune_worktrees(
+    project_path: Path = typer.Argument(Path("."), help="Project to prune."),
+    keep_last: int = typer.Option(5, "--keep", help="Always keep this many newest."),
+    days: float = typer.Option(7.0, "--days", help="Only remove worktrees older than this."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be removed."),
+) -> None:
+    """Remove old worktrees that are clean and fully merged.
+
+    Worktrees with uncommitted changes or unmerged commits are never removed —
+    on the single-agent tier nothing commits, so those changes are the output of
+    a run. Remove one of those yourself once you have dealt with it.
+    """
+    from eng_crew import git_skill
+
+    if not git_skill.is_git_repo(project_path):
+        console.print("[red]Not a git repository.[/red]")
+        raise typer.Exit(1)
+
+    handled = git_skill.prune_worktrees(
+        project_path, keep_last=keep_last, max_age_days=days, dry_run=dry_run
+    )
+    if not handled:
+        console.print("Nothing to prune.")
+        return
+    verb = "Would remove" if dry_run else "Removed"
+    for path in handled:
+        console.print(f"{verb}: {path}")
+    console.print(f"[green]{verb} {len(handled)} worktree(s).[/green]")
+
+
 def main() -> None:
     app()
 

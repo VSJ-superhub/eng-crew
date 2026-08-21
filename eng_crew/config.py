@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     worktree_isolation: bool = True
     worktree_dir: str = ""                       # default: sibling of the repo
     worktree_link_dirs: str = ".venv,venv,node_modules"
+    # Old worktrees are pruned at the start of a run. Only ones that are clean
+    # and fully merged are ever removed — an uncommitted worktree is a run's
+    # output, so it is kept until you deal with it.
+    worktree_auto_prune: bool = True
+    worktree_keep_last: int = 5
+    worktree_retention_days: float = 7.0
 
     # --- Verification gate ---
     # Runs the project's own tests/build after the agent tiers and decides the
