@@ -11,6 +11,8 @@ process control rather than a request/response assertion.
 """
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 pytest.importorskip("fastapi")
@@ -237,34 +239,94 @@ def test_run_logs_endpoint_answers_for_a_run_without_logs(client, run_id):
 
 
 def test_browse_lists_a_directory(client, tmp_path):
+    # Browsing stays unrestricted: you must be able to find a folder before you
+    # can register it. It lists names, never file contents.
     (tmp_path / "child").mkdir()
     resp = client.get("/api/fs/browse", params={"path": str(tmp_path)})
     assert resp.status_code == 200
-    body = resp.json()
-    assert isinstance(body, dict)
+    assert isinstance(resp.json(), dict)
 
 
-def test_read_file_returns_contents(client, tmp_path):
-    target = tmp_path / "notes.txt"
+def test_read_file_inside_a_registered_project(client, project):
+    target = pathlib.Path(project["path"]) / "notes.txt"
     target.write_text("hello from disk", encoding="utf-8")
     resp = client.get("/api/fs/read-file", params={"path": str(target)})
     assert resp.status_code == 200
     assert resp.json()["content"] == "hello from disk"
 
 
-def test_read_file_reports_a_missing_file_without_crashing(client, tmp_path):
-    resp = client.get("/api/fs/read-file", params={"path": str(tmp_path / "nope.txt")})
+def test_read_file_reports_a_missing_file_without_crashing(client, project):
+    missing = pathlib.Path(project["path"]) / "nope.txt"
+    resp = client.get("/api/fs/read-file", params={"path": str(missing)})
     assert resp.status_code == 500
     assert "error" in resp.json()
 
 
-def test_write_claude_md_writes_into_the_given_directory(client, tmp_path):
+def test_read_file_refuses_a_path_outside_every_project(client, project, tmp_path):
+    secret = tmp_path / "id_rsa"
+    secret.write_text("PRIVATE KEY", encoding="utf-8")
+
+    resp = client.get("/api/fs/read-file", params={"path": str(secret)})
+    assert resp.status_code == 403
+    assert "PRIVATE KEY" not in resp.text
+
+
+def test_read_file_refuses_dot_dot_traversal_out_of_a_project(client, project, tmp_path):
+    secret = tmp_path / "outside.txt"
+    secret.write_text("SECRET", encoding="utf-8")
+    traversal = str(pathlib.Path(project["path"]) / ".." / "outside.txt")
+
+    resp = client.get("/api/fs/read-file", params={"path": traversal})
+    assert resp.status_code == 403
+    assert "SECRET" not in resp.text
+
+
+def test_read_file_refuses_a_symlink_that_escapes_a_project(client, project, tmp_path):
+    secret = tmp_path / "outside.txt"
+    secret.write_text("SECRET", encoding="utf-8")
+    link = pathlib.Path(project["path"]) / "escape.txt"
+    try:
+        link.symlink_to(secret)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted on this machine")
+
+    resp = client.get("/api/fs/read-file", params={"path": str(link)})
+    assert resp.status_code == 403
+    assert "SECRET" not in resp.text
+
+
+def test_read_file_refuses_everything_when_no_project_is_registered(client, tmp_path):
+    target = tmp_path / "anything.txt"
+    target.write_text("data", encoding="utf-8")
+    assert client.get("/api/fs/read-file", params={"path": str(target)}).status_code == 403
+
+
+def test_write_claude_md_inside_a_registered_project(client, project):
     resp = client.post("/api/fs/write-claude-md", json={
-        "path": str(tmp_path),
+        "path": project["path"],
         "content": "# Project\n",
     })
     assert resp.status_code == 200
-    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == "# Project\n"
+    assert (pathlib.Path(project["path"]) / "CLAUDE.md").read_text(encoding="utf-8") == "# Project\n"
+
+
+def test_write_claude_md_refuses_a_directory_outside_every_project(client, project, tmp_path):
+    victim = tmp_path / "somewhere-else"
+    victim.mkdir()
+
+    resp = client.post("/api/fs/write-claude-md", json={
+        "path": str(victim),
+        "content": "# Injected\n",
+    })
+    assert resp.status_code == 403
+    assert not (victim / "CLAUDE.md").exists(), "wrote outside a registered project"
+
+
+def test_write_claude_md_refuses_traversal(client, project, tmp_path):
+    escape = str(pathlib.Path(project["path"]) / "..")
+    resp = client.post("/api/fs/write-claude-md", json={"path": escape, "content": "x"})
+    assert resp.status_code == 403
+    assert not (tmp_path / "CLAUDE.md").exists()
 
 
 # --- issues and sprints -------------------------------------------------

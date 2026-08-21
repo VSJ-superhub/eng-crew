@@ -299,10 +299,58 @@ async def fs_scan(payload: ScanPayload):
     if not os.path.isdir(payload.path): return JSONResponse({"error": "Not a directory"}, status_code=400)
     return JSONResponse(_detect_project(payload.path))
 
+# ── Filesystem access guard ───────────────────────────────────────────────────
+#
+# The dashboard has no authentication and these endpoints take a path from the
+# request. Unconstrained, they let anything that can reach the port read any
+# file on the machine (~/.ssh/id_rsa, a .env full of API keys) and drop a
+# CLAUDE.md into any directory. Confining them to registered project roots
+# keeps the feature and removes the hole.
+
+def _registered_roots() -> list[Path]:
+    roots: list[Path] = []
+    for proj in list_projects(active_only=False):
+        raw = proj.get("project_path")
+        if not raw:
+            continue
+        try:
+            roots.append(Path(raw).expanduser().resolve())
+        except OSError:
+            continue
+    return roots
+
+
+def _within_registered_project(path: str) -> Optional[Path]:
+    """Resolve path and return it only if it sits inside a registered project.
+
+    Both sides are fully resolved first, so `..` traversal and symlinks out of a
+    project resolve to their real location and are rejected on their merits.
+    """
+    try:
+        target = Path(path).expanduser().resolve()
+    except (OSError, ValueError):
+        return None
+
+    target_cmp = os.path.normcase(str(target))
+    for root in _registered_roots():
+        root_cmp = os.path.normcase(str(root))
+        if target_cmp == root_cmp or target_cmp.startswith(root_cmp + os.sep):
+            return target
+    return None
+
+
+_OUTSIDE = {"error": "path is outside every registered project"}
+
+
 @router.get("/fs/read-file")
 async def fs_read_file(path: str):
-    try: return JSONResponse({"content": Path(path).read_text(encoding="utf-8", errors="replace")})
-    except Exception as e: return JSONResponse({"error": str(e)}, status_code=500)
+    target = _within_registered_project(path)
+    if target is None:
+        return JSONResponse(_OUTSIDE, status_code=403)
+    try:
+        return JSONResponse({"content": target.read_text(encoding="utf-8", errors="replace")})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 class WriteClaudeMdPayload(BaseModel):
     path: str
@@ -310,7 +358,10 @@ class WriteClaudeMdPayload(BaseModel):
 
 @router.post("/fs/write-claude-md")
 async def fs_write_claude_md(payload: WriteClaudeMdPayload):
-    claude_md = Path(payload.path) / "CLAUDE.md"
+    directory = _within_registered_project(payload.path)
+    if directory is None:
+        return JSONResponse(_OUTSIDE, status_code=403)
+    claude_md = directory / "CLAUDE.md"
     try:
         claude_md.write_text(payload.content, encoding="utf-8")
         return JSONResponse({"ok": True, "path": str(claude_md).replace("\\", "/")})
