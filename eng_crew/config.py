@@ -75,6 +75,11 @@ class Settings(BaseSettings):
     # Old worktrees are pruned at the start of a run. Only ones that are clean
     # and fully merged are ever removed — an uncommitted worktree is a run's
     # output, so it is kept until you deal with it.
+    # A paused run holds its thread and worktree, so it is abandoned after
+    # this long rather than waiting forever. 0 disables the limit.
+    pause_timeout_seconds: float = 3600.0
+    pause_poll_seconds: float = 1.0
+
     # Commit whatever a run produced, in the worktree, after verification.
     # Without this the single-agent tier's output is only uncommitted changes.
     commit_run_output: bool = True

@@ -16,6 +16,8 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   loaded by `eng_crew/prompts.py` — edit a prompt without touching agent code.
 - Runs execute in their own git worktree and branch (`worktree_isolation`, on by
   default), so a run never stashes your changes or moves the branch you are on.
+- Pause is honoured between graph nodes (an agent turn is one CLI call and cannot
+  be interrupted mid-flight); resume releases the same run rather than restarting it.
 - A run commits its output in the worktree after verification, so the result is a
   reviewable diff on a branch rather than loose uncommitted files.
 - Old worktrees are pruned at the start of a run, but only ones that are clean and

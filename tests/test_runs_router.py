@@ -251,3 +251,21 @@ def test_subtask_review_is_accepted_as_a_no_op(client, project):
 def test_running_an_unknown_issue_is_a_404(client, no_real_launches):
     assert client.post("/api/issues/999999/run").status_code == 404
     assert no_real_launches == []
+
+
+def test_resume_releases_a_live_paused_run_without_relaunching(client, project, monkeypatch):
+    """Resuming a paused run clears the flag; restarting would run it twice."""
+    run_id = tracker.create_run("t", project["path"])
+    client.post(f"/api/runs/{run_id}/pause")
+    assert tracker.is_pause_requested(run_id) is True
+
+    relaunched: list = []
+    import eng_crew.run as run_mod
+
+    monkeypatch.setattr(run_mod, "resume_run", lambda rid: relaunched.append(rid) or True)
+
+    resp = client.post(f"/api/runs/{run_id}/resume")
+    assert resp.status_code == 200
+    assert resp.json()["unpaused"] is True
+    assert tracker.is_pause_requested(run_id) is False
+    assert relaunched == [], "resume restarted the task instead of releasing it"

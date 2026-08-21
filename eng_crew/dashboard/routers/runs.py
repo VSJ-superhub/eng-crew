@@ -290,6 +290,12 @@ async def api_run_pause(run_id: int):
 @router.post("/runs/{run_id}/resume")
 async def api_run_resume(run_id: int):
     from ...run import resume_run
+    from ...tracker import is_pause_requested
+    # A live run waiting at a node only needs the flag cleared — restarting it
+    # would run the task twice.
+    if is_pause_requested(run_id):
+        set_pause_requested(run_id, False)
+        return JSONResponse({"ok": True, "unpaused": True})
     if not resume_run(run_id): return JSONResponse({"error": "State lost"}, status_code=409)
     return JSONResponse({"ok": True})
 

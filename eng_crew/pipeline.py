@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,62 @@ from eng_crew.project_context import load_project_context
 from eng_crew.state import TeamState
 
 log = logging.getLogger(__name__)
+
+
+class RunCancelled(Exception):
+    """Raised inside the graph when a run is cancelled while it sits paused."""
+
+
+# Terminal statuses: reaching one while paused means the run is over.
+_TERMINAL = {"failed", "completed", "cancelled"}
+
+
+def _wait_while_paused(run_id: int | None, settings: Settings) -> None:
+    """Block between graph nodes while a pause is requested.
+
+    Pause used to be a button that wrote a flag nothing read. The check lives
+    between nodes rather than inside them: an agent is a single long CLI call
+    that cannot be interrupted halfway, so a node boundary is the only honest
+    place to stop.
+    """
+    if not run_id or not tracker.is_pause_requested(run_id):
+        return
+
+    timeout = getattr(settings, "pause_timeout_seconds", 3600)
+    interval = getattr(settings, "pause_poll_seconds", 1.0)
+    waited = 0.0
+    tracker.update_run_status(run_id, "paused")
+    log.info("run %s paused", run_id)
+
+    while tracker.is_pause_requested(run_id):
+        detail = tracker.get_run_detail(run_id)
+        if detail and detail.get("status") in _TERMINAL:
+            # Cancelled while paused — the cancel endpoint already finished it.
+            raise RunCancelled(f"run {run_id} was cancelled while paused")
+        if timeout and waited >= timeout:
+            tracker.set_pause_requested(run_id, False)
+            raise RunCancelled(
+                f"run {run_id} stayed paused longer than {timeout}s and was abandoned"
+            )
+        time.sleep(interval)
+        waited += interval
+
+    tracker.update_run_status(run_id, "running")
+    log.info("run %s resumed after %.0fs", run_id, waited)
+
+
+def pausable(fn, settings: Settings):
+    """Wrap a graph node so a pause request is honoured before it runs.
+
+    Returns a node function that blocks while paused and propagates
+    RunCancelled if the run is cancelled or abandoned while waiting — so the
+    wrapped node never starts.
+    """
+    def wrapped(state: TeamState) -> dict:
+        _wait_while_paused(state.get("run_id"), settings)
+        return fn(state)
+
+    return wrapped
 
 
 def _build_graph(settings: Settings) -> Any:
@@ -86,17 +143,20 @@ def _build_graph(settings: Settings) -> Any:
     def _route_reviewer(state: TeamState) -> str:
         return state.get("_next") or "done"
 
+    def _pausable(fn):
+        return pausable(fn, settings)
+
     graph = StateGraph(TeamState)
-    graph.add_node("classify", classify_node)
-    graph.add_node("simple_execute", simple_execute_node)
-    graph.add_node("single_execute", single_execute_node)
-    graph.add_node("orchestrator", orchestrator_node)
-    graph.add_node("architect", architect_node)
-    graph.add_node("hitl_gate", hitl_gate_node)
-    graph.add_node("dispatcher", dispatcher_node)
-    graph.add_node("reviewer", reviewer_node)
-    graph.add_node("executor", executor_node)
-    graph.add_node("verify", verify_node)
+    graph.add_node("classify", _pausable(classify_node))
+    graph.add_node("simple_execute", _pausable(simple_execute_node))
+    graph.add_node("single_execute", _pausable(single_execute_node))
+    graph.add_node("orchestrator", _pausable(orchestrator_node))
+    graph.add_node("architect", _pausable(architect_node))
+    graph.add_node("hitl_gate", _pausable(hitl_gate_node))
+    graph.add_node("dispatcher", _pausable(dispatcher_node))
+    graph.add_node("reviewer", _pausable(reviewer_node))
+    graph.add_node("executor", _pausable(executor_node))
+    graph.add_node("verify", _pausable(verify_node))
 
     graph.set_entry_point("classify")
     graph.add_conditional_edges("classify", _route_classify, {
@@ -302,6 +362,10 @@ def run_pipeline(
             )
         tracker.finish_run(run_id, status=status, final_summary=summary)
         return final_state
+    except RunCancelled as exc:
+        # The cancel endpoint already finished the run; do not overwrite it.
+        log.info("Pipeline stopped: %s", exc)
+        return initial_state
     except Exception as exc:
         log.exception("Pipeline failed: %s", exc)
         tracker.finish_run(run_id, status="failed", final_summary=str(exc))
