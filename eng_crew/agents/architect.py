@@ -4,36 +4,9 @@ import json
 import re
 import sys
 
+from eng_crew import prompts
 from eng_crew.agents.base import BaseAgent
 from eng_crew.state import Subtask, TeamState
-
-_PROMPT_TEMPLATE = """\
-You are a senior software architect. Decompose the following task into discrete, parallelizable subtasks.
-
-PROJECT CONTEXT:
-{project_context}
-
-TASK:
-{raw_task}
-
-Respond with ONLY valid JSON in this exact format — no prose, no markdown fences:
-{{
-  "subtasks": [
-    {{
-      "id": "s1",
-      "description": "...",
-      "target_files": ["path/to/file.py"],
-      "agent_type": "backend",
-      "dependencies": []
-    }}
-  ]
-}}
-
-agent_type must be one of: architect, critic, backend, frontend, database, ai_pipeline, infrastructure, generic.
-dependencies is a list of subtask ids that must complete before this one starts.
-target_files contains paths relative to the project root that this subtask will create or modify.
-"""
-
 
 def _extract_json(text: str) -> str:
     match = re.search(r"\{[\s\S]+\}", text)
@@ -63,7 +36,8 @@ def _make_subtask(raw: dict) -> Subtask:
 
 class ArchitectAgent(BaseAgent):
     def decompose(self, state: TeamState) -> TeamState:
-        prompt = _PROMPT_TEMPLATE.format(
+        prompt = prompts.render(
+            "architect-decompose",
             project_context=state.get("project_context", ""),
             raw_task=state.get("raw_task", ""),
         )

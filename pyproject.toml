@@ -71,6 +71,11 @@ Issues = "https://github.com/VSJ-superhub/eng-crew/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["eng_crew"]
 
+# Agent prompts live in .claude/skills/ at the repo root, which is not part of
+# the package — without this an installed eng-crew would have no prompts at all.
+[tool.hatch.build.targets.wheel.force-include]
+".claude/skills" = "eng_crew/.claude/skills"
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100

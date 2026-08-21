@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 
 from .base import BaseAgent
+from .. import prompts
 from ..providers import call_llm
 from ..state import TeamState
 from .. import tracker
@@ -31,14 +32,7 @@ class SimpleExecutorAgent(BaseAgent):
 
         print(f"[simple_execute] Single-shot for: {task[:80]!r}", file=sys.stderr)
 
-        prompt = f"""You are making a small, focused change to a codebase. No planning, no subtasks — read the relevant files and implement the change directly.
-
-=== TASK ===
-{task}
-
-Use Glob, Grep, and Read to understand the codebase, then Edit or Write to implement the change.
-Be minimal — only change what the task requires. When done, briefly describe what you changed.
-"""
+        prompt = prompts.render("simple-edit", task=task)
 
         cfg = self.settings.get_agent_config("simple_executor")
         result = call_llm(

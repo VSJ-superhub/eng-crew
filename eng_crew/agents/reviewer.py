@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from eng_crew import prompts
 from eng_crew.agents.base import BaseAgent
 from eng_crew.config import Settings
 from eng_crew.state import Subtask, TeamState
@@ -9,35 +10,6 @@ from eng_crew.state import Subtask, TeamState
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
-
-REVIEW_PROMPT = """\
-You are a senior code reviewer. Review the following patch for a software subtask.
-
-## Subtask Description
-{description}
-
-## Target Files
-{target_files}
-
-## Patch
-```diff
-{patch}
-```
-
-Review for:
-- Correctness: does it implement what the description requires?
-- Safety: no security vulnerabilities, no destructive side effects
-- Completeness: all target files addressed, no missing logic
-- Quality: follows project conventions, no unnecessary changes
-
-Respond with exactly one of:
-APPROVED — the patch is correct and ready to apply
-RETRY — the patch has issues that must be fixed
-
-If RETRY, add a brief explanation on the next line describing what must be fixed.
-Your first word MUST be either APPROVED or RETRY.
-"""
-
 
 class ReviewerAgent(BaseAgent):
     def __init__(self, settings: Settings) -> None:
@@ -68,7 +40,8 @@ class ReviewerAgent(BaseAgent):
         description = subtask.get("description", "")
         target_files = ", ".join(subtask.get("target_files") or [])
 
-        prompt = REVIEW_PROMPT.format(
+        prompt = prompts.render(
+            "review-patch",
             description=description,
             target_files=target_files or "(none specified)",
             patch=patch or "(empty patch)",

@@ -12,7 +12,7 @@ from __future__ import annotations
 import sys
 
 from .base import BaseAgent
-from .. import tracker, verify as verify_mod
+from .. import prompts, tracker, verify as verify_mod
 from ..providers import call_llm
 from ..state import TeamState
 
@@ -98,28 +98,16 @@ class VerifierAgent(BaseAgent):
         if session_id:
             # Resuming: the agent still has the change it just made in context,
             # so restating the task would only add noise.
-            prompt = f"""Verification failed on the change you just made. Fix it.
-
-=== VERIFICATION FAILURES ===
-{result.failure_report()}
-
-Fix the cause of these failures. The failure may be in the implementation or in a test the
-change made stale, so decide which is actually wrong rather than forcing either to match the
-other. Do not delete, skip, or weaken a test to make it pass. Re-run the failing command
-yourself to confirm the fix before you finish."""
+            prompt = prompts.render(
+                "repair-verification-failure-resumed",
+                failures=result.failure_report(),
+            )
         else:
-            prompt = f"""The change below was implemented, but verification failed. Fix it.
-
-=== ORIGINAL TASK ===
-{task}
-
-=== VERIFICATION FAILURES ===
-{result.failure_report()}
-
-Fix the cause of these failures. Read the relevant code first — the failure may be in the
-implementation or in a test that the change made stale, so decide which is actually wrong
-rather than forcing either to match the other. Do not delete, skip, or weaken a test to make
-it pass. Re-run the failing command yourself to confirm the fix before you finish."""
+            prompt = prompts.render(
+                "repair-verification-failure",
+                task=task,
+                failures=result.failure_report(),
+            )
 
         cfg = self.settings.get_agent_config("single_agent")
         if session_id:

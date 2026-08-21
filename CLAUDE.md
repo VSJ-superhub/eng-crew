@@ -12,6 +12,8 @@ This is a generalized, pip-installable version of a private internal tool. It mu
 - Cross-platform (Windows, macOS, Linux)
 - Clean install: `pip install eng-crew` or `docker compose up`
 - Multi-agent pipeline: architect → critic → HITL approval → specialist coders → reviewer → executor
+- Agent prompts live in `.claude/skills/<name>/SKILL.md` (frontmatter + template),
+  loaded by `eng_crew/prompts.py` — edit a prompt without touching agent code.
 - Runs execute in their own git worktree and branch (`worktree_isolation`, on by
   default), so a run never stashes your changes or moves the branch you are on.
 - Every execution tier (simple / single-agent / full graph) exits through a deterministic
