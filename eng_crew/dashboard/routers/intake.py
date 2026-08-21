@@ -94,12 +94,53 @@ def _build_intake_prompt(system: str, history: List[dict], message: str) -> str:
     parts.append("\nRespond as the engineering team lead. Be concise.")
     return "\n".join(parts)
 
+INTAKE_MODEL = "claude-haiku-4-5-20251001"
+
+
+async def collect_completion(prompt: str, model: str = INTAKE_MODEL) -> str:
+    """Run one non-streaming CLI call and return its text.
+
+    This is the seam. Every intake endpoint that needs an LLM goes through here
+    rather than building its own subprocess, so there is one place to change how
+    the CLI is invoked — and one place for a test to substitute a fake, which is
+    what makes the endpoints' parsing and error handling testable at all.
+
+    Returns "" when the call fails; callers already treat empty text as a
+    parse failure and fall back.
+    """
+    cmd = [
+        "claude", "-p", prompt,
+        "--allowedTools", "none",
+        "--output-format", "json",
+        "--model", model,
+        "--max-turns", "1",
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        return ""
+
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return ""
+    raw = stdout.decode("utf-8", errors="replace")
+    try:
+        outer = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    return outer.get("result", outer.get("content", "")) or ""
+
+
 async def _run_claude_streaming(prompt: str):
     cmd = [
         "claude", "-p", prompt,
         "--allowedTools", "none",
         "--output-format", "stream-json",
-        "--model", "claude-haiku-4-5-20251001",
+        "--model", INTAKE_MODEL,
         "--max-turns", "1",
     ]
     try:
@@ -244,26 +285,7 @@ async def api_intake_extract(payload: ExtractPayload):
         if OLLAMA_SUMMARIZER_MODEL:
             text = await _run_ollama_collect(OLLAMA_SUMMARIZER_MODEL, prompt)
         else:
-            cmd = [
-                "claude", "-p", prompt,
-                "--allowedTools", "none",
-                "--output-format", "json",
-                "--model", "claude-haiku-4-5-20251001",
-                "--max-turns", "1",
-            ]
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await proc.communicate()
-            text = ""
-            if proc.returncode == 0:
-                try:
-                    outer = json.loads(stdout.decode("utf-8", errors="replace"))
-                    text = outer.get("result", outer.get("content", "")) or ""
-                except Exception:
-                    text = stdout.decode("utf-8", errors="replace")
+            text = await collect_completion(prompt)
 
         start, end = text.find("{"), text.rfind("}") + 1
         data = json.loads(text[start:end])
@@ -292,26 +314,7 @@ async def api_intake_parse_markdown(payload: ParseMarkdownPayload):
         if OLLAMA_SUMMARIZER_MODEL:
             text = await _run_ollama_collect(OLLAMA_SUMMARIZER_MODEL, prompt)
         else:
-            cmd = [
-                "claude", "-p", prompt,
-                "--allowedTools", "none",
-                "--output-format", "json",
-                "--model", "claude-haiku-4-5-20251001",
-                "--max-turns", "1",
-            ]
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await proc.communicate()
-            text = ""
-            if proc.returncode == 0:
-                try:
-                    outer = json.loads(stdout.decode("utf-8", errors="replace"))
-                    text = outer.get("result", outer.get("content", "")) or ""
-                except Exception:
-                    text = stdout.decode("utf-8", errors="replace")
+            text = await collect_completion(prompt)
 
         start, end = text.find("{"), text.rfind("}") + 1
         data = json.loads(text[start:end])
