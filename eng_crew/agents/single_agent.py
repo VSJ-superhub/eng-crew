@@ -16,6 +16,18 @@ from ..state import TeamState
 from .. import tracker
 
 
+def _progress_reporter(run_id: int, label: str):
+    """Map CLI stream events onto tracker progress rows."""
+    from ..providers.claude_cli import summarize_event
+
+    def report(evt: dict) -> None:
+        line = summarize_event(evt)
+        if line:
+            tracker.update_run_progress(run_id, -1, f"{label}: {line}")
+
+    return report
+
+
 class SingleAgentEngineer(BaseAgent):
     agent_type = "single_agent"
 
@@ -61,6 +73,7 @@ Be decisive. Prefer editing existing files over creating new ones."""
             allowed_tools="Glob,Grep,Read,Edit,Write,Bash,Task,TodoWrite,WebSearch,WebFetch",
             max_turns=self.MAX_TURNS,
             cwd=project_path,
+            on_event=_progress_reporter(run_id, "single-agent"),
         )
 
         if run_id:
@@ -77,4 +90,7 @@ Be decisive. Prefer editing existing files over creating new ones."""
             **state,
             "execution_results": [summary],
             "final_summary": summary,
+            # Lets the verification gate resume this session for repairs
+            # instead of re-deriving the change from a cold start.
+            "cli_session_id": getattr(result, "session_id", "") or "",
         }

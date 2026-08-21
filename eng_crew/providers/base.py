@@ -20,6 +20,7 @@ class LLMResult:
     cost_usd: float = 0.0
     provider: str = ""
     model: str = ""
+    session_id: str = ""   # CLI session, for --resume continuity
 class Provider(ABC):
     @abstractmethod
     def has_credentials(self): pass

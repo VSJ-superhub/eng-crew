@@ -49,3 +49,4 @@ class TeamState(TypedDict):
     verification_summary: Optional[str]
     verification_unverified: Optional[bool]
     verify_fix_count: int
+    cli_session_id: Optional[str]

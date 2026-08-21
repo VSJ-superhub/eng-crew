@@ -407,6 +407,25 @@ def update_run_subtask_count(run_id: int, total: int):
         print(f"[tracker] update_run_subtask_count error: {e}", file=sys.stderr)
 
 
+def update_run_progress(run_id: int, subtask_idx: int, description: str) -> None:
+    """Record what a run is doing right now, for the dashboard's live view.
+
+    Called from the agent nodes and from the CLI provider's stream callback, so
+    it fires many times per run — it must stay cheap and must never raise.
+    """
+    if not run_id:
+        return
+    try:
+        with _lock:
+            with _connect() as conn:
+                conn.execute(
+                    "UPDATE runs SET current_subtask_idx=?, current_subtask_desc=? WHERE id=?",
+                    (subtask_idx, (description or "")[:500], run_id),
+                )
+    except Exception as e:
+        print(f"[tracker] update_run_progress error: {e}", file=sys.stderr)
+
+
 def finish_run(run_id: int, status: str = "completed", final_summary: str = "") -> None:
     """Mark run complete, recalculate total cost, and store final summary."""
     try:

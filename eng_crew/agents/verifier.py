@@ -79,11 +79,36 @@ class VerifierAgent(BaseAgent):
         parts.extend(state.get("execution_results") or [])
         return "\n".join(p for p in parts if p)
 
+    def _progress(self, run_id: int, label: str):
+        from ..providers.claude_cli import summarize_event
+
+        def report(evt: dict) -> None:
+            line = summarize_event(evt)
+            if line:
+                tracker.update_run_progress(run_id, -1, f"{label}: {line}")
+
+        return report
+
     def _repair(self, state: TeamState, result, run_id: int, attempt: int) -> None:
         task = state.get("raw_task", "")
         project_path = state.get("project_path", ".")
 
-        prompt = f"""The change below was implemented, but verification failed. Fix it.
+        session_id = state.get("cli_session_id") or ""
+
+        if session_id:
+            # Resuming: the agent still has the change it just made in context,
+            # so restating the task would only add noise.
+            prompt = f"""Verification failed on the change you just made. Fix it.
+
+=== VERIFICATION FAILURES ===
+{result.failure_report()}
+
+Fix the cause of these failures. The failure may be in the implementation or in a test the
+change made stale, so decide which is actually wrong rather than forcing either to match the
+other. Do not delete, skip, or weaken a test to make it pass. Re-run the failing command
+yourself to confirm the fix before you finish."""
+        else:
+            prompt = f"""The change below was implemented, but verification failed. Fix it.
 
 === ORIGINAL TASK ===
 {task}
@@ -97,12 +122,16 @@ rather than forcing either to match the other. Do not delete, skip, or weaken a 
 it pass. Re-run the failing command yourself to confirm the fix before you finish."""
 
         cfg = self.settings.get_agent_config("single_agent")
+        if session_id:
+            print(f"[verify] resuming session {session_id[:8]}… for repair", file=sys.stderr)
         try:
             llm_result = call_llm(
                 cfg["provider"], cfg["model"], prompt,
                 allowed_tools=self.REPAIR_TOOLS,
                 max_turns=self.REPAIR_MAX_TURNS,
                 cwd=project_path,
+                resume_session=session_id or None,
+                on_event=self._progress(run_id, f"repair {attempt}"),
             )
         except Exception as exc:  # a failed repair must not crash the gate
             print(f"[verify] repair call failed: {exc}", file=sys.stderr)

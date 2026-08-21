@@ -203,6 +203,7 @@ def run_pipeline(
         "verification_summary": None,
         "verification_unverified": None,
         "verify_fix_count": 0,
+        "cli_session_id": None,
     }
 
     compiled = _build_graph(settings)

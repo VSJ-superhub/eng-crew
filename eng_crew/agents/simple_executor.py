@@ -9,6 +9,18 @@ from ..state import TeamState
 from .. import tracker
 
 
+def _progress_reporter(run_id: int, label: str):
+    """Map CLI stream events onto tracker progress rows."""
+    from ..providers.claude_cli import summarize_event
+
+    def report(evt: dict) -> None:
+        line = summarize_event(evt)
+        if line:
+            tracker.update_run_progress(run_id, -1, f"{label}: {line}")
+
+    return report
+
+
 class SimpleExecutorAgent(BaseAgent):
     agent_type = "simple_executor"
 
@@ -34,6 +46,7 @@ Be minimal — only change what the task requires. When done, briefly describe w
             allowed_tools="Glob,Grep,Read,Edit,Write",
             max_turns=25,
             cwd=project_path,
+            on_event=_progress_reporter(run_id, "simple"),
         )
 
         if run_id:
@@ -50,4 +63,5 @@ Be minimal — only change what the task requires. When done, briefly describe w
             **state,
             "execution_results": [summary],
             "final_summary": summary,
+            "cli_session_id": getattr(result, "session_id", "") or "",
         }
