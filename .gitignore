@@ -52,3 +52,6 @@ Thumbs.db
 
 # MCP server runtime state
 .services_state.json
+
+# Personal Claude Code settings (skills under .claude/skills are tracked)
+.claude/settings.local.json
