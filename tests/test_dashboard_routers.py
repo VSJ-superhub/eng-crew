@@ -379,3 +379,37 @@ def test_sprints_on_an_unknown_project_are_a_404(client):
 def test_creating_an_issue_requires_a_title(client, project):
     resp = client.post(f"/api/projects/{project['id']}/issues", json={"description": "no title"})
     assert resp.status_code == 422
+
+
+# --- stacks -------------------------------------------------------------
+
+
+def test_stacks_endpoint_answers(client):
+    """This 500'd in production: it imported providers.ollama.is_available,
+    which did not exist, so the Stacks page was broken and nothing caught it.
+    """
+    resp = client.get("/api/stacks")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert set(body) >= {"active", "stacks", "effective", "ollama_available"}
+    assert isinstance(body["ollama_available"], bool)
+
+
+def test_stacks_lists_the_known_presets(client):
+    stacks = client.get("/api/stacks").json()["stacks"]
+    assert {"quality", "fast", "local", "deepseek", "free"} <= set(stacks)
+
+
+def test_ollama_availability_is_a_fast_bool_when_absent(monkeypatch):
+    """A missing Ollama daemon must not stall the stacks page."""
+    import time
+
+    from eng_crew.providers import ollama
+
+    def refuse(*a, **kw):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(ollama.requests, "get", refuse)
+    start = time.time()
+    assert ollama.is_available() is False
+    assert time.time() - start < 2

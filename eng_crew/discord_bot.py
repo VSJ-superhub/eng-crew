@@ -310,7 +310,7 @@ class EngCrewBot(discord.Client):
     async def on_ready(self):
         print(f"[discord_bot] Logged in as {self.user} (id: {self.user.id})")
         print("[discord_bot] Slash commands synced. Ready.")
-        print("[discord_bot] Use /task, or @mention me and name a project alias.")
+        print("[discord_bot] @mention or DM to talk. Name a project + a directive to build.")
 
     async def on_message(self, message: discord.Message):
         if message.author.bot:
