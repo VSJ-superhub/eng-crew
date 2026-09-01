@@ -325,3 +325,47 @@ def prune_worktrees(
         except GitError:
             pass
     return removed
+
+
+def changed_paths(project_path: str | Path, base: str = "HEAD") -> list[str]:
+    """Repo-relative paths this working tree changed since ``base``.
+
+    Covers tracked modifications and untracked files alike — the execution
+    tiers leave their output uncommitted, so a brand new test file shows up
+    only as untracked. Deleted paths are omitted: there is nothing to replay.
+    """
+    root = repo_root(project_path)
+    paths: set[str] = set()
+
+    for line in _git(["diff", "--name-only", "--diff-filter=d", base], cwd=root).splitlines():
+        if line.strip():
+            paths.add(line.strip())
+
+    # -uall lists files inside untracked directories, not just the directory.
+    for line in _git(["status", "--porcelain", "-uall"], cwd=root).splitlines():
+        if line.startswith("?? "):
+            paths.add(line[3:].strip().strip('"'))
+
+    return sorted(p for p in paths if (root / p).is_file())
+
+
+def create_detached_worktree(
+    project_path: str | Path,
+    base: str = "HEAD",
+    *,
+    worktree_dir: str | Path | None = None,
+    name: str = "redphase",
+) -> Path:
+    """Add a throwaway detached worktree at ``base``. Returns its path.
+
+    Detached rather than on a branch: this is a scratch checkout used to
+    replay tests against pre-change code, and it must not leave a branch
+    behind when it is torn down.
+    """
+    root = repo_root(project_path)
+    parent = Path(worktree_dir).expanduser().resolve() if worktree_dir else default_worktree_dir(root)
+    parent.mkdir(parents=True, exist_ok=True)
+    target = parent / f"{name}-{int(time.time() * 1000)}"
+
+    _git(["worktree", "add", "--detach", str(target), base], cwd=root)
+    return target

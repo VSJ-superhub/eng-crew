@@ -82,7 +82,32 @@ class VerifierAgent(BaseAgent):
                         print(f"[tracker] log_event error: {exc}", file=sys.stderr)
 
         lock_failed = bool(violations) and lock_mode == verify_mod.LOCK_STRICT
+
+        # Only worth asking "do these tests prove anything?" once the suite is
+        # green. On a broken tree the answer is noise, and it costs a checkout.
+        red = None
+        red_mode = getattr(self.settings, "verification_red_phase", verify_mod.RED_OFF)
+        if red_mode != verify_mod.RED_OFF and result.passed and not lock_failed:
+            try:
+                red = verify_mod.verify_red(project_path, timeout=timeout)
+            except Exception as exc:
+                # An unprovable run is not a broken one; never crash the gate.
+                print(f"[verify] red phase errored: {exc}", file=sys.stderr)
+                red = None
+            if red is not None:
+                print(f"[verify] red phase: {red.status} — {red.output.splitlines()[0] if red.output else ''}",
+                      file=sys.stderr)
+                if red.status == verify_mod.FAILED and run_id:
+                    try:
+                        tracker.log_event(run_id, -1, "verify_red_phase", red.output)
+                    except Exception as exc:
+                        print(f"[tracker] log_event error: {exc}", file=sys.stderr)
+
+        red_failed = red is not None and red.status == verify_mod.FAILED and red_mode == verify_mod.RED_STRICT
         summary = result.summary()
+        if red is not None and red.status == verify_mod.FAILED:
+            note = "new tests pass without the change"
+            summary = f"FAILED (red phase) — {note}" if red_failed else f"{summary} [WARNING: {note}]"
         if violations:
             note = "test files rewritten during repair: " + ", ".join(violations)
             summary = (
@@ -94,7 +119,9 @@ class VerifierAgent(BaseAgent):
         execution_results.append(f"[verify] {summary}")
 
         final_summary = state.get("final_summary") or ""
-        if lock_failed:
+        if red_failed:
+            final_summary = f"{final_summary}\n\n[RED] {summary}".strip()
+        elif lock_failed:
             final_summary = f"{final_summary}\n\n[TEST LOCK] {summary}".strip()
         elif not result.passed:
             final_summary = f"{final_summary}\n\n[VERIFICATION FAILED] {summary}".strip()
@@ -107,10 +134,11 @@ class VerifierAgent(BaseAgent):
             **state,
             "execution_results": execution_results,
             "final_summary": final_summary,
-            "verification_passed": result.passed and not lock_failed,
+            "verification_passed": result.passed and not lock_failed and not red_failed,
             "verification_summary": summary,
-            "verification_unverified": result.unverified and not lock_failed,
+            "verification_unverified": result.unverified and not lock_failed and not red_failed,
             "verification_test_lock_violations": violations or None,
+            "verification_red_phase": red.status if red is not None else None,
             "verify_fix_count": attempts,
         }
 

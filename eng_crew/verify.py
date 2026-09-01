@@ -357,3 +357,153 @@ def lock_violations(
             continue
         violations.append(rel_posix)
     return violations
+
+
+# ----------------------------------------------------------------------
+# Red phase
+#
+# The gate proves a run did not break what was already covered. It cannot
+# prove the run did what was asked: a change plus a test that would have
+# passed anyway is indistinguishable from real work.
+#
+# So replay the run's new tests against the code as it stood before the run.
+# They have to fail there. A test that passes without the change is not
+# testing the change — it is decoration, and the gate should say so.
+#
+# The execution tiers leave their output uncommitted (pipeline commits only
+# after verification), so "before the run" is just HEAD, and a detached
+# worktree gives it to us for the price of a checkout.
+# ----------------------------------------------------------------------
+
+RED = "red"  # a third Check.kind, alongside "test" and "build"
+
+RED_STRICT = "strict"
+RED_WARN = "warn"
+RED_OFF = "off"
+
+# Linked into the scratch worktree so the replayed tests can actually import
+# their dependencies; a fresh checkout has neither.
+_LINK_DIRS = [".venv", "venv", "node_modules"]
+
+
+def _is_support_file(rel_posix: str) -> bool:
+    """conftest.py carries the fixtures a test needs; replay it alongside."""
+    return rel_posix.rsplit("/", 1)[-1] == "conftest.py"
+
+
+def new_test_files(project_path: str | Path, base: str = "HEAD") -> list[str]:
+    """Test files this run added or modified, plus any conftest it touched."""
+    from . import git_skill
+
+    try:
+        changed = git_skill.changed_paths(project_path, base)
+    except Exception as exc:  # not a repo, git missing, detached weirdness
+        log.info("red: cannot list changed paths (%s)", exc)
+        return []
+
+    return [
+        p.replace("\\", "/")
+        for p in changed
+        if is_test_path(p) or _is_support_file(p.replace("\\", "/"))
+    ]
+
+
+def _copy_into(worktree: Path, project_root: Path, rel_paths: list[str]) -> list[str]:
+    """Copy the run's versions of these files over the pre-change checkout."""
+    copied = []
+    for rel in rel_paths:
+        source = project_root / rel
+        dest = worktree / rel
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(source.read_bytes())
+            copied.append(rel)
+        except OSError as exc:
+            log.info("red: could not stage %s (%s)", rel, exc)
+    return copied
+
+
+def verify_red(
+    project_path: str | Path,
+    *,
+    base: str = "HEAD",
+    timeout: int = 300,
+) -> CheckResult:
+    """Replay this run's new tests against pre-change code.
+
+    PASSED means they failed there, which is what we want: the tests
+    discriminate. FAILED means they passed without the change.
+    """
+    from . import git_skill
+
+    root = Path(project_path).expanduser().resolve()
+    name = "red phase"
+
+    if not any(c.name == "pytest" for c in detect_checks(root)):
+        return CheckResult(name, RED, SKIPPED, "red phase supports pytest projects only", "")
+
+    tests = new_test_files(root, base)
+    only_support = tests and all(_is_support_file(t) for t in tests)
+    if not tests or only_support:
+        return CheckResult(name, RED, SKIPPED, "run added no new tests", "")
+
+    replayed = [t for t in tests if not _is_support_file(t)]
+    cmd = [python_for(root), "-m", "pytest", "-q", "--no-header", "--tb=line", *replayed]
+    printable = "python -m pytest " + " ".join(replayed) + f"  (against {base})"
+
+    worktree = None
+    try:
+        worktree = git_skill.create_detached_worktree(root, base)
+    except Exception as exc:
+        # A scratch checkout is a convenience, not a guarantee. Never fail a
+        # run because we could not build one.
+        log.info("red: worktree unavailable (%s)", exc)
+        return CheckResult(name, RED, SKIPPED, f"could not create base worktree: {exc}", printable)
+
+    try:
+        git_skill.link_into_worktree(root, worktree, _LINK_DIRS)
+        staged = _copy_into(worktree, root, tests)
+        if not any(not _is_support_file(s) for s in staged):
+            return CheckResult(name, RED, SKIPPED, "could not stage tests into base tree", printable)
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=worktree,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                shell=False,
+            )
+        except subprocess.TimeoutExpired:
+            return CheckResult(name, RED, SKIPPED, f"timed out after {timeout}s", printable)
+        except OSError as exc:
+            return CheckResult(name, RED, SKIPPED, str(exc), printable)
+
+        output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+
+        if proc.returncode == 0:
+            return CheckResult(
+                name,
+                RED,
+                FAILED,
+                "These tests pass against the code as it was before this run, so "
+                "they do not demonstrate the change works:\n  "
+                + "\n  ".join(replayed)
+                + "\n\nWrite a test that fails without the change.\n\n"
+                + output[:2000],
+                printable,
+            )
+
+        # Exit 5 is "no tests collected" — at base that usually means the test
+        # file imports something this run created, which is a legitimate red.
+        detail = "collected nothing at base" if proc.returncode == 5 else "failed at base"
+        return CheckResult(name, RED, PASSED, f"{len(replayed)} new test file(s) {detail}", printable)
+    finally:
+        if worktree is not None:
+            try:
+                git_skill.remove_worktree(root, worktree, force=True)
+            except Exception as exc:
+                log.info("red: worktree cleanup failed for %s (%s)", worktree, exc)
