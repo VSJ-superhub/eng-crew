@@ -39,9 +39,19 @@ class VerifierAgent(BaseAgent):
         result = verify_mod.verify(project_path, agent_output=agent_output, timeout=timeout)
         print(f"[verify] {result.summary()}", file=sys.stderr)
 
+        lock_mode = getattr(self.settings, "verification_test_lock", verify_mod.LOCK_STRICT)
+        locking = lock_mode != verify_mod.LOCK_OFF and max_fixes > 0
+        # Snapshot before the first repair — the last state of the tests that
+        # nobody under pressure to turn the gate green has touched.
+        tests_before = verify_mod.snapshot_tests(project_path) if locking else {}
+        exempt_output = ""
+
         attempts = 0
         while not result.passed and attempts < max_fixes:
             attempts += 1
+            # Each pass may implicate different tests; a file stays editable
+            # if any pass was handed a failure naming it.
+            exempt_output += "\n" + result.failure_report(max_chars=20000)
             print(
                 f"[verify] repair pass {attempts}/{max_fixes} — {len(result.failures)} failing check(s)",
                 file=sys.stderr,
@@ -51,13 +61,45 @@ class VerifierAgent(BaseAgent):
             result = verify_mod.verify(project_path, agent_output="", timeout=timeout)
             print(f"[verify] after repair {attempts}: {result.summary()}", file=sys.stderr)
 
+        violations: list[str] = []
+        if locking and attempts:
+            violations = verify_mod.lock_violations(
+                tests_before,
+                verify_mod.snapshot_tests(project_path),
+                exempt_output,
+            )
+            if violations:
+                print(
+                    f"[verify] test lock ({lock_mode}): repair modified "
+                    f"{len(violations)} test file(s) the failures never named: "
+                    + ", ".join(violations),
+                    file=sys.stderr,
+                )
+                if run_id:
+                    try:
+                        tracker.log_event(run_id, -1, "verify_test_lock", "\n".join(violations))
+                    except Exception as exc:
+                        print(f"[tracker] log_event error: {exc}", file=sys.stderr)
+
+        lock_failed = bool(violations) and lock_mode == verify_mod.LOCK_STRICT
         summary = result.summary()
+        if violations:
+            note = "test files rewritten during repair: " + ", ".join(violations)
+            summary = (
+                f"FAILED (test lock) — {note}"
+                if lock_failed
+                else f"{summary} [WARNING: {note}]"
+            )
         execution_results = list(state.get("execution_results") or [])
         execution_results.append(f"[verify] {summary}")
 
         final_summary = state.get("final_summary") or ""
-        if not result.passed:
+        if lock_failed:
+            final_summary = f"{final_summary}\n\n[TEST LOCK] {summary}".strip()
+        elif not result.passed:
             final_summary = f"{final_summary}\n\n[VERIFICATION FAILED] {summary}".strip()
+        elif violations:
+            final_summary = f"{final_summary}\n\n[TEST LOCK WARNING] {summary}".strip()
         elif result.unverified:
             final_summary = f"{final_summary}\n\n[UNVERIFIED] {summary}".strip()
 
@@ -65,9 +107,10 @@ class VerifierAgent(BaseAgent):
             **state,
             "execution_results": execution_results,
             "final_summary": final_summary,
-            "verification_passed": result.passed,
+            "verification_passed": result.passed and not lock_failed,
             "verification_summary": summary,
-            "verification_unverified": result.unverified,
+            "verification_unverified": result.unverified and not lock_failed,
+            "verification_test_lock_violations": violations or None,
             "verify_fix_count": attempts,
         }
 

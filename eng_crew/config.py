@@ -93,6 +93,10 @@ class Settings(BaseSettings):
     verification_enabled: bool = True
     verification_max_fix_attempts: int = 1
     verification_timeout: int = 300
+    # Repair passes may not quietly rewrite a test to make the gate go green.
+    # Test files named in the failure output stay editable — fixing a broken
+    # new test is legitimate. "strict" fails the run, "warn" only reports it.
+    verification_test_lock: str = "strict"  # strict | warn | off
 
     # --- General ---
     budget_usd: float = 5.0

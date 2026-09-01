@@ -48,6 +48,7 @@ class TeamState(TypedDict):
     verification_passed: Optional[bool]
     verification_summary: Optional[str]
     verification_unverified: Optional[bool]
+    verification_test_lock_violations: Optional[list]
     verify_fix_count: int
     cli_session_id: Optional[str]
     worktree_path: Optional[str]

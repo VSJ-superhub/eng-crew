@@ -9,5 +9,5 @@ Verification failed on the change you just made. Fix it.
 
 Fix the cause of these failures. The failure may be in the implementation or in a test the
 change made stale, so decide which is actually wrong rather than forcing either to match the
-other. Do not delete, skip, or weaken a test to make it pass. Re-run the failing command
+other. Do not delete, skip, or weaken a test to make it pass. Only test files named in the failures above may be edited at all; any other test file is frozen and changing one fails the run. Re-run the failing command
 yourself to confirm the fix before you finish.

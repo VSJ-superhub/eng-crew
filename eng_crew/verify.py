@@ -11,6 +11,7 @@ FAILED. A project with no detectable checks is "unverified", not "failed".
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shutil
@@ -249,3 +250,110 @@ def verify(
     result = VerificationResult(results=results, truncated=truncated)
     log.info("verify: %s", result.summary())
     return result
+
+
+# ----------------------------------------------------------------------
+# Test lock
+#
+# A repair pass is handed failing tests and told to fix them. The cheap way
+# out is to edit the test instead of the code, which turns the gate green
+# while destroying the evidence it was built to collect. The lock snapshots
+# the test files before repair and refuses a run that quietly rewrote one.
+#
+# Files implicated in the failure output are exempt: when the agent's own
+# new test is what's broken, editing it is the correct fix. Everything the
+# failure never mentioned is frozen.
+# ----------------------------------------------------------------------
+
+_TEST_DIR_NAMES = frozenset({"tests", "test", "__tests__", "spec", "specs"})
+_TEST_IGNORE_DIRS = frozenset(
+    {
+        ".git", "__pycache__", "node_modules", ".venv", "venv",
+        "dist", "build", ".eng-crew", ".mypy_cache", ".ruff_cache",
+        ".pytest_cache", "target", "vendor",
+    }
+)
+# Suffixes that mark a test file wherever it sits in the tree.
+_TEST_SUFFIXES = (
+    "_test.py", "_test.go", "_test.rs", "_test.js", "_test.ts",
+    ".test.js", ".test.jsx", ".test.ts", ".test.tsx",
+    ".spec.js", ".spec.jsx", ".spec.ts", ".spec.tsx",
+)
+
+LOCK_STRICT = "strict"
+LOCK_WARN = "warn"
+LOCK_OFF = "off"
+
+
+def is_test_path(rel_path: str) -> bool:
+    """Does this repo-relative path look like a test file?"""
+    rel = rel_path.replace("\\", "/").strip("/")
+    if not rel:
+        return False
+    parts = rel.split("/")
+    name = parts[-1]
+    if any(part in _TEST_DIR_NAMES for part in parts[:-1]):
+        return True
+    if name.startswith("test_") and name.endswith(".py"):
+        return True
+    return name.endswith(_TEST_SUFFIXES)
+
+
+def snapshot_tests(project_path: str | Path) -> dict[str, str]:
+    """Map every test file in the tree to a hash of its contents.
+
+    Unreadable files are skipped rather than raising: the lock is a safety
+    net, and it must not be able to crash the gate it protects.
+    """
+    root = Path(project_path).expanduser().resolve()
+    snapshot: dict[str, str] = {}
+    if not root.is_dir():
+        return snapshot
+
+    for path in root.rglob("*"):
+        try:
+            if not path.is_file():
+                continue
+            rel = path.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if any(part in _TEST_IGNORE_DIRS for part in rel.parts):
+            continue
+        rel_posix = rel.as_posix()
+        if not is_test_path(rel_posix):
+            continue
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            continue
+        snapshot[rel_posix] = digest
+    return snapshot
+
+
+def _mentioned(rel_posix: str, text: str) -> bool:
+    """Is this file named in the failure output?
+
+    pytest node IDs always use forward slashes; other runners emit native
+    separators. Check both — a missed exemption would fail an honest run.
+    """
+    if not text:
+        return False
+    if rel_posix in text:
+        return True
+    return rel_posix.replace("/", "\\") in text
+
+
+def lock_violations(
+    before: dict[str, str],
+    after: dict[str, str],
+    exempt_output: str = "",
+) -> list[str]:
+    """Test files changed or deleted since ``before`` that the failures never named."""
+    violations = []
+    for rel_posix, digest in sorted(before.items()):
+        if after.get(rel_posix) == digest:
+            continue
+        if _mentioned(rel_posix, exempt_output):
+            continue
+        violations.append(rel_posix)
+    return violations

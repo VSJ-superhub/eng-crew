@@ -334,6 +334,7 @@ def run_pipeline(
         "verification_passed": None,
         "verification_summary": None,
         "verification_unverified": None,
+        "verification_test_lock_violations": None,
         "verify_fix_count": 0,
         "cli_session_id": None,
         "worktree_path": worktree_path,
