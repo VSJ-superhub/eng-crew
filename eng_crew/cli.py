@@ -184,7 +184,10 @@ def status(
     table.add_column("Project")
     table.add_column("Started")
     for r in runs:
-        status_color = {"completed": "green", "failed": "red", "running": "yellow"}.get(
+        status_color = {
+            "completed": "green", "unverified": "yellow",
+            "failed": "red", "running": "cyan",
+        }.get(
             str(r.get("status", "")), "white"
         )
         table.add_row(

@@ -340,14 +340,18 @@ def cleanup_stale_backlog_items() -> int:
     try:
         with _lock:
             with _connect() as conn:
-                # Items whose run finished as completed/rejected → done
+                # Items whose run finished as completed/unverified/rejected → done.
+                # "unverified" counts as done because the work landed; it is the
+                # evidence that is missing, not the change. Leaving it out would
+                # strand the item in 'running' forever.
                 cur = conn.execute(
                     """UPDATE backlog_items
                        SET status='done'
                        WHERE status='running'
                          AND run_id IS NOT NULL
                          AND run_id IN (
-                             SELECT id FROM runs WHERE status IN ('completed', 'rejected')
+                             SELECT id FROM runs
+                             WHERE status IN ('completed', 'unverified', 'rejected')
                          )"""
                 )
                 done_count = cur.rowcount
@@ -374,7 +378,9 @@ def cleanup_stale_backlog_items() -> int:
                 cur = conn.execute(
                     """UPDATE backlog_items SET status='done'
                        WHERE status='pending' AND run_id IS NOT NULL
-                         AND run_id IN (SELECT id FROM runs WHERE status='completed')"""
+                         AND run_id IN (
+                             SELECT id FROM runs WHERE status IN ('completed', 'unverified')
+                         )"""
                 )
                 done_count += cur.rowcount
                 cur = conn.execute(
@@ -830,9 +836,10 @@ def get_project_stats(project_path: str) -> dict:
             row = conn.execute("""
                 SELECT
                     COUNT(*) AS total_runs,
-                    SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed,
-                    SUM(CASE WHEN status='failed'    THEN 1 ELSE 0 END) AS failed,
-                    SUM(CASE WHEN status='running'   THEN 1 ELSE 0 END) AS running,
+                    SUM(CASE WHEN status='completed'  THEN 1 ELSE 0 END) AS completed,
+                    SUM(CASE WHEN status='unverified' THEN 1 ELSE 0 END) AS unverified,
+                    SUM(CASE WHEN status='failed'     THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN status='running'    THEN 1 ELSE 0 END) AS running,
                     COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd
                 FROM runs WHERE project_path = ?
             """, (project_path,)).fetchone()
@@ -1532,7 +1539,9 @@ def get_plan_sprints(plan_id: int) -> list[dict]:
             run_row = con.execute(
                 "SELECT status FROM runs WHERE id=?", (d["run_id"],)
             ).fetchone()
-            if run_row and run_row["status"] in ("completed", "failed", "rejected"):
+            if run_row and run_row["status"] in (
+                "completed", "unverified", "failed", "rejected"
+            ):
                 # Check actual task outcomes
                 task_rows = con.execute(
                     "SELECT status FROM backlog_items WHERE run_id=? AND subtask_id IS NOT NULL",
@@ -1544,7 +1553,11 @@ def get_plan_sprints(plan_id: int) -> list[dict]:
                     new_status = "done" if all_done else ("failed" if any_failed else "done")
                 else:
                     # No task rows yet — fall back to run status
-                    new_status = "done" if run_row["status"] == "completed" else "failed"
+                    new_status = (
+                        "done"
+                        if run_row["status"] in ("completed", "unverified")
+                        else "failed"
+                    )
                 try:
                     with _lock:
                         with _connect() as wcon:

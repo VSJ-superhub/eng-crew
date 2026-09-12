@@ -38,7 +38,7 @@ def clean_db(tmp_path, monkeypatch):
     tracker._init_db()
 
 
-def _run(monkeypatch, repo, settings, *, edit=True, verified=True):
+def _run(monkeypatch, repo, settings, *, edit=True, verified=True, unverified=False):
     """Run the pipeline with a stubbed graph that edits a file. No LLM calls."""
     captured: dict = {}
 
@@ -52,6 +52,7 @@ def _run(monkeypatch, repo, settings, *, edit=True, verified=True):
                 **state,
                 "final_summary": "agent done",
                 "verification_passed": verified,
+                "verification_unverified": unverified,
             }
 
     monkeypatch.setattr(pipeline, "_build_graph", lambda s: FakeGraph())
@@ -161,3 +162,104 @@ def test_committed_output_becomes_prunable_once_merged(repo, clean_db, monkeypat
 
     assert git_skill.worktree_status(repo, wt)["unmerged"] == 0
     assert str(wt) in git_skill.prune_worktrees(repo, keep_last=0, max_age_days=7)
+
+
+# --- status honesty -----------------------------------------------------
+#
+# Run 100243 edited nothing, had no checks to run, and was recorded
+# "completed" — indistinguishable from a run that passed a real suite.
+
+
+def test_unverified_run_gets_its_own_status(repo, clean_db, monkeypatch):
+    settings = Settings()
+    settings.worktree_isolation = True
+
+    _run(monkeypatch, repo, settings, verified=True, unverified=True)
+    row = tracker.get_run_detail(1)
+    assert row["status"] == "unverified", "no checks ran, so nothing vouched for it"
+
+
+def test_verified_run_is_still_completed(repo, clean_db, monkeypatch):
+    settings = Settings()
+    settings.worktree_isolation = True
+
+    _run(monkeypatch, repo, settings, verified=True, unverified=False)
+    assert tracker.get_run_detail(1)["status"] == "completed"
+
+
+def test_gate_that_never_reported_is_failed(repo, clean_db, monkeypatch):
+    """verification_passed=None must not read as success."""
+    settings = Settings()
+    settings.worktree_isolation = True
+
+    _run(monkeypatch, repo, settings, verified=None)
+    row = tracker.get_run_detail(1)
+    assert row["status"] == "failed"
+    assert "NOT VERIFIED" in (row["final_summary"] or "")
+
+
+# --- dependency links stay out of the commit ----------------------------
+#
+# link_into_worktree symlinks .venv / node_modules into the worktree so tests
+# can run. ".venv/" in .gitignore has a trailing slash and matches a directory,
+# not the link standing in for one, so `add -A` staged it and runs 100240 and
+# 100243 both committed absolute paths from the developer's machine.
+
+
+def _make_link(target_dir, link_path):
+    """Symlink, falling back to a Windows junction. Returns True if it worked."""
+    import os
+    try:
+        os.symlink(target_dir, link_path, target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError):
+        pass
+    if os.name == "nt":
+        return subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link_path), str(target_dir)],
+            capture_output=True, text=True,
+        ).returncode == 0
+    return False
+
+
+def test_linked_dependency_dir_is_not_committed(repo, tmp_path):
+    deps = tmp_path / "real_node_modules"
+    deps.mkdir()
+    (deps / "pkg.txt").write_text("dep\n", encoding="utf-8")
+    if not _make_link(deps, repo / "node_modules"):
+        pytest.skip("this platform allows neither symlinks nor junctions")
+
+    (repo / "src.py").write_text("y = 2\n", encoding="utf-8")
+    sha = git_skill.commit_all(repo, "add src")
+    assert sha, "the real change must still be committed"
+
+    tree = _git("cat-file", "-p", f"{sha}^{{tree}}", cwd=repo).stdout
+    assert "node_modules" not in tree, "the link must not reach the tree"
+    assert "src.py" in tree
+    assert (repo / "node_modules" / "pkg.txt").exists(), "the link stays on disk"
+
+
+def test_symlink_to_a_file_is_still_committed(repo, tmp_path):
+    """Only directory links are dependency noise; a file symlink is ordinary."""
+    target = repo / "app.py"
+    if not _make_link(target, repo / "alias.py"):
+        pytest.skip("this platform allows neither symlinks nor junctions")
+    if (repo / "alias.py").is_dir():
+        pytest.skip("link resolved to a directory on this platform")
+
+    sha = git_skill.commit_all(repo, "add alias")
+    assert sha
+    assert "alias.py" in _git("cat-file", "-p", f"{sha}^{{tree}}", cwd=repo).stdout
+
+
+def test_commit_all_returns_none_when_only_links_were_staged(repo, tmp_path):
+    """The index ends up empty, so there is nothing to commit — not a crash."""
+    deps = tmp_path / "real_venv"
+    deps.mkdir()
+    (deps / "marker.txt").write_text("x\n", encoding="utf-8")
+    if not _make_link(deps, repo / ".venv"):
+        pytest.skip("this platform allows neither symlinks nor junctions")
+
+    before = _git("rev-parse", "HEAD", cwd=repo).stdout.strip()
+    assert git_skill.commit_all(repo, "nothing real") is None
+    assert _git("rev-parse", "HEAD", cwd=repo).stdout.strip() == before

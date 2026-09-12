@@ -4,6 +4,10 @@ import { getRunDetail, retrySubtask, retryRun, cancelRun, pauseRun, resumeRun, r
 import type { RunDetail, RunEvent, SubtaskPlan, CostByAgentEntry, RunDetailResponse } from '../api/client'
 import OutputViewer from '../components/OutputViewer'
 
+// A run is over when it reaches one of these. "unverified" belongs here or the
+// page keeps an SSE stream open against a run that will never emit again.
+const TERMINAL_STATUSES = ['completed', 'unverified', 'failed', 'rejected']
+
 const AGENT_COLORS: Record<string, string> = {
   frontend: 'bg-blue-500/20 text-blue-300 border-blue-500/30',
   backend: 'bg-green-500/20 text-green-300 border-green-500/30',
@@ -23,6 +27,7 @@ function StatusBadge({ status }: { status: string }) {
     running: 'bg-blue-500/20 text-blue-300 animate-pulse',
     completed: 'bg-green-500/20 text-green-300',
     done: 'bg-green-500/20 text-green-300',
+    unverified: 'bg-yellow-500/20 text-yellow-300',
     failed: 'bg-red-500/20 text-red-300',
     pending: 'bg-gray-500/20 text-gray-400',
     awaiting_approval: 'bg-amber-500/20 text-amber-300',
@@ -256,7 +261,7 @@ export default function RunDetail() {
     }
 
     load().then(() => {
-      const isTerminal = detail?.run.status === 'completed' || detail?.run.status === 'failed'
+      const isTerminal = TERMINAL_STATUSES.includes(detail?.run.status ?? '')
       if (!isTerminal) startSSE()
     })
 
@@ -339,7 +344,7 @@ export default function RunDetail() {
 
   const { run, events = [], plan = [], cost_by_agent = {} } = detail
   const durationSec = run.duration_secs ? Math.round(run.duration_secs) : null
-  const isTerminal = run.status === 'completed' || run.status === 'failed'
+  const isTerminal = TERMINAL_STATUSES.includes(run.status)
 
   const currentAgent = events.length > 0 ? events[events.length - 1].agent : null;
   const currentMessage = events.length > 0 ? events[events.length - 1].message : null;

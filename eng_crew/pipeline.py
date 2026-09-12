@@ -358,8 +358,18 @@ def run_pipeline(
         # Only an explicit pass counts: None means the gate never reported (the
         # implementation step died, or the node crashed), and treating that as
         # success is what let runs that produced nothing report "completed".
+        #
+        # "unverified" is its own terminal status, not a flavour of completed: the
+        # work landed but no check vouched for it, which is a branch to review
+        # rather than a result to trust.
         verified = final_state.get("verification_passed")
-        status = "completed" if verified is True else "failed"
+        if verified is not True:
+            status = "failed"
+        elif final_state.get("verification_unverified"):
+            status = "unverified"
+        else:
+            status = "completed"
+
         if verified is False:
             log.warning(
                 "Run %s failed verification: %s",
@@ -370,6 +380,11 @@ def run_pipeline(
                 "Run %s never reached the verification gate — marking failed", run_id
             )
             summary = f"{summary}\n\n[NOT VERIFIED] The verification gate never reported."
+        elif status == "unverified":
+            log.warning(
+                "Run %s produced no verifiable evidence: %s",
+                run_id, final_state.get("verification_summary"),
+            )
         tracker.finish_run(run_id, status=status, final_summary=summary)
         return final_state
     except RunCancelled as exc:

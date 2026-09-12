@@ -125,10 +125,19 @@ async def _execute(channel: "discord.abc.Messageable", cfg: dict, task: str,
         )
         run_status = (detail or {}).get("status", "unknown")
         ok = run_status == "completed"
+        # Unverified is neither: the change landed, nothing vouched for it.
+        unverified = run_status == "unverified"
         embed = discord.Embed(
-            title=f"{'✅' if ok else '❌'} {cfg.get('name', 'Project')} — {run_status.upper()}",
+            title=(
+                f"{'✅' if ok else '⚠️' if unverified else '❌'} "
+                f"{cfg.get('name', 'Project')} — {run_status.upper()}"
+            ),
             description=(summary or "No summary.")[:2000],
-            color=discord.Color.green() if ok else discord.Color.red(),
+            color=(
+                discord.Color.green() if ok
+                else discord.Color.orange() if unverified
+                else discord.Color.red()
+            ),
         )
         if branch:
             embed.add_field(name="Branch", value=f"`{branch}`", inline=True)
@@ -409,7 +418,9 @@ async def cmd_status(interaction: discord.Interaction):
     if recent:
         lines.append("\n**Recent:**")
         for r in recent:
-            icon = {"completed": "✅", "failed": "❌"}.get(r.get("status"), "•")
+            icon = {
+                "completed": "✅", "unverified": "⚠️", "failed": "❌",
+            }.get(r.get("status"), "•")
             lines.append(f"  {icon} #{r['id']} · {(r.get('task_text') or '')[:60]}")
     await interaction.response.send_message("\n".join(lines) or "No runs yet.")
 

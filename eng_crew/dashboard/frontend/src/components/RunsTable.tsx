@@ -7,6 +7,7 @@ interface Props { active: Run[]; recent: Run[] }
 const STATUS_COLORS: Record<string, string> = {
   running: 'bg-blue-900/50 text-blue-300',
   completed: 'bg-green-900/50 text-green-300',
+  unverified: 'bg-yellow-900/50 text-yellow-300',
   failed: 'bg-red-900/50 text-red-300',
   pending: 'bg-gray-700/50 text-gray-300',
   awaiting_approval: 'bg-amber-900/50 text-amber-300',
@@ -52,6 +53,7 @@ export default function RunsTable({ active, recent }: Props) {
           <option value='all'>All</option>
           <option value='running'>Running</option>
           <option value='completed'>Completed</option>
+          <option value='unverified'>Unverified</option>
           <option value='failed'>Failed</option>
           <option value='pending'>Pending</option>
           <option value='awaiting_approval'>Awaiting Approval</option>

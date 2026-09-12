@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 import sys
@@ -7,6 +8,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+
+log = logging.getLogger(__name__)
 
 
 class GitError(Exception):
@@ -103,6 +107,62 @@ def ensure_branch(
     return branch
 
 
+_LINK_MODE = "120000"    # symlink blob
+_GITLINK_MODE = "160000"  # embedded repository
+
+
+def _registered_submodules(root: Path) -> set[str]:
+    """Paths git legitimately tracks as submodules."""
+    gitmodules = root / ".gitmodules"
+    if not gitmodules.exists():
+        return set()
+    try:
+        out = _git(
+            ["config", "-f", ".gitmodules", "--get-regexp", r"^submodule\..*\.path$"],
+            cwd=root,
+        )
+    except GitError:
+        return set()
+    return {line.split(maxsplit=1)[1] for line in out.splitlines() if " " in line}
+
+
+def _unstage_dependency_links(root: Path) -> list[str]:
+    """Drop staged dependency links from the index. Returns the paths dropped.
+
+    link_into_worktree symlinks .venv and node_modules into a worktree so the
+    project's tests can run there. A .gitignore entry like "node_modules/" has a
+    trailing slash and so matches a directory, never the symlink standing in for
+    one, which leaves `add -A` free to stage the link. Committing it writes the
+    main checkout's absolute path into the tree — noise at best, and on another
+    machine a path that does not exist.
+
+    Only links to directories and unregistered embedded repos are dropped; a
+    symlink to a file is a normal thing to track.
+    """
+    dropped: list[str] = []
+    submodules = _registered_submodules(root)
+    for line in _git(["ls-files", "--stage"], cwd=root).splitlines():
+        meta, _, path = line.partition("\t")
+        if not path:
+            continue
+        mode = meta.split()[0] if meta.split() else ""
+        if mode == _GITLINK_MODE:
+            if path in submodules:
+                continue
+        elif mode == _LINK_MODE:
+            # is_dir() follows the link, so it is True for both a POSIX symlink
+            # and a Windows junction pointing at a directory.
+            if not (root / path).is_dir():
+                continue
+        else:
+            continue
+        # Resets the index entry to HEAD, or removes it when it is newly added,
+        # without touching what is on disk.
+        _git(["reset", "-q", "--", path], cwd=root)
+        dropped.append(path)
+    return dropped
+
+
 def commit_all(
     project_path: str | Path,
     message: str,
@@ -113,7 +173,10 @@ def commit_all(
     root = Path(project_path).expanduser().resolve()
     if add_all:
         _git(["add", "-A"], cwd=root)
-    if not _git(["status", "--porcelain"], cwd=root):
+        dropped = _unstage_dependency_links(root)
+        if dropped:
+            log.info("commit_all: left dependency links unstaged: %s", ", ".join(dropped))
+    if not _git(["diff", "--cached", "--name-only"], cwd=root):
         return None
     _git(["commit", "-m", message], cwd=root)
     return _git(["rev-parse", "HEAD"], cwd=root)
