@@ -355,13 +355,21 @@ def run_pipeline(
                 log.info("committed run output as %s", sha[:12])
 
         # The verification gate, not the absence of an exception, decides success.
+        # Only an explicit pass counts: None means the gate never reported (the
+        # implementation step died, or the node crashed), and treating that as
+        # success is what let runs that produced nothing report "completed".
         verified = final_state.get("verification_passed")
-        status = "failed" if verified is False else "completed"
+        status = "completed" if verified is True else "failed"
         if verified is False:
             log.warning(
                 "Run %s failed verification: %s",
                 run_id, final_state.get("verification_summary"),
             )
+        elif verified is None:
+            log.warning(
+                "Run %s never reached the verification gate — marking failed", run_id
+            )
+            summary = f"{summary}\n\n[NOT VERIFIED] The verification gate never reported."
         tracker.finish_run(run_id, status=status, final_summary=summary)
         return final_state
     except RunCancelled as exc:

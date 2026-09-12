@@ -10,6 +10,7 @@ to prevent.
 from __future__ import annotations
 
 import sys
+from dataclasses import replace as dc_replace
 
 from .base import BaseAgent
 from .. import prompts, tracker, verify as verify_mod
@@ -37,6 +38,9 @@ class VerifierAgent(BaseAgent):
 
         agent_output = self._agent_output(state)
         result = verify_mod.verify(project_path, agent_output=agent_output, timeout=timeout)
+        # Truncation is a fact about the implementation, not about the repair's
+        # account of it, so it has to survive the re-verify below.
+        was_truncated = result.truncated
         print(f"[verify] {result.summary()}", file=sys.stderr)
 
         lock_mode = getattr(self.settings, "verification_test_lock", verify_mod.LOCK_STRICT)
@@ -58,7 +62,18 @@ class VerifierAgent(BaseAgent):
             )
             self._repair(state, result, run_id, attempts)
             # Re-verify against the tree, not the repair agent's own account of it.
-            result = verify_mod.verify(project_path, agent_output="", timeout=timeout)
+            # Passing agent_output="" drops the repair's narration on purpose, so
+            # an established truncation is handed over explicitly — otherwise a
+            # repair that accomplished nothing (or died on a provider error)
+            # clears the flag and a third-finished run passes the gate.
+            result = verify_mod.verify(
+                project_path, agent_output="", truncated=was_truncated, timeout=timeout
+            )
+            if was_truncated and result.ran_any and not result.failures:
+                # Real checks ran and vouch for the tree: positive evidence that
+                # the repair finished the truncated work, so stop holding it.
+                result = dc_replace(result, truncated=False)
+                was_truncated = False
             print(f"[verify] after repair {attempts}: {result.summary()}", file=sys.stderr)
 
         violations: list[str] = []

@@ -184,3 +184,51 @@ def test_run_check_times_out_as_failure():
     res = run_check(check, _tmp(), timeout=1)
     assert res.status == FAILED
     assert "timed out" in res.output
+
+
+# --- false completion ---------------------------------------------------
+#
+# Regression guards for run 100240, which was truncated at max turns, had its
+# single repair pass die on a provider error, and still landed in the runs
+# table as "completed".
+
+
+def test_verify_accepts_an_established_truncation():
+    """A re-verify that ignores agent output can still be told it was truncated."""
+    d = _tmp()  # no checks detectable -> unverified territory
+    result = verify.verify(str(d), agent_output="", truncated=True)
+    assert result.truncated is True
+    assert result.passed is False, "a truncated implementation must never pass"
+
+
+def test_untruncated_empty_project_is_unverified_not_failed():
+    d = _tmp()
+    result = verify.verify(str(d), agent_output="")
+    assert result.passed is True
+    assert result.unverified is True
+
+
+def test_truncation_outranks_unverified():
+    """With nothing to run, truncation is the only evidence — it must win."""
+    r = VerificationResult(results=[], truncated=True)
+    assert r.passed is False
+    assert r.unverified is False
+
+
+def test_passing_checks_clear_a_truncation_only_when_they_ran():
+    ran_ok = VerificationResult(results=[CheckResult(name="pytest", kind="test", status=PASSED)], truncated=True)
+    assert ran_ok.ran_any is True
+    assert ran_ok.passed is False, "sticky until something vouches for the tree"
+
+    nothing_ran = VerificationResult(results=[CheckResult(name="pytest", kind="test", status=SKIPPED)], truncated=True)
+    assert nothing_ran.ran_any is False
+
+
+def test_pipeline_status_requires_an_explicit_pass():
+    """None means the gate never reported; only True is success."""
+    def status_for(verified):
+        return "completed" if verified is True else "failed"
+
+    assert status_for(True) == "completed"
+    assert status_for(False) == "failed"
+    assert status_for(None) == "failed", "run 100239 reported completed on a 529"

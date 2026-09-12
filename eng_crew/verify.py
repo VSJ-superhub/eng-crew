@@ -237,10 +237,15 @@ def verify(
     project_path: str | Path,
     *,
     agent_output: str = "",
+    truncated: bool = False,
     timeout: int = 300,
 ) -> VerificationResult:
-    """Run every detected check. ``agent_output`` is scanned for truncation."""
-    truncated = TRUNCATION_MARKER in (agent_output or "")
+    """Run every detected check. ``agent_output`` is scanned for truncation.
+
+    ``truncated`` carries a truncation already established by an earlier pass,
+    for a re-verify that deliberately ignores the agent's own narration.
+    """
+    truncated = truncated or TRUNCATION_MARKER in (agent_output or "")
     checks = detect_checks(project_path)
     if not checks:
         log.info("verify: no checks detected for %s", project_path)
