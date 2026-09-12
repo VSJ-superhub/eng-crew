@@ -9,6 +9,7 @@ continue in the same context rather than starting cold.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -24,6 +25,20 @@ TRUNCATION_PREFIX = (
 
 _MAX_RETRIES = 3
 _RETRY_DELAYS = [2, 5, 10]
+
+# The CLI prefers a static API key over the claude.ai subscription OAuth it is
+# actually meant to use here, so an ANTHROPIC_API_KEY inherited from .env (see
+# eng_crew.mcp_server, which loads .env into every subprocess env) silently
+# reroutes the run onto a pay-as-you-go account and fails with "Credit balance
+# is too low". Strip those vars for CLI subprocesses only — the anthropic_api
+# provider still needs them.
+_AUTH_VARS_TO_STRIP = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
+def _cli_env() -> dict[str, str]:
+    """Parent env minus the auth vars that shadow the CLI's own credentials."""
+    return {k: v for k, v in os.environ.items() if k not in _AUTH_VARS_TO_STRIP}
+
 
 
 def summarize_event(evt: dict) -> str:
@@ -110,6 +125,7 @@ class ClaudeCLIProvider(Provider):
             errors="replace",
             bufsize=1,
             cwd=cwd,
+            env=_cli_env(),
         )
         try:
             for line in proc.stdout:
