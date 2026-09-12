@@ -263,3 +263,58 @@ def test_commit_all_returns_none_when_only_links_were_staged(repo, tmp_path):
     before = _git("rev-parse", "HEAD", cwd=repo).stdout.strip()
     assert git_skill.commit_all(repo, "nothing real") is None
     assert _git("rev-parse", "HEAD", cwd=repo).stdout.strip() == before
+
+
+# --- the log a run wrote must be findable afterwards ---------------------
+#
+# runs.log_path was NULL for every run: mcp_server created logs/run_<ts>.log
+# and redirected the subprocess into it, but never told the tracker, so
+# GET /api/{run_id}/logs 404'd on "Log file not found for this run" while the
+# file sat on disk. The dashboard passed --log-path, which the CLI did not
+# accept at all.
+
+
+def test_log_path_is_recorded_on_the_run(repo, clean_db, monkeypatch, tmp_path):
+    settings = Settings()
+    settings.worktree_isolation = False
+    log = tmp_path / "run_1.log"
+    log.write_text("agent output\n", encoding="utf-8")
+
+    class FakeGraph:
+        def invoke(self, state):
+            return {**state, "final_summary": "done", "verification_passed": True}
+
+    monkeypatch.setattr(pipeline, "_build_graph", lambda s: FakeGraph())
+    pipeline.run_pipeline(
+        task="t", project_path=str(repo), settings=settings, log_path=str(log)
+    )
+    assert tracker.get_run_detail(1)["log_path"] == str(log)
+
+
+def test_log_path_is_recorded_on_a_pre_created_run(repo, clean_db, monkeypatch, tmp_path):
+    """Discord and the dashboard create the row before the log exists."""
+    settings = Settings()
+    settings.worktree_isolation = False
+    log = tmp_path / "run_2.log"
+    log.write_text("x\n", encoding="utf-8")
+    run_id = tracker.create_run("t", str(repo))
+
+    class FakeGraph:
+        def invoke(self, state):
+            return {**state, "final_summary": "done", "verification_passed": True}
+
+    monkeypatch.setattr(pipeline, "_build_graph", lambda s: FakeGraph())
+    pipeline.run_pipeline(
+        task="t", project_path=str(repo), settings=settings,
+        run_id=run_id, log_path=str(log),
+    )
+    assert tracker.get_run_detail(run_id)["log_path"] == str(log)
+
+
+def test_cli_accepts_the_log_path_flag():
+    """The dashboard has always passed --log-path; the CLI must know it."""
+    from typer.testing import CliRunner
+    from eng_crew.cli import app
+
+    out = CliRunner().invoke(app, ["run", "--help"]).output
+    assert "--log-path" in out

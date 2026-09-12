@@ -29,6 +29,11 @@ def run(
     env_file: Optional[Path] = typer.Option(None, "--env", help="Path to .env file."),
     no_approval: bool = typer.Option(False, "--no-approval", help="Skip human-in-the-loop approval step."),
     budget: Optional[float] = typer.Option(None, "--budget", help="Override budget in USD."),
+    log_path: Optional[Path] = typer.Option(
+        None, "--log-path",
+        help="Where this run's output is being captured; recorded on the run so "
+             "the dashboard can serve it.",
+    ),
 ) -> None:
     """Run a task on a project using the full multi-agent pipeline."""
     cfg = load_settings(env_file)
@@ -49,7 +54,12 @@ def run(
     try:
         from eng_crew.pipeline import run_pipeline  # type: ignore[import]
 
-        run_pipeline(task=task, project_path=project_path, settings=cfg)
+        run_pipeline(
+            task=task,
+            project_path=project_path,
+            settings=cfg,
+            log_path=str(log_path) if log_path else None,
+        )
     except ImportError:
         console.print("[red]Pipeline modules not yet installed. Run `pip install eng-crew[full]`.[/red]")
         raise typer.Exit(1)

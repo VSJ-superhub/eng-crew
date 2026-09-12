@@ -237,6 +237,7 @@ def run_pipeline(
     settings: Settings,
     *,
     run_id: int | None = None,
+    log_path: str | None = None,
 ) -> TeamState:
     """Create git branch, build graph, run agents, finalize tracker.
 
@@ -248,7 +249,11 @@ def run_pipeline(
     # Coerce once at the boundary so tracker binds, state, and git all see a str.
     project_path = str(project_path)
     if run_id is None:
-        run_id = tracker.create_run(task, project_path)
+        run_id = tracker.create_run(task, project_path, log_path)
+    elif log_path:
+        # Pre-created run (Discord's HITL gate, the dashboard): the row exists
+        # before the caller knows where output is going.
+        tracker.update_run_log_path(run_id, log_path)
     tracker.update_run_status(run_id, "running")
 
     branch: str | None = None

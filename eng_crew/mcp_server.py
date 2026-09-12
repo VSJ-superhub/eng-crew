@@ -162,7 +162,10 @@ def run_task(project_path: str, task: str) -> str:
     try:
         log = open(log_file, "w")
         proc = subprocess.Popen(
-            [_PYTHON, "-u", "-m", "eng_crew", "run", task, str(proj), "--no-approval"],
+            [
+                _PYTHON, "-u", "-m", "eng_crew", "run", task, str(proj),
+                "--no-approval", "--log-path", str(log_file),
+            ],
             cwd=str(_ENG_CREW_ROOT),
             env=env,
             stdin=subprocess.DEVNULL,
