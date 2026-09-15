@@ -15,10 +15,16 @@ def _entropy_engine_available() -> bool:
         return False
 
 
+# Relative paths (the .env file, data_dir) are anchored here, not the process cwd:
+# the MCP server is launched by Claude Code from whatever project it is open in,
+# and resolving against that cwd silently pointed it at a stale tracking.db.
+_ENG_CREW_ROOT = Path(__file__).resolve().parent.parent
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="ENG_CREW_",
-        env_file=".env",
+        env_file=_ENG_CREW_ROOT / ".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -138,7 +144,10 @@ class Settings(BaseSettings):
     @field_validator("data_dir", mode="before")
     @classmethod
     def resolve_data_dir(cls, v: object) -> Path:
-        return Path(str(v)).expanduser().resolve()
+        p = Path(str(v)).expanduser()
+        if not p.is_absolute():
+            p = _ENG_CREW_ROOT / p
+        return p.resolve()
 
     _CLI_ONLY_ROLES: frozenset = frozenset({"executor", "simple_executor", "single_agent"})
     _CLI_PROVIDERS: frozenset = frozenset({"claude_cli", "gemini_cli"})
