@@ -444,7 +444,9 @@ def create_run(task_text: str, project_path: str, log_path: str | None = None) -
                 "INSERT INTO runs (task_text, project_path, started_at, log_path) VALUES (?, ?, ?, ?)",
                 (task_text, str(project_path), _now(), log_path),
             )
-            return cur.lastrowid
+            run_id = cur.lastrowid
+    ensure_project(str(project_path))
+    return run_id
 
 
 def update_run_log_path(run_id: int, log_path: str) -> None:
@@ -1308,6 +1310,37 @@ def add_project(name: str, project_path: str, claude_md_path: str,
     )
     con.commit()
     return cur.lastrowid
+
+
+def _same_path(a: str, b: str) -> bool:
+    # Stored paths mix "C:/x" and "C:\\x" spellings; compare them as the OS would.
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
+def ensure_project(project_path: str) -> int | None:
+    """Register project_path in the projects table if no row names it yet.
+
+    Called for every new run, so a project shows up in list_projects without a
+    separate registration step. Best-effort: a failure here must never stop the
+    run that triggered it. Returns the project id, or None if not registered.
+    """
+    try:
+        path = Path(project_path).expanduser()
+        if not path.is_dir():
+            return None
+        con = _connect()
+        for row in con.execute("SELECT id, project_path FROM projects").fetchall():
+            if _same_path(row["project_path"], str(path)):
+                return row["id"]
+        resolved = str(path.resolve())
+        return add_project(
+            name=path.resolve().name,
+            project_path=resolved,
+            claude_md_path=str(Path(resolved) / "CLAUDE.md"),
+        )
+    except Exception as e:
+        print(f"[tracker] ensure_project error for {project_path}: {e}", file=sys.stderr)
+        return None
 
 
 def list_projects(active_only: bool = True) -> list:
