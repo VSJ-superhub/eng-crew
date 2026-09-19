@@ -150,3 +150,82 @@ def test_status_of_a_removed_worktree_reports_missing(repo):
     wt = git_skill.create_worktree(repo, "ai-team/gone")
     git_skill.remove_worktree(repo, wt, force=True)
     assert git_skill.worktree_status(repo, wt)["exists"] is False
+
+
+# --- sweeping spent worktrees when a run finishes -----------------------
+
+
+def test_spent_worktree_is_swept_regardless_of_age(repo):
+    """A run that produced nothing leaves an empty worktree; it should not linger.
+
+    Age-based retention kept these for a week, which is how they piled up.
+    """
+    wt = git_skill.create_worktree(repo, "ai-team/produced-nothing")
+
+    assert str(wt) in git_skill.prune_spent_worktrees(repo)
+    assert not wt.exists()
+
+
+def test_sweeping_still_refuses_dirty_and_unmerged_worktrees(repo):
+    dirty = git_skill.create_worktree(repo, "ai-team/dirty-now")
+    (dirty / "app.py").write_text("agent's unsaved work\n", encoding="utf-8")
+
+    committed = git_skill.create_worktree(repo, "ai-team/committed-now")
+    (committed / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    _git("add", "-A", cwd=committed)
+    _git("commit", "-qm", "agent work", cwd=committed)
+
+    assert git_skill.prune_spent_worktrees(repo) == []
+    assert dirty.is_dir() and committed.is_dir()
+
+
+def test_excluded_worktree_is_spared(repo):
+    """The run in flight, and the branch it stacked on, must survive the sweep."""
+    keep = git_skill.create_worktree(repo, "ai-team/in-flight")
+    spent = git_skill.create_worktree(repo, "ai-team/spent-too")
+
+    removed = git_skill.prune_spent_worktrees(repo, exclude=[keep])
+    assert str(spent) in removed
+    assert str(keep) not in removed
+    assert keep.is_dir()
+
+
+def test_dependency_links_are_unlinked_not_followed(repo):
+    """Removing a worktree must not delete the main checkout's .venv.
+
+    link_into_worktree leaves a symlink (or, on Windows, a junction) pointing at
+    the real thing; deleting the tree through it would take the target with it.
+    """
+    (repo / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    _git("add", ".gitignore", cwd=repo)
+    _git("commit", "-qm", "ignore .venv", cwd=repo)
+    (repo / ".venv").mkdir(exist_ok=True)
+    (repo / ".venv" / "marker.txt").write_text("deps", encoding="utf-8")
+    wt = git_skill.create_worktree(repo, "ai-team/linked")
+    linked = git_skill.link_into_worktree(repo, wt, [".venv"])
+    if not linked:
+        pytest.skip("this platform refused both symlinks and junctions")
+
+    git_skill.prune_spent_worktrees(repo)
+    assert not wt.exists()
+    assert (repo / ".venv" / "marker.txt").is_file(), "the real .venv was deleted"
+
+
+def test_a_dependency_link_alone_does_not_count_as_dirty(repo):
+    """The .venv link every worktree gets is plumbing, not the run's output.
+
+    git reports the link as untracked even under a ".venv/" ignore rule, which
+    made every worktree look dirty and therefore unprunable.
+    """
+    (repo / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    _git("add", ".gitignore", cwd=repo)
+    _git("commit", "-qm", "ignore .venv", cwd=repo)
+    (repo / ".venv").mkdir(exist_ok=True)
+    wt = git_skill.create_worktree(repo, "ai-team/plumbing")
+    if not git_skill.link_into_worktree(repo, wt, [".venv"]):
+        pytest.skip("this platform refused both symlinks and junctions")
+
+    assert git_skill.worktree_status(repo, wt)["dirty"] is False
+
+    (wt / "app.py").write_text("real work\n", encoding="utf-8")
+    assert git_skill.worktree_status(repo, wt)["dirty"] is True

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -51,11 +53,28 @@ def make_branch_name(prefix: str, slug: str) -> str:
     return f"{prefix}/{ts}-{safe_slug}"
 
 
-def create_branch(project_path: str | Path, branch_name: str) -> str:
-    """Create and checkout a new branch. Returns the branch name."""
+def create_branch(project_path: str | Path, branch_name: str, base: str | None = None) -> str:
+    """Create and checkout a new branch. Returns the branch name.
+
+    ``base`` is the start point — another branch, a tag, a SHA. Omitted, the
+    branch starts at whatever the checkout currently has checked out.
+    """
     root = Path(project_path).expanduser().resolve()
-    _git(["checkout", "-b", branch_name], cwd=root)
+    args = ["checkout", "-b", branch_name]
+    if base:
+        args.append(base)
+    _git(args, cwd=root)
     return branch_name
+
+
+def branch_exists(project_path: str | Path, ref: str) -> bool:
+    """True if ``ref`` resolves to a commit in this repo (branch, tag, or SHA)."""
+    root = Path(project_path).expanduser().resolve()
+    try:
+        _git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=root)
+        return True
+    except (GitError, FileNotFoundError):
+        return False
 
 
 def checkout_branch(project_path: str | Path, branch_name: str) -> None:
@@ -93,17 +112,19 @@ def ensure_branch(
     slug: str,
     *,
     stash_changes: bool = True,
+    base: str | None = None,
 ) -> str:
     """Create a timestamped branch in the target project.
 
-    Stashes dirty working tree changes if stash_changes is True.
+    Stashes dirty working tree changes if stash_changes is True. ``base`` bases
+    the new branch on another branch instead of the checkout's current HEAD.
     Returns the new branch name.
     """
     root = Path(project_path).expanduser().resolve()
     if not is_working_tree_clean(root) and stash_changes:
         stash(root)
     branch = make_branch_name(prefix, slug)
-    create_branch(root, branch)
+    create_branch(root, branch, base)
     return branch
 
 
@@ -242,13 +263,60 @@ def list_worktrees(project_path: str | Path) -> list[dict]:
     return entries
 
 
+def is_directory_link(path: str | Path) -> bool:
+    """True for a link that stands in for a directory.
+
+    Covers a POSIX symlink and a Windows junction alike — is_symlink() reports
+    False for a junction, which is what link_into_worktree falls back to when
+    Windows refuses symlinks, so asking that alone misses them.
+    """
+    entry = Path(path)
+    try:
+        if entry.is_symlink():
+            return entry.is_dir()
+        if os.name == "nt":
+            attrs = getattr(os.lstat(entry), "st_file_attributes", 0)
+            return bool(attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT) and entry.is_dir()
+    except OSError:
+        return False
+    return False
+
+
+def unlink_dependency_links(worktree: str | Path) -> list[str]:
+    """Drop the links link_into_worktree left in a worktree.
+
+    Removing the worktree directory tree with these still in place risks
+    following a junction into the main checkout's .venv and deleting the real
+    thing. Unlinking first removes the link, never its target. Returns the names
+    unlinked.
+    """
+    wt = Path(worktree).expanduser().resolve()
+    unlinked: list[str] = []
+    if not wt.is_dir():
+        return unlinked
+    for entry in wt.iterdir():
+        if not is_directory_link(entry):
+            continue
+        try:
+            os.rmdir(entry)         # junction, or a dir symlink on Windows
+        except OSError:
+            try:
+                entry.unlink()      # POSIX symlink
+            except OSError:
+                continue
+        unlinked.append(entry.name)
+    return unlinked
+
+
 def remove_worktree(project_path: str | Path, worktree_path: str | Path, *, force: bool = False) -> None:
     """Remove a worktree. force discards uncommitted changes inside it."""
     root = repo_root(project_path)
+    target = Path(worktree_path).expanduser().resolve()
+    unlink_dependency_links(target)
     args = ["worktree", "remove"]
     if force:
         args.append("--force")
-    args.append(str(Path(worktree_path).expanduser().resolve()))
+    args.append(str(target))
     _git(args, cwd=root)
 
 
@@ -262,8 +330,6 @@ def link_into_worktree(main_root: str | Path, worktree: str | Path, names: list[
 
     Returns the names actually linked.
     """
-    import os
-
     main_root = Path(main_root).expanduser().resolve()
     worktree = Path(worktree).expanduser().resolve()
     linked: list[str] = []
@@ -291,6 +357,26 @@ def link_into_worktree(main_root: str | Path, worktree: str | Path, names: list[
     return linked
 
 
+def _has_real_changes(worktree: Path, porcelain: str) -> bool:
+    """Whether a worktree's status is the run's work rather than its plumbing.
+
+    link_into_worktree drops a .venv/node_modules link into every worktree, and
+    a .gitignore entry like ".venv/" matches a directory, never the link
+    standing in for one — so git reports it as untracked. Counting that as
+    uncommitted work marked every worktree dirty, which held all of them back
+    from pruning forever.
+    """
+    for line in porcelain.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("?? "):
+            rel = line[3:].strip().strip('"')
+            if is_directory_link(worktree / rel):
+                continue
+        return True
+    return False
+
+
 def worktree_status(project_path: str | Path, worktree_path: str | Path) -> dict:
     """Describe a worktree well enough to decide whether losing it is safe.
 
@@ -308,7 +394,7 @@ def worktree_status(project_path: str | Path, worktree_path: str | Path) -> dict
 
     try:
         info["branch"] = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=wt)
-        info["dirty"] = bool(_git(["status", "--porcelain"], cwd=wt))
+        info["dirty"] = _has_real_changes(wt, _git(["status", "--porcelain"], cwd=wt))
         # Commits on this branch that exist on no other branch. Ask by branch
         # name, not HEAD — this runs in the main checkout, where HEAD is its own
         # branch, and would always report zero.
@@ -335,19 +421,25 @@ def prunable_worktrees(
     *,
     keep_last: int = 5,
     max_age_days: float = 7.0,
+    exclude: list[str | Path] | None = None,
 ) -> list[dict]:
     """Worktrees that are safe to delete, oldest first.
 
     Safe means: not the main worktree, no uncommitted changes, no commits that
     exist nowhere else, and older than max_age_days. The newest ``keep_last``
-    are held back regardless of age so recent work stays reviewable.
+    are held back regardless of age so recent work stays reviewable. ``exclude``
+    spares specific paths — a caller pruning while a run holds a worktree open
+    passes that worktree here.
     """
     root = repo_root(project_path)
+    spared = {Path(p).expanduser().resolve() for p in (exclude or [])}
     entries = []
     for wt in list_worktrees(project_path):
         path = Path(wt["path"]).resolve()
         if path == root.resolve():
             continue                      # never the checkout you work in
+        if path in spared:
+            continue
         entries.append(worktree_status(root, path))
 
     entries.sort(key=lambda e: e["age_days"])          # newest first
@@ -367,11 +459,14 @@ def prune_worktrees(
     keep_last: int = 5,
     max_age_days: float = 7.0,
     dry_run: bool = False,
+    exclude: list[str | Path] | None = None,
 ) -> list[str]:
     """Remove worktrees that are safe to remove. Returns the paths handled."""
     root = repo_root(project_path)
     removed: list[str] = []
-    for entry in prunable_worktrees(root, keep_last=keep_last, max_age_days=max_age_days):
+    for entry in prunable_worktrees(
+        root, keep_last=keep_last, max_age_days=max_age_days, exclude=exclude
+    ):
         if dry_run:
             removed.append(entry["path"])
             continue
@@ -388,6 +483,29 @@ def prune_worktrees(
         except GitError:
             pass
     return removed
+
+
+def prune_spent_worktrees(
+    project_path: str | Path,
+    *,
+    exclude: list[str | Path] | None = None,
+    dry_run: bool = False,
+) -> list[str]:
+    """Remove every worktree that is clean and fully merged, whatever its age.
+
+    Run this when a run finishes. Age is the wrong guard at that moment: a
+    worktree whose branch holds nothing another branch does not already hold has
+    no output left to review, so keeping it for a week only makes them pile up.
+    The safety checks are the same ones prune_worktrees uses — anything dirty or
+    unmerged (which is what a run's output looks like) is still kept.
+    """
+    return prune_worktrees(
+        project_path,
+        keep_last=0,
+        max_age_days=0.0,
+        dry_run=dry_run,
+        exclude=exclude,
+    )
 
 
 def changed_paths(project_path: str | Path, base: str = "HEAD") -> list[str]:

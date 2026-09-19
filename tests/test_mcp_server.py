@@ -55,5 +55,7 @@ def test_tools_carry_descriptions():
 def test_run_task_takes_project_path_and_task():
     tool = next(t for t in _list_tools() if t.name == "run_task")
     schema = getattr(tool, "input_schema", None) or tool.inputSchema  # 2.x / 1.x
-    assert set(schema["properties"]) == {"project_path", "task"}
+    assert set(schema["properties"]) == {"project_path", "task", "base_branch"}
+    # base_branch stays optional: a caller that does not care about stacking
+    # keeps dispatching with two arguments.
     assert set(schema.get("required", [])) == {"project_path", "task"}

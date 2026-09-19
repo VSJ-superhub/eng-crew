@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     worktree_auto_prune: bool = True
     worktree_keep_last: int = 5
     worktree_retention_days: float = 7.0
+    # Once a run finishes, sweep worktrees that are clean and fully merged
+    # regardless of age — including this run's own, when it produced nothing
+    # worth keeping. Age-based retention alone lets a week of runs pile up.
+    worktree_prune_on_finish: bool = True
 
     # --- Verification gate ---
     # Runs the project's own tests/build after the agent tiers and decides the
