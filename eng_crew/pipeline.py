@@ -231,6 +231,41 @@ def _commit_run_output(work_path: str, task: str, run_id: int, final_state: dict
         return None
 
 
+def _worktree_of_branch(project_path: str, branch: str | None) -> str | None:
+    """Path of the worktree that has ``branch`` checked out, if any."""
+    if not branch:
+        return None
+    try:
+        for wt in git_skill.list_worktrees(project_path):
+            if wt.get("branch") == branch:
+                return wt["path"]
+    except Exception:
+        pass
+    return None
+
+
+def _prune_spent_worktrees(
+    project_path: str, settings: Settings, *, keep: list[str | None] | None = None
+) -> list[str]:
+    """Sweep clean, fully merged worktrees now that a run is done.
+
+    ``keep`` spares paths the caller is not finished with. Failure here is
+    cosmetic, so it never propagates into the run's status.
+    """
+    if not settings.worktree_prune_on_finish or not git_skill.is_git_repo(project_path):
+        return []
+    try:
+        removed = git_skill.prune_spent_worktrees(
+            project_path, exclude=[k for k in (keep or []) if k] or None
+        )
+        if removed:
+            log.info("pruned %d spent worktree(s) after the run", len(removed))
+        return removed
+    except Exception as exc:
+        log.warning("post-run worktree prune failed: %s", exc)
+        return []
+
+
 def run_pipeline(
     task: str,
     project_path: str,
@@ -238,16 +273,26 @@ def run_pipeline(
     *,
     run_id: int | None = None,
     log_path: str | None = None,
+    base_branch: str | None = None,
 ) -> TeamState:
     """Create git branch, build graph, run agents, finalize tracker.
 
     If ``run_id`` is provided, the caller has already created the run row
     (e.g. the Discord bot, which pre-creates the run so it can poll the DB
     for the HITL approval gate). Otherwise a new run is created here.
+
+    ``base_branch`` bases the run's branch on that ref instead of whatever the
+    checkout currently has checked out — which is how a run stacks on top of a
+    previous run's branch rather than forking from main behind it.
     """
     # Callers (CLI/typer with resolve_path, dashboard) may pass a Path object.
     # Coerce once at the boundary so tracker binds, state, and git all see a str.
     project_path = str(project_path)
+    base_branch = (base_branch or "").strip() or None
+    if base_branch and not git_skill.branch_exists(project_path, base_branch):
+        # Fail before a run row exists: silently forking from HEAD instead would
+        # give the user a branch based on the wrong code.
+        raise ValueError(f"base branch not found in {project_path}: {base_branch}")
     if run_id is None:
         run_id = tracker.create_run(task, project_path, log_path)
     elif log_path:
@@ -282,6 +327,7 @@ def run_pipeline(
             wt = git_skill.create_worktree(
                 project_path, branch,
                 worktree_dir=settings.worktree_dir or None,
+                base=base_branch or "HEAD",
             )
             worktree_path = str(wt)
             work_path = worktree_path
@@ -290,8 +336,8 @@ def run_pipeline(
                 git_skill.repo_root(project_path), wt, names
             )
             log.info(
-                "worktree %s on branch %s (linked: %s)",
-                wt, branch, ", ".join(linked) or "nothing",
+                "worktree %s on branch %s (based on %s, linked: %s)",
+                wt, branch, base_branch or "HEAD", ", ".join(linked) or "nothing",
             )
         except Exception as exc:
             # Isolation is a safety improvement, not a precondition — fall back
@@ -301,7 +347,9 @@ def run_pipeline(
 
     if branch is None:
         try:
-            branch = git_skill.ensure_branch(project_path, settings.branch_prefix, task[:48])
+            branch = git_skill.ensure_branch(
+                project_path, settings.branch_prefix, task[:48], base=base_branch
+            )
         except Exception as exc:
             log.warning("git branch creation failed: %s", exc)
 
@@ -347,17 +395,40 @@ def run_pipeline(
         "main_project_path": main_project_path,
     }
 
+    # Stacking on another run's branch makes that run's commits reachable from
+    # this one, which would make its worktree look merged and therefore spent.
+    # It is not: the user asked to build on it, so hold it back.
+    base_worktree = _worktree_of_branch(main_project_path, base_branch)
+
     compiled = _build_graph(settings)
+    pruned_on_finish = False
     try:
         final_state: TeamState = compiled.invoke(initial_state)
         summary = final_state.get("final_summary") or "Pipeline completed."
-        if worktree_path:
-            summary = f"{summary}\n\nWorktree: {worktree_path} (branch {branch})"
+
+        sha = None
         if settings.commit_run_output:
             sha = _commit_run_output(work_path, task, run_id, final_state)
             if sha:
-                summary = f"{summary}\nCommit: {sha[:12]}"
                 log.info("committed run output as %s", sha[:12])
+
+        # Prune after the commit, not before: until the run's output is
+        # committed the worktree reads as dirty, and a dirty worktree is held
+        # back. This run's own worktree is a candidate — if it holds nothing
+        # another branch does not already hold, there is nothing to review.
+        _prune_spent_worktrees(main_project_path, settings, keep=[base_worktree])
+        pruned_on_finish = True
+
+        if worktree_path:
+            if Path(worktree_path).is_dir():
+                summary = f"{summary}\n\nWorktree: {worktree_path} (branch {branch})"
+            else:
+                summary = (
+                    f"{summary}\n\nWorktree removed — branch {branch} added nothing "
+                    f"that is not already on another branch."
+                )
+        if sha:
+            summary = f"{summary}\nCommit: {sha[:12]}"
 
         # The verification gate, not the absence of an exception, decides success.
         # Only an explicit pass counts: None means the gate never reported (the
@@ -400,3 +471,10 @@ def run_pipeline(
         log.exception("Pipeline failed: %s", exc)
         tracker.finish_run(run_id, status="failed", final_summary=str(exc))
         raise
+    finally:
+        # A cancelled or crashed run still leaves empty worktrees behind. Its
+        # own is spared here: nobody has looked at what it left.
+        if not pruned_on_finish:
+            _prune_spent_worktrees(
+                main_project_path, settings, keep=[worktree_path, base_worktree]
+            )

@@ -156,3 +156,36 @@ def test_pipeline_falls_back_when_isolation_is_off(repo, tmp_path, monkeypatch):
 
     assert seen["worktree_path"] is None
     assert seen["project_path"] == str(repo)
+
+
+def test_a_run_can_be_based_on_another_branch(repo):
+    """Stacking: a run's branch starts from the branch you name, not from HEAD."""
+    _git("checkout", "-q", "-b", "ai-team/first", cwd=repo)
+    (repo / "first.py").write_text("x = 1\n", encoding="utf-8")
+    _git("add", "first.py", cwd=repo)
+    _git("commit", "-qm", "first run", cwd=repo)
+    _git("checkout", "-q", "main", cwd=repo)
+
+    wt = git_skill.create_worktree(repo, "ai-team/second", base="ai-team/first")
+    assert (wt / "first.py").is_file(), "the stacked run did not start from the base branch"
+
+
+def test_branch_exists_distinguishes_real_refs(repo):
+    assert git_skill.branch_exists(repo, "main") is True
+    assert git_skill.branch_exists(repo, "no-such-branch") is False
+
+
+def test_ensure_branch_honours_a_base(repo):
+    """The in-place fallback path stacks too."""
+    _git("stash", "push", "-q", "-u", "-m", "wip", cwd=repo)
+    _git("checkout", "-q", "-b", "ai-team/base-branch", cwd=repo)
+    (repo / "based.py").write_text("y = 2\n", encoding="utf-8")
+    _git("add", "based.py", cwd=repo)
+    _git("commit", "-qm", "base work", cwd=repo)
+    _git("checkout", "-q", "main", cwd=repo)
+
+    branch = git_skill.ensure_branch(
+        repo, "ai-team", "stacked", base="ai-team/base-branch"
+    )
+    assert git_skill.current_branch(repo) == branch
+    assert (repo / "based.py").is_file()

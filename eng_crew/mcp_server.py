@@ -133,7 +133,7 @@ def _popen(args: list[str], cwd: str | None = None, log=None):
 
 # ── Tools ───────────────────────────────────────────────────────────────────────
 @mcp.tool()
-def run_task(project_path: str, task: str) -> str:
+def run_task(project_path: str, task: str, base_branch: str = "") -> str:
     """
     Dispatch a task to eng-crew for any project.
 
@@ -143,10 +143,25 @@ def run_task(project_path: str, task: str) -> str:
     Args:
         project_path: Absolute path to the project root.
         task:         Natural-language description of what to build or fix.
+        base_branch:  Optional branch to base the run's branch on, instead of
+                      whatever the project checkout currently has checked out.
+                      Pass a previous run's branch to stack work on top of it.
     """
     proj = Path(project_path).resolve()
     if not proj.is_dir():
         return f"Error: '{project_path}' is not a directory."
+
+    base_branch = (base_branch or "").strip()
+    if base_branch:
+        # Check here rather than letting the background process fail silently
+        # into a log file the caller is not reading.
+        try:
+            from eng_crew import git_skill
+
+            if not git_skill.branch_exists(proj, base_branch):
+                return f"Error: no branch '{base_branch}' in {proj}."
+        except ImportError:
+            pass
 
     env = {
         **_base_env,
@@ -165,6 +180,7 @@ def run_task(project_path: str, task: str) -> str:
             [
                 _PYTHON, "-u", "-m", "eng_crew", "run", task, str(proj),
                 "--no-approval", "--log-path", str(log_file),
+                *(["--base", base_branch] if base_branch else []),
             ],
             cwd=str(_ENG_CREW_ROOT),
             env=env,
@@ -178,7 +194,8 @@ def run_task(project_path: str, task: str) -> str:
             f"Task dispatched (pid={proc.pid})\n"
             f"  Project : {proj}\n"
             f"  Task    : {task}\n"
-            f"  Log     : {log_file}\n"
+            + (f"  Base    : {base_branch}\n" if base_branch else "")
+            + f"  Log     : {log_file}\n"
             f"  Track   : http://localhost:{dash_port}\n\n"
             f"Run services_status() or open the dashboard to monitor progress."
         )

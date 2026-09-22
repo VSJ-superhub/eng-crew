@@ -20,9 +20,14 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   be interrupted mid-flight); resume releases the same run rather than restarting it.
 - A run commits its output in the worktree after verification, so the result is a
   reviewable diff on a branch rather than loose uncommitted files.
-- Old worktrees are pruned at the start of a run, but only ones that are clean and
-  fully merged — an uncommitted worktree is a run's output. `eng-crew worktrees`
-  lists them; `eng-crew prune-worktrees --dry-run` shows what would go.
+- Old worktrees are pruned at the start of a run, and every clean, fully merged
+  worktree (this run's own included) is swept once a run finishes — only ones
+  that are clean and fully merged, since an uncommitted worktree is a run's
+  output. `eng-crew worktrees` lists them; `eng-crew prune-worktrees --dry-run`
+  shows what would go.
+- A run's branch forks from the project checkout's HEAD by default. Pass a base
+  (`eng-crew run --base <branch>`, or `base_branch` to `run_task`) to stack the
+  run on an earlier run's branch instead.
 - Every execution tier (simple / single-agent / full graph) exits through a deterministic
   verification gate (`eng_crew/verify.py`) that runs the project's own tests and build.
   A run that leaves the tree broken is recorded as `failed`, not `completed`.

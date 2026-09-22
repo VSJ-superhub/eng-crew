@@ -34,6 +34,12 @@ def run(
         help="Where this run's output is being captured; recorded on the run so "
              "the dashboard can serve it.",
     ),
+    base: Optional[str] = typer.Option(
+        None, "--base",
+        help="Branch (or tag/SHA) to base this run's branch on, instead of the "
+             "project checkout's current HEAD. Use it to stack a run on top of "
+             "an earlier run's branch.",
+    ),
 ) -> None:
     """Run a task on a project using the full multi-agent pipeline."""
     cfg = load_settings(env_file)
@@ -43,6 +49,14 @@ def run(
         cfg = cfg.model_copy(update={"require_approval": False})
 
     console.print(Panel(f"[bold green]Task:[/] {task}\n[bold blue]Project:[/] {project_path}", title="eng-crew run"))
+
+    if base:
+        from eng_crew import git_skill
+
+        if not git_skill.branch_exists(project_path, base):
+            console.print(f"[red]No such branch in {project_path}: {base}[/red]")
+            raise typer.Exit(1)
+        console.print(f"[bold blue]Base:[/] {base}")
 
     if cfg.require_approval:
         dashboard_url = f"http://{cfg.dashboard_host}:{cfg.dashboard_port}"
@@ -59,6 +73,7 @@ def run(
             project_path=project_path,
             settings=cfg,
             log_path=str(log_path) if log_path else None,
+            base_branch=base,
         )
     except ImportError:
         console.print("[red]Pipeline modules not yet installed. Run `pip install eng-crew[full]`.[/red]")
