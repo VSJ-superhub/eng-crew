@@ -9,12 +9,16 @@ import re
 import json
 from pathlib import Path
 
+from ... import tickets
+
 from ...tracker import (
     add_backlog_item,
     list_backlog_items,
     update_backlog_item,
     delete_backlog_item,
     get_backlog_item,
+    list_project_tickets,
+    list_plan_tickets,
     add_project,
     list_projects,
     get_project,
@@ -28,11 +32,7 @@ from ...tracker import (
     clear_all_tasks,
     create_project_plan,
     get_active_plan,
-    get_plan_sprints,
-    update_plan_sprint,
-    get_plan_sprint_tasks,
     get_active_runs_for_project,
-    create_project_plan,
 )
 
 router = APIRouter(prefix="/api", tags=["projects"])
@@ -47,12 +47,20 @@ class BacklogItemIn(BaseModel):
     priority: int = 50
     project_id: Optional[int] = None
     item_type: str = "feature"
+    acceptance_criteria: str = ""
 
 class BacklogItemUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     priority: Optional[int] = None
-    status: Optional[str] = None
+    acceptance_criteria: Optional[str] = None
+
+class TicketStatusIn(BaseModel):
+    """`status` alone is not enough: a status change is only worth recording if
+    we know who made it."""
+    status: str
+    actor: str = "user"
+    note: str = ""
 
 # ── Project Models ────────────────────────────────────────────────────────────
 
@@ -92,7 +100,9 @@ async def api_backlog_create(item: BacklogItemIn):
     if project_id is None and item.project_path:
         p = get_project_by_path(item.project_path)
         if p: project_id = p["id"]
-    item_id = add_backlog_item(item.title, desc, item.project_path, item.claude_md_path, item.priority, project_id, item_type=item.item_type)
+    item_id = add_backlog_item(item.title, desc, item.project_path, item.claude_md_path,
+                               item.priority, project_id, item_type=item.item_type,
+                               acceptance_criteria=item.acceptance_criteria)
     return JSONResponse({"id": item_id})
 
 @router.put("/backlog/{item_id}")
@@ -105,6 +115,55 @@ async def api_backlog_update(item_id: int, item: BacklogItemUpdate):
 async def api_backlog_delete(item_id: int):
     delete_backlog_item(item_id)
     return JSONResponse({"ok": True})
+
+# ── Ticket lifecycle ──────────────────────────────────────────────────────────
+#
+# Status is deliberately not settable through the generic PUT above. A status
+# change has to go through the lifecycle so the transition is legal, the
+# acceptance-criteria gate and the WIP limit are checked, and an event is
+# recorded naming who made it.
+
+@router.get("/tickets/{ticket_id}")
+async def api_ticket_get(ticket_id: int):
+    ticket = get_backlog_item(ticket_id)
+    if not ticket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({
+        "ticket": ticket,
+        "events": tickets.events(ticket_id),
+        "allowed_transitions": sorted(tickets.allowed_transitions(ticket["status"])),
+    })
+
+@router.get("/tickets/{ticket_id}/events")
+async def api_ticket_events(ticket_id: int):
+    if not get_backlog_item(ticket_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"events": tickets.events(ticket_id)})
+
+@router.put("/tickets/{ticket_id}/status")
+async def api_ticket_status(ticket_id: int, payload: TicketStatusIn):
+    if not get_backlog_item(ticket_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        ticket = tickets.move(ticket_id, payload.status, payload.actor, payload.note)
+    except tickets.TransitionRefused as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    return JSONResponse({"ok": True, "ticket": ticket})
+
+@router.get("/projects/{project_id}/queue")
+async def api_project_queue(project_id: int):
+    """The continuous queue: every ticket, plus WIP accounting."""
+    p = get_project(project_id)
+    if not p:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    all_tickets = list_project_tickets(p["project_path"])
+    return JSONResponse({
+        "project": p,
+        "tickets": all_tickets,
+        "ready": [t for t in all_tickets if t["status"] == tickets.READY],
+        "counts": tickets.summarize(all_tickets),
+        "wip": tickets.wip(p["project_path"]),
+    })
 
 # ── Projects API ──────────────────────────────────────────────────────────────
 
@@ -164,70 +223,6 @@ async def api_project_tasks(project_id: int, status: Optional[str] = None, type:
     p = get_project(project_id)
     if not p: return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse({"project": p, "tasks": list_backlog_items(status=status, project_path=p["project_path"], type=type)})
-
-@router.get("/projects/{project_id}/features")
-async def api_project_features(project_id: int):
-    p = get_project(project_id)
-    if not p: return JSONResponse({"error": "not found"}, status_code=404)
-    
-    # In this system, 'features' are backlog_items of type 'feature' or 'issue'
-    features_raw = list_backlog_items(project_path=p["project_path"])
-    features = [f for f in features_raw if f.get("type") in ("feature", "issue")]
-    
-    # For each feature, find associated sprints (currently via project_plans)
-    # Note: The mapping between backlog_items (features) and project_plans/sprints
-    # is currently indirect. We'll simplify: 
-    # If a plan exists, its sprints are the "active" work.
-    plan = get_active_plan(project_id)
-    sprints = get_plan_sprints(plan["id"]) if plan else []
-    
-    result = []
-    for f in features:
-        # Calculate progress based on sprints if linked, or just status
-        # For now, let's treat the project plan sprints as the source of progress if they exist
-        f_sprints = [s for s in sprints if s.get("name") == f["title"] or f["title"] in s.get("description", "")]
-        
-        done = len([s for s in f_sprints if s["status"] == "done"])
-        total = len(f_sprints)
-        progress = (done / total * 100) if total > 0 else (100 if f["status"] == "done" else 0)
-        
-        result.append({
-            "id": f["id"],
-            "title": f["title"],
-            "description": f["description"],
-            "status": f["status"],
-            "project_id": project_id,
-            "progress": progress,
-            "sprint_count": total,
-            "done_sprints": done
-        })
-    
-    # If no features in backlog but a plan exists, treat the plan goal as a feature
-    if not result and plan:
-        done = len([s for s in sprints if s["status"] == "done"])
-        total = len(sprints)
-        goal = plan["goal"]
-        
-        # If the goal is very long, use a generic title and put the goal in description
-        if len(goal) > 100:
-            title = "Project Roadmap"
-            description = goal
-        else:
-            title = goal
-            description = "Main Project Goal"
-
-        result.append({
-            "id": plan["id"],
-            "title": title,
-            "description": description,
-            "status": "active",
-            "project_id": project_id,
-            "progress": (done / total * 100) if total > 0 else 0,
-            "sprint_count": total,
-            "done_sprints": done
-        })
-
-    return JSONResponse({"features": result})
 
 @router.delete("/projects/{project_id}/tasks")
 async def api_clear_project_tasks(project_id: int):
@@ -436,75 +431,126 @@ def _extract_planning_brief(path: str) -> str:
     if not sections: return content
     return "\n\n".join(f"{s}\n" + "\n".join(sections[s]).strip() for s in _PLANNING_SECTIONS if s in sections)
 
+def _start_planning(project_id: int, project: dict, goal: str, force: bool):
+    """Plan a project in the background: produce tickets, not a build.
+
+    Returns (payload, status_code). The guard is against a second planner
+    running while the first is still thinking — planning costs money, and a
+    double-click should not buy it twice.
+    """
+    existing = get_active_plan(project_id)
+    if existing and not force:
+        planned = list_plan_tickets(existing["id"])
+        if not planned and not (existing.get("review_result") or ""):
+            return {"error": "Planning in progress"}, 409
+
+    plan_id = create_project_plan(project_id, goal)
+
+    def _bg():
+        from ...run import run_project as _run_project
+        try:
+            _run_project(goal=goal, project_id=project_id,
+                         project_path=project["project_path"],
+                         claude_md_path=project.get("claude_md_path") or "",
+                         plan_id=plan_id)
+        except Exception as e:
+            print(f"[dashboard] planning failed for project {project_id}: {e}", file=sys.stderr)
+
+    threading.Thread(target=_bg, daemon=True).start()
+    return {"plan_id": plan_id, "tickets": []}, 200
+
+
 @router.post("/projects/{project_id}/plan-from-claude-md")
 async def api_plan_from_claude_md(project_id: int):
-    from ...run import run_project as _run_project
     p = get_project(project_id)
     if not p: return JSONResponse({"error": "not found"}, status_code=404)
-    existing = get_active_plan(project_id)
-    if existing and not get_plan_sprints(existing["id"]):
-        return JSONResponse({"error": "Planning in progress"}, status_code=409)
     path = p.get("claude_md_path") or str(Path(p["project_path"]) / "CLAUDE.md")
     brief = _extract_planning_brief(path)
-    goal = f"Plan based on CLAUDE.md outstanding work:\n\n{brief}"
-    plan_id = create_project_plan(project_id, goal)
-    def _bg():
-        try: _run_project(goal=goal, project_id=project_id, project_path=p["project_path"], claude_md_path=path, plan_id=plan_id)
-        except Exception: pass
-    threading.Thread(target=_bg, daemon=True).start()
-    return JSONResponse({"plan_id": plan_id, "sprints": [], "source": "claude_md"})
+    goal = "Plan based on CLAUDE.md outstanding work:\n\n" + brief
+    body, code = _start_planning(project_id, {**p, "claude_md_path": path}, goal, force=False)
+    if code == 200:
+        body["source"] = "claude_md"
+    return JSONResponse(body, status_code=code)
 
 @router.post("/projects/{project_id}/plan")
 async def api_create_project_plan(project_id: int, payload: PlanGoalPayload):
-    from ...run import run_project as _run_project
     p = get_project(project_id)
     if not p: return JSONResponse({"error": "not found"}, status_code=404)
-    existing = get_active_plan(project_id)
-    if existing and not get_plan_sprints(existing["id"]) and not payload.force:
-        return JSONResponse({"error": "Planning in progress"}, status_code=409)
-    plan_id = create_project_plan(project_id, payload.goal)
-    def _bg():
-        try: _run_project(goal=payload.goal, project_id=project_id, project_path=p["project_path"], claude_md_path=p["claude_md_path"], plan_id=plan_id)
-        except Exception: pass
-    threading.Thread(target=_bg, daemon=True).start()
-    return JSONResponse({"plan_id": plan_id, "sprints": []})
+    body, code = _start_planning(project_id, p, payload.goal, force=payload.force)
+    return JSONResponse(body, status_code=code)
 
 @router.get("/projects/{project_id}/plan")
 async def api_get_project_plan(project_id: int):
+    """The active plan and the tickets it produced.
+
+    `planning` is true while the planner is still working; `planning_failed`
+    when it finished without producing any.
+    """
     from datetime import datetime, timezone, timedelta
     plan = get_active_plan(project_id)
-    if not plan: return JSONResponse({"plan": None, "sprints": [], "planning": False})
-    sprints = get_plan_sprints(plan["id"])
-    if len(sprints) == 0:
-        planning_failed = False
+    if not plan:
+        return JSONResponse({"plan": None, "tickets": [], "planning": False})
+    planned = list_plan_tickets(plan["id"])
+    if planned:
+        return JSONResponse({"plan": plan, "tickets": planned, "planning": False})
+
+    error = plan.get("review_result") or ""
+    failed = error.startswith("planning failed")
+    if not failed:
         try:
             created = datetime.fromisoformat(plan["created_at"].replace("Z", "+00:00"))
-            if datetime.now(timezone.utc) - created > timedelta(minutes=5):
-                planning_failed = True
+            failed = datetime.now(timezone.utc) - created > timedelta(minutes=5)
         except Exception:
             pass
-        if planning_failed:
-            return JSONResponse({"plan": plan, "sprints": [], "planning": False, "planning_failed": True})
-    return JSONResponse({"plan": plan, "sprints": sprints, "planning": len(sprints) == 0})
+    return JSONResponse({
+        "plan": plan, "tickets": [], "planning": not failed,
+        "planning_failed": failed, "error": error,
+    })
 
-@router.put("/plan-sprints/{plan_sprint_id}")
-async def api_update_plan_sprint(plan_sprint_id: int, payload: dict):
-    update_plan_sprint(plan_sprint_id, **{k: v for k, v in payload.items() if v is not None})
-    return JSONResponse({"ok": True})
+@router.post("/projects/{project_id}/queue/run")
+async def api_run_queue(project_id: int):
+    """Pull the next ticket off the queue and build it.
 
-@router.get("/plan-sprints/{plan_sprint_id}/tasks")
-async def api_plan_sprint_tasks(plan_sprint_id: int):
-    return JSONResponse({"tasks": get_plan_sprint_tasks(plan_sprint_id)})
+    This is what "run queued work" means now: the highest-priority `ready`
+    ticket, built from its own text. Two limits apply and they are different
+    things — the WIP limit bounds how many tickets are in flight at all
+    (including the ones sitting in review and QA), while a project builds one
+    ticket at a time, because runs share the project's checkout. So this starts
+    at most one build per call and reports what is still waiting.
+    """
+    from .runs import launch_ticket_run
 
-@router.post("/plan-sprints/{plan_sprint_id}/run")
-async def api_run_plan_sprint(plan_sprint_id: int):
-    from ...run import run_sprint as _run_sprint
-    from ...tracker import _connect
-    with _connect() as conn:
-        row = conn.execute("SELECT plan_id FROM plan_sprints WHERE id=?", (plan_sprint_id,)).fetchone()
-    if not row: return JSONResponse({"error": "not found"}, status_code=404)
-    def _bg():
-        try: _run_sprint(plan_sprint_id)
-        except Exception: pass
-    threading.Thread(target=_bg, daemon=True).start()
-    return JSONResponse({"ok": True})
+    p = get_project(project_id)
+    if not p: return JSONResponse({"error": "not found"}, status_code=404)
+    path = p["project_path"]
+
+    state = tickets.wip(path)
+    waiting = tickets.queue(path)
+    if state["slots"] <= 0:
+        return JSONResponse(
+            {"error": f"WIP limit reached ({state['in_flight']}/{state['limit']} in flight)",
+             "started": [], "refused": [], "waiting": len(waiting), "wip": state},
+            status_code=409,
+        )
+    # The interlock is the in_progress ticket itself, not the run row: a run row
+    # only appears once the launched build gets going, so checking that would
+    # let two rapid calls both pull from the queue.
+    building = list_project_tickets(path, status=tickets.IN_PROGRESS)
+    if building or get_active_runs_for_project(path):
+        return JSONResponse(
+            {"error": "Already running for this project",
+             "started": [], "refused": [], "waiting": len(waiting), "wip": state},
+            status_code=409,
+        )
+    if not waiting:
+        return JSONResponse({"started": [], "refused": [], "waiting": 0, "wip": state})
+
+    ticket = waiting[0]
+    ok, detail = launch_ticket_run(ticket["id"], actor="queue")
+    entry = {"ticket_id": ticket["id"], "detail": detail}
+    return JSONResponse({
+        "started": [entry] if ok else [],
+        "refused": [] if ok else [entry],
+        "waiting": len(waiting) - (1 if ok else 0),
+        "wip": tickets.wip(path),
+    })

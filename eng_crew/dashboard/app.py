@@ -5,7 +5,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
-# Mark this process as the dashboard so run_sprint uses dashboard HITL (in-process events).
+# Mark this process as the dashboard so runs launched here use dashboard HITL
+# (in-process events).
 os.environ["_DASHBOARD_PROCESS"] = "1"
 
 from .routers import intake, manager, projects, runs, system

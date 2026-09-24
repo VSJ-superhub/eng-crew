@@ -83,6 +83,35 @@ def _alter(conn, sql: str) -> None:
             print(f"[tracker] MIGRATION WARNING: {sql[:70]}: {e}", file=sys.stderr)
 
 
+def _migrate_ticket_statuses(conn) -> None:
+    """Map pre-lifecycle ticket statuses onto the lifecycle, once.
+
+    Only non-subtask rows are touched: subtasks are run bookkeeping and keep
+    their own pending/running/done/failed states. Each rewrite is recorded as a
+    ticket event so a migrated ticket still has a history.
+    """
+    from .tickets import LEGACY_STATUS
+
+    for legacy, current in LEGACY_STATUS.items():
+        if legacy == current:
+            continue
+        rows = conn.execute(
+            "SELECT id FROM backlog_items WHERE status=? AND COALESCE(type,'') != 'subtask'",
+            (legacy,),
+        ).fetchall()
+        if not rows:
+            continue
+        conn.execute(
+            "UPDATE backlog_items SET status=? WHERE status=? AND COALESCE(type,'') != 'subtask'",
+            (current, legacy),
+        )
+        conn.executemany(
+            """INSERT INTO ticket_events (ticket_id, from_status, to_status, actor, note)
+               VALUES (?, ?, ?, 'migration', 'status migrated to the ticket lifecycle')""",
+            [(r[0], legacy, current) for r in rows],
+        )
+
+
 def _init_db():
     with _connect() as _conn:
         _conn.executescript("""
@@ -113,17 +142,34 @@ def _init_db():
                 timestamp       TEXT    NOT NULL
             );
 
+            -- A ticket is a backlog_item that is not a subtask: the unit of work.
+            -- `status` runs the lifecycle in eng_crew/tickets.py; subtask rows
+            -- keep their own pending/running/done/failed states.
             CREATE TABLE IF NOT EXISTS backlog_items (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                title           TEXT NOT NULL,
-                description     TEXT NOT NULL,
-                project_path    TEXT NOT NULL,
-                claude_md_path  TEXT NOT NULL,
-                priority        INTEGER DEFAULT 50,
-                status          TEXT DEFAULT 'pending',
-                created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-                sprint_id       INTEGER
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                title               TEXT NOT NULL,
+                description         TEXT NOT NULL,
+                project_path        TEXT NOT NULL,
+                claude_md_path      TEXT NOT NULL,
+                priority            INTEGER DEFAULT 50,
+                status              TEXT DEFAULT 'backlog',
+                acceptance_criteria TEXT DEFAULT '',
+                plan_id             INTEGER REFERENCES project_plans(id),
+                created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );
+
+            -- Every accepted ticket status change, with who made it. Append-only.
+            CREATE TABLE IF NOT EXISTS ticket_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id   INTEGER NOT NULL REFERENCES backlog_items(id),
+                from_status TEXT NOT NULL DEFAULT '',
+                to_status   TEXT NOT NULL,
+                actor       TEXT NOT NULL DEFAULT 'system',
+                note        TEXT NOT NULL DEFAULT '',
+                created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_ticket_events_ticket
+                ON ticket_events(ticket_id, id);
             CREATE TABLE IF NOT EXISTS sprint_plans (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id      INTEGER,
@@ -162,22 +208,6 @@ def _init_db():
                 created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );
 
-            CREATE TABLE IF NOT EXISTS sprints (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_id      INTEGER NOT NULL REFERENCES projects(id),
-                issue_id        INTEGER REFERENCES backlog_items(id),
-                run_id          INTEGER REFERENCES runs(id),
-                name            TEXT NOT NULL DEFAULT '',
-                status          TEXT NOT NULL DEFAULT 'planning',
-                git_branch      TEXT DEFAULT '',
-                total_subtasks  INTEGER DEFAULT 0,
-                done_subtasks   INTEGER DEFAULT 0,
-                total_cost_usd  REAL DEFAULT 0.0,
-                created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-                started_at      TEXT,
-                finished_at     TEXT
-            );
-
             CREATE TABLE IF NOT EXISTS project_plans (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id   INTEGER NOT NULL REFERENCES projects(id),
@@ -185,19 +215,6 @@ def _init_db():
                 status       TEXT DEFAULT 'active',
                 created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
                 updated_at   TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS plan_sprints (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                plan_id        INTEGER NOT NULL REFERENCES project_plans(id),
-                sprint_number  INTEGER NOT NULL,
-                name           TEXT NOT NULL,
-                description    TEXT NOT NULL,
-                rationale      TEXT DEFAULT '',
-                status         TEXT DEFAULT 'pending',
-                depends_on     TEXT DEFAULT '[]',
-                sprint_id      INTEGER REFERENCES sprints(id),
-                created_at     TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );
 
             CREATE TABLE IF NOT EXISTS partial_memories (
@@ -276,41 +293,21 @@ def _init_db():
                 _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN subtask_id TEXT")
             if "type" not in bl_cols:
                 _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN type TEXT DEFAULT 'issue'")
-            if "parent_issue_id" not in bl_cols:
-                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN parent_issue_id INTEGER")
-            if "active_sprint_id" not in bl_cols:
-                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN active_sprint_id INTEGER")
             if "agent_type" not in bl_cols:
                 _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN agent_type TEXT DEFAULT ''")
             if "target_files" not in bl_cols:
                 _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN target_files TEXT DEFAULT ''")
             if "pause_requested" not in run_cols:
                 _alter(_mig, "ALTER TABLE runs ADD COLUMN pause_requested INTEGER DEFAULT 0")
-            ps_cols = [r[1] for r in _mig.execute("PRAGMA table_info(plan_sprints)").fetchall()]
-            if "acceptance_criteria" not in ps_cols:
-                _alter(_mig, "ALTER TABLE plan_sprints ADD COLUMN acceptance_criteria TEXT DEFAULT ''")
-            if "scope_hints" not in ps_cols:
-                _alter(_mig, "ALTER TABLE plan_sprints ADD COLUMN scope_hints TEXT DEFAULT '[]'")
             if "replans" not in sp_cols:
                 _alter(_mig, "ALTER TABLE sprint_plans ADD COLUMN replans TEXT DEFAULT '[]'")
-            if "complexity" not in ps_cols:
-                _alter(_mig, "ALTER TABLE plan_sprints ADD COLUMN complexity TEXT DEFAULT 'medium'")
-            if "risk_flags" not in ps_cols:
-                _alter(_mig, "ALTER TABLE plan_sprints ADD COLUMN risk_flags TEXT DEFAULT '[]'")
             pp_cols = [r[1] for r in _mig.execute("PRAGMA table_info(project_plans)").fetchall()]
             if "review_result" not in pp_cols:
                 _alter(_mig, "ALTER TABLE project_plans ADD COLUMN review_result TEXT DEFAULT ''")
-            ps_run_cols = [r[1] for r in _mig.execute("PRAGMA table_info(plan_sprints)").fetchall()]
-            if "run_id" not in ps_run_cols:
-                _alter(_mig, "ALTER TABLE plan_sprints ADD COLUMN run_id INTEGER REFERENCES runs(id)")
             if "preprocessor_details" not in se_cols:
                 _alter(_mig, "ALTER TABLE subtask_events ADD COLUMN preprocessor_details TEXT")
             if "business_summary" not in sp_cols:
                 _alter(_mig, "ALTER TABLE sprint_plans ADD COLUMN business_summary TEXT DEFAULT ''")
-            # Re-fetch ps_cols in case it was fetched before plan_sprints migration ran
-            ps_cols = [r[1] for r in _mig.execute("PRAGMA table_info(plan_sprints)").fetchall()]
-            if "business_summary" not in ps_cols:
-                _alter(_mig, "ALTER TABLE plan_sprints ADD COLUMN business_summary TEXT DEFAULT ''")
             run_cols = [r[1] for r in _mig.execute("PRAGMA table_info(runs)").fetchall()]
             if "hitl_decision" not in run_cols:
                 _alter(_mig, "ALTER TABLE runs ADD COLUMN hitl_decision TEXT DEFAULT NULL")
@@ -326,6 +323,24 @@ def _init_db():
                 _alter(_mig, "ALTER TABLE subtask_reviews ADD COLUMN clarification_options TEXT")
             if "log_path" not in run_cols:
                 _alter(_mig, "ALTER TABLE runs ADD COLUMN log_path TEXT")
+            # Tickets: acceptance criteria, the run that attempted the ticket,
+            # and the lifecycle statuses. Adding acceptance_criteria is what
+            # marks a database as pre-ticket, so the status backfill rides along
+            # with it and runs exactly once.
+            if "acceptance_criteria" not in bl_cols:
+                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN acceptance_criteria TEXT DEFAULT ''")
+                _migrate_ticket_statuses(_mig)
+            if "plan_id" not in bl_cols:
+                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN plan_id INTEGER REFERENCES project_plans(id)")
+            if "ticket_id" not in run_cols:
+                _alter(_mig, "ALTER TABLE runs ADD COLUMN ticket_id INTEGER REFERENCES backlog_items(id)")
+                _mig.execute(
+                    """UPDATE runs SET ticket_id = (
+                           SELECT b.id FROM backlog_items b
+                           WHERE b.run_id = runs.id AND COALESCE(b.type,'') != 'subtask'
+                           ORDER BY b.id ASC LIMIT 1
+                       ) WHERE ticket_id IS NULL"""
+                )
             _mig.commit()
             # NB: no close() — the handle is pooled and reused (see _connect).
         except Exception as e:
@@ -333,68 +348,93 @@ def _init_db():
 
 
 def cleanup_stale_backlog_items() -> int:
-    """Reset backlog items stuck in 'running' whose associated run has finished.
-    Items linked to a completed run become 'done'; failed/aborted runs become 'failed'.
-    Items with no run_id are reset to 'pending'.
-    Returns the number of items fixed."""
+    """Unstick work whose run is over but whose row still says it is in flight.
+
+    Tickets and subtasks are unstuck differently because they mean different
+    things. A ticket left in `in_progress` by a finished run has had its attempt
+    made: a run that landed moves it to `in_review` (a human or QA still has to
+    accept it), a run that failed moves it to `rejected`, and a ticket with no
+    run at all goes back to `backlog`. Subtasks are run bookkeeping and keep
+    their own pending/running/done/failed states.
+
+    Returns the number of rows fixed.
+    """
+    from .tickets import BACKLOG, IN_PROGRESS, IN_REVIEW, REJECTED
+
+    landed = ("completed", "unverified")
+    lost = ("failed", "rejected", "aborted")
+
+    def _resolve_tickets(conn, to_status: str, run_statuses: tuple[str, ...], note: str) -> int:
+        placeholders = ",".join("?" * len(run_statuses))
+        rows = conn.execute(
+            f"""SELECT id FROM backlog_items
+                WHERE status=? AND COALESCE(type,'') != 'subtask' AND run_id IS NOT NULL
+                  AND run_id IN (SELECT id FROM runs WHERE status IN ({placeholders}))""",
+            (IN_PROGRESS, *run_statuses),
+        ).fetchall()
+        if not rows:
+            return 0
+        ids = [r[0] for r in rows]
+        id_places = ",".join("?" * len(ids))
+        conn.execute(
+            f"UPDATE backlog_items SET status=? WHERE id IN ({id_places})",
+            (to_status, *ids),
+        )
+        conn.executemany(
+            """INSERT INTO ticket_events (ticket_id, from_status, to_status, actor, note)
+               VALUES (?, ?, ?, 'cleanup', ?)""",
+            [(i, IN_PROGRESS, to_status, note) for i in ids],
+        )
+        return len(ids)
+
     try:
         with _lock:
             with _connect() as conn:
-                # Items whose run finished as completed/unverified/rejected → done.
-                # "unverified" counts as done because the work landed; it is the
-                # evidence that is missing, not the change. Leaving it out would
-                # strand the item in 'running' forever.
-                cur = conn.execute(
-                    """UPDATE backlog_items
-                       SET status='done'
-                       WHERE status='running'
-                         AND run_id IS NOT NULL
-                         AND run_id IN (
-                             SELECT id FROM runs
-                             WHERE status IN ('completed', 'unverified', 'rejected')
-                         )"""
+                # "unverified" counts as landed: the change is there, it is the
+                # evidence that is missing. Leaving it out strands the ticket.
+                fixed = _resolve_tickets(
+                    conn, IN_REVIEW, landed, "run finished; ticket awaits review"
                 )
-                done_count = cur.rowcount
+                fixed += _resolve_tickets(
+                    conn, REJECTED, lost, "run failed"
+                )
 
-                # Items whose run finished as failed/aborted → failed
-                cur = conn.execute(
-                    """UPDATE backlog_items
-                       SET status='failed'
-                       WHERE status='running'
-                         AND run_id IS NOT NULL
-                         AND run_id IN (
-                             SELECT id FROM runs WHERE status IN ('failed', 'aborted')
-                         )"""
-                )
-                failed_count = cur.rowcount
+                orphans = conn.execute(
+                    """SELECT id FROM backlog_items
+                       WHERE status=? AND COALESCE(type,'') != 'subtask' AND run_id IS NULL""",
+                    (IN_PROGRESS,),
+                ).fetchall()
+                if orphans:
+                    ids = [r[0] for r in orphans]
+                    conn.execute(
+                        f"UPDATE backlog_items SET status=? WHERE id IN ({','.join('?' * len(ids))})",
+                        (BACKLOG, *ids),
+                    )
+                    conn.executemany(
+                        """INSERT INTO ticket_events (ticket_id, from_status, to_status, actor, note)
+                           VALUES (?, ?, ?, 'cleanup', 'in progress with no run')""",
+                        [(i, IN_PROGRESS, BACKLOG) for i in ids],
+                    )
+                    fixed += len(ids)
 
-                # Items with no run_id stuck in running → reset to pending
-                cur = conn.execute(
-                    "UPDATE backlog_items SET status='pending' WHERE status='running' AND run_id IS NULL"
-                )
-                reset_count = cur.rowcount
+                # Subtasks of a finished run that the executor never reached.
+                subtask_fixed = 0
+                for status, run_statuses in (("done", landed), ("failed", lost)):
+                    cur = conn.execute(
+                        f"""UPDATE backlog_items SET status=?
+                            WHERE status IN ('pending', 'running') AND type='subtask'
+                              AND run_id IS NOT NULL
+                              AND run_id IN (SELECT id FROM runs WHERE status IN
+                                  ({",".join("?" * len(run_statuses))}))""",
+                        (status, *run_statuses),
+                    )
+                    subtask_fixed += cur.rowcount
 
-                # Pending items on finished runs (subtasks the executor never reached)
-                cur = conn.execute(
-                    """UPDATE backlog_items SET status='done'
-                       WHERE status='pending' AND run_id IS NOT NULL
-                         AND run_id IN (
-                             SELECT id FROM runs WHERE status IN ('completed', 'unverified')
-                         )"""
-                )
-                done_count += cur.rowcount
-                cur = conn.execute(
-                    """UPDATE backlog_items SET status='failed'
-                       WHERE status='pending' AND run_id IS NOT NULL
-                         AND run_id IN (SELECT id FROM runs WHERE status IN ('failed','rejected','aborted'))"""
-                )
-                failed_count += cur.rowcount
-
-                total = done_count + failed_count + reset_count
+                total = fixed + subtask_fixed
                 if total:
                     print(
-                        f"[tracker] cleanup_stale_backlog_items: fixed {total} stuck item(s) "
-                        f"(done={done_count}, failed={failed_count}, reset={reset_count})",
+                        f"[tracker] cleanup_stale_backlog_items: fixed {total} stuck row(s) "
+                        f"(tickets={fixed}, subtasks={subtask_fixed})",
                         file=sys.stderr,
                     )
                 return total
@@ -436,13 +476,19 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def create_run(task_text: str, project_path: str, log_path: str | None = None) -> int:
-    """Insert a new run record and return its integer ID."""
+def create_run(task_text: str, project_path: str, log_path: str | None = None,
+               ticket_id: int | None = None) -> int:
+    """Insert a new run record and return its integer ID.
+
+    ``ticket_id`` links the run to the ticket it attempts, so a ticket's history
+    includes every run that tried it.
+    """
     with _lock:
         with _connect() as conn:
             cur = conn.execute(
-                "INSERT INTO runs (task_text, project_path, started_at, log_path) VALUES (?, ?, ?, ?)",
-                (task_text, str(project_path), _now(), log_path),
+                "INSERT INTO runs (task_text, project_path, started_at, log_path, ticket_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (task_text, str(project_path), _now(), log_path, ticket_id),
             )
             run_id = cur.lastrowid
     ensure_project(str(project_path))
@@ -1007,14 +1053,124 @@ def get_weekly_usage(days: int = 7) -> dict:
 
 def add_backlog_item(title: str, description: str, project_path: str,
                      claude_md_path: str, priority: int = 50,
-                     project_id: int = None, item_type: str = 'feature') -> int:
+                     project_id: int = None, item_type: str = 'feature',
+                     acceptance_criteria: str = "", created_by: str = "user",
+                     plan_id: int = None) -> int:
+    """Create a ticket. It starts in `backlog`; use tickets.move to advance it."""
+    from .tickets import BACKLOG
+
     with _lock:
         with _connect() as con:
             cur = con.execute(
-                "INSERT INTO backlog_items (title, description, project_path, claude_md_path, priority, project_id, type) VALUES (?,?,?,?,?,?,?)",
-                (title, description, project_path, claude_md_path, priority, project_id, item_type),
+                "INSERT INTO backlog_items (title, description, project_path, claude_md_path,"
+                " priority, project_id, type, status, acceptance_criteria, plan_id)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (title, description, project_path, claude_md_path, priority, project_id,
+                 item_type, BACKLOG, acceptance_criteria, plan_id),
             )
-            return cur.lastrowid
+            ticket_id = cur.lastrowid
+            con.execute(
+                """INSERT INTO ticket_events (ticket_id, from_status, to_status, actor, note)
+                   VALUES (?, '', ?, ?, 'ticket created')""",
+                (ticket_id, BACKLOG, created_by),
+            )
+            return ticket_id
+
+
+# ── Ticket lifecycle storage ─────────────────────────────────────────────────
+#
+# The rules (what may move where, the acceptance-criteria gate, the WIP limit)
+# live in eng_crew/tickets.py. These are the reads and writes it needs.
+
+def set_ticket_status(ticket_id: int, from_status: str, to_status: str,
+                      actor: str, note: str = "") -> bool:
+    """Compare-and-set a ticket's status and record the event. False if the
+    ticket moved underneath the caller."""
+    with _lock:
+        with _connect() as con:
+            cur = con.execute(
+                "UPDATE backlog_items SET status=? WHERE id=? AND status=?",
+                (to_status, ticket_id, from_status),
+            )
+            if cur.rowcount == 0:
+                return False
+            con.execute(
+                """INSERT INTO ticket_events (ticket_id, from_status, to_status, actor, note)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (ticket_id, from_status, to_status, actor or "system", note or ""),
+            )
+            return True
+
+
+def get_ticket_events(ticket_id: int) -> list[dict]:
+    """Every recorded status change for a ticket, oldest first."""
+    con = _connect()
+    rows = con.execute(
+        "SELECT * FROM ticket_events WHERE ticket_id=? ORDER BY id ASC", (ticket_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_tickets_in_flight(project_path: str) -> int:
+    """How many of a project's tickets currently hold a WIP slot."""
+    from .tickets import IN_FLIGHT
+
+    placeholders = ",".join("?" * len(IN_FLIGHT))
+    con = _connect()
+    row = con.execute(
+        f"""SELECT COUNT(*) FROM backlog_items
+            WHERE project_path=? AND COALESCE(type,'') != 'subtask'
+              AND status IN ({placeholders})""",
+        (project_path, *IN_FLIGHT),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def list_ready_tickets(project_path: str, limit: int | None = None) -> list[dict]:
+    """The continuous queue: tickets in `ready`, highest priority first."""
+    from .tickets import READY
+
+    query = ("SELECT * FROM backlog_items WHERE project_path=? AND status=?"
+             " AND COALESCE(type,'') != 'subtask'"
+             " ORDER BY priority ASC, created_at ASC, id ASC")
+    params: list = [project_path, READY]
+    if limit is not None:
+        query += " LIMIT ?"
+        params.append(limit)
+    con = _connect()
+    return [dict(r) for r in con.execute(query, params).fetchall()]
+
+
+def list_plan_tickets(plan_id: int) -> list[dict]:
+    """The tickets a planning run produced, in queue order."""
+    con = _connect()
+    rows = con.execute(
+        "SELECT * FROM backlog_items WHERE plan_id=? ORDER BY priority ASC, id ASC",
+        (plan_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_ticket_run(ticket_id: int) -> dict | None:
+    """The most recent run that attempted this ticket."""
+    con = _connect()
+    row = con.execute(
+        "SELECT * FROM runs WHERE ticket_id=? ORDER BY id DESC LIMIT 1", (ticket_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_project_tickets(project_path: str, status: str | None = None) -> list[dict]:
+    """Every ticket for a project — subtasks excluded."""
+    query = ("SELECT * FROM backlog_items WHERE project_path=?"
+             " AND COALESCE(type,'') != 'subtask'")
+    params: list = [project_path]
+    if status:
+        query += " AND status=?"
+        params.append(status)
+    query += " ORDER BY priority ASC, created_at ASC, id ASC"
+    con = _connect()
+    return [dict(r) for r in con.execute(query, params).fetchall()]
 
 
 def list_backlog_items(status: str = None, project_path: str = None,
@@ -1067,81 +1223,12 @@ def list_issues(project_id: int, status: str | None = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-# ── Sprints ───────────────────────────────────────────────────────────────────
-
-def create_sprint(project_id: int, issue_id: int | None, name: str = "") -> int:
-    with _lock:
-        with _connect() as con:
-            cur = con.execute(
-                """INSERT INTO sprints (project_id, issue_id, name, status)
-                   VALUES (?, ?, ?, 'planning')""",
-                (project_id, issue_id, name),
-            )
-            return cur.lastrowid
-
-
-def update_sprint(sprint_id: int, **fields) -> None:
-    if not fields:
-        return
-    try:
-        with _lock:
-            with _connect() as con:
-                set_clause = ", ".join(f"{k}=?" for k in fields)
-                con.execute(
-                    f"UPDATE sprints SET {set_clause} WHERE id=?",
-                    [*fields.values(), sprint_id],
-                )
-    except Exception as e:
-        print(f"[tracker] update_sprint error: {e}", file=sys.stderr)
-
-
-def finish_sprint(sprint_id: int, status: str, total_cost_usd: float = 0.0) -> None:
-    try:
-        with _lock:
-            with _connect() as con:
-                con.execute(
-                    """UPDATE sprints
-                       SET status=?, total_cost_usd=?,
-                           finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
-                       WHERE id=?""",
-                    (status, total_cost_usd, sprint_id),
-                )
-    except Exception as e:
-        print(f"[tracker] finish_sprint error: {e}", file=sys.stderr)
-
-
-def get_sprint(sprint_id: int) -> dict | None:
-    con = _connect()
-    row = con.execute("SELECT * FROM sprints WHERE id=?", (sprint_id,)).fetchone()
-    return dict(row) if row else None
-
-
-def get_project_sprints(project_id: int, limit: int = 20) -> list[dict]:
-    con = _connect()
-    rows = con.execute(
-        "SELECT * FROM sprints WHERE project_id=? ORDER BY id DESC LIMIT ?",
-        (project_id, limit),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def get_sprint_subtasks(sprint_id: int) -> list[dict]:
-    con = _connect()
-    rows = con.execute(
-        "SELECT * FROM backlog_items WHERE sprint_id=? AND type='subtask' ORDER BY id ASC",
-        (sprint_id,),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
 def create_subtask_backlog_items(
     run_id: int,
     subtasks: list,
     project_path: str,
     claude_md_path: str,
     project_id: int | None,
-    sprint_id: int | None = None,
-    parent_issue_id: int | None = None,
 ) -> None:
     """Save each approved subtask as a backlog item so the project task view shows them."""
     try:
@@ -1164,8 +1251,8 @@ def create_subtask_backlog_items(
                         """INSERT INTO backlog_items
                            (title, description, project_path, claude_md_path,
                             priority, status, project_id, run_id, subtask_id,
-                            type, sprint_id, parent_issue_id, agent_type, target_files)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            type, agent_type, target_files)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (
                             st.get("description", "")[:200],
                             description,
@@ -1177,8 +1264,6 @@ def create_subtask_backlog_items(
                             run_id,
                             str(st.get("id", "")),
                             "subtask",
-                            sprint_id,
-                            parent_issue_id,
                             st.get("agent_type", ""),
                             ",".join(st.get("target_files") or []),
                         ),
@@ -1214,18 +1299,24 @@ def get_run_subtask_statuses(run_id: int) -> dict[str, str]:
 
 
 def get_project_task_summary() -> list[dict]:
-    """Returns per-project task counts grouped by status."""
+    """Per-project ticket counts, one column per lifecycle status."""
     try:
         with _connect() as conn:
             rows = conn.execute("""
                 SELECT p.id, p.name, p.project_path,
-                       COUNT(CASE WHEN b.status='pending' THEN 1 END) AS pending,
-                       COUNT(CASE WHEN b.status='running' THEN 1 END) AS running,
-                       COUNT(CASE WHEN b.status='done'    THEN 1 END) AS done,
-                       COUNT(CASE WHEN b.status='failed'  THEN 1 END) AS failed,
+                       COUNT(CASE WHEN b.status='backlog'     THEN 1 END) AS backlog,
+                       COUNT(CASE WHEN b.status='ready'       THEN 1 END) AS ready,
+                       COUNT(CASE WHEN b.status='in_progress' THEN 1 END) AS in_progress,
+                       COUNT(CASE WHEN b.status='in_review'   THEN 1 END) AS in_review,
+                       COUNT(CASE WHEN b.status='in_qa'       THEN 1 END) AS in_qa,
+                       COUNT(CASE WHEN b.status='done'        THEN 1 END) AS done,
+                       COUNT(CASE WHEN b.status='rejected'    THEN 1 END) AS rejected,
+                       COUNT(CASE WHEN b.status='shipped'     THEN 1 END) AS shipped,
                        COUNT(b.id) AS total
                 FROM projects p
-                LEFT JOIN backlog_items b ON b.project_path = p.project_path
+                LEFT JOIN backlog_items b
+                       ON b.project_path = p.project_path
+                      AND COALESCE(b.type,'') != 'subtask'
                 WHERE p.active = 1
                 GROUP BY p.id
                 ORDER BY p.name ASC
@@ -1410,7 +1501,7 @@ def add_memory(
 
 
 def clear_project_tasks(project_id: int) -> int:
-    """Delete all backlog_items and sprints for a project. Returns count deleted."""
+    """Delete all tickets (and their events) for a project. Returns count deleted."""
     try:
         with _lock:
             with _connect() as conn:
@@ -1418,9 +1509,14 @@ def clear_project_tasks(project_id: int) -> int:
                 if not p:
                     return 0
                 project_path = p[0]
-                cur1 = conn.execute("DELETE FROM backlog_items WHERE project_path=?", (project_path,))
-                cur2 = conn.execute("DELETE FROM sprints WHERE project_id=?", (project_id,))
-                total = cur1.rowcount + cur2.rowcount
+                conn.execute(
+                    """DELETE FROM ticket_events WHERE ticket_id IN (
+                           SELECT id FROM backlog_items WHERE project_path=?)""",
+                    (project_path,),
+                )
+                total = conn.execute(
+                    "DELETE FROM backlog_items WHERE project_path=?", (project_path,)
+                ).rowcount
                 print(f"[tracker] clear_project_tasks: deleted {total} records for project {project_id}", file=sys.stderr)
                 return total
     except Exception as e:
@@ -1429,15 +1525,14 @@ def clear_project_tasks(project_id: int) -> int:
 
 
 def clear_all_tasks() -> dict:
-    """Delete ALL backlog_items, sprints, project_plans, plan_sprints. Returns counts."""
+    """Delete ALL tickets, ticket events, and project plans. Returns counts."""
     try:
         with _lock:
             with _connect() as conn:
-                c1 = conn.execute("DELETE FROM plan_sprints").rowcount
+                c1 = conn.execute("DELETE FROM ticket_events").rowcount
                 c2 = conn.execute("DELETE FROM project_plans").rowcount
                 c3 = conn.execute("DELETE FROM backlog_items").rowcount
-                c4 = conn.execute("DELETE FROM sprints").rowcount
-                counts = {"plan_sprints": c1, "project_plans": c2, "backlog_items": c3, "sprints": c4}
+                counts = {"ticket_events": c1, "project_plans": c2, "backlog_items": c3}
                 print(f"[tracker] clear_all_tasks: {counts}", file=sys.stderr)
                 return counts
     except Exception as e:
@@ -1450,23 +1545,24 @@ def clear_all_tasks() -> dict:
 def create_project_plan(project_id: int, goal: str) -> int:
     with _lock:
         with _connect() as conn:
-            # If an active plan with sprints already exists, return it instead of creating a new one
+            # An active plan that already produced tickets is the plan; reuse it
+            # rather than stacking a second one over the same work.
             existing = conn.execute(
                 "SELECT id FROM project_plans WHERE project_id=? AND status='active' ORDER BY id DESC LIMIT 1",
                 (project_id,),
             ).fetchone()
             if existing:
-                sprint_count = conn.execute(
-                    "SELECT COUNT(*) FROM plan_sprints WHERE plan_id=?",
+                ticket_count = conn.execute(
+                    "SELECT COUNT(*) FROM backlog_items WHERE plan_id=?",
                     (existing["id"],),
                 ).fetchone()[0]
-                if sprint_count > 0:
+                if ticket_count > 0:
                     return existing["id"]
             cur = conn.execute(
                 "INSERT INTO project_plans (project_id, goal) VALUES (?, ?)",
                 (project_id, goal),
             )
-            # Archive any previously active plan (only reached when previous plan has zero sprints)
+            # Archive any previously active plan (only reached when it produced no tickets)
             conn.execute(
                 "UPDATE project_plans SET status='archived' WHERE project_id=? AND id!=? AND status='active'",
                 (project_id, cur.lastrowid),
@@ -1502,161 +1598,6 @@ def update_project_plan(plan_id: int, **fields) -> None:
                 )
     except Exception as e:
         print(f"[tracker] update_project_plan error: {e}", file=sys.stderr)
-
-
-def add_plan_sprint(
-    plan_id: int,
-    sprint_number: int,
-    name: str,
-    description: str,
-    rationale: str = "",
-    depends_on: list | None = None,
-    acceptance_criteria: str = "",
-    scope_hints: list | None = None,
-    complexity: str = "medium",
-    risk_flags: list | None = None,
-    business_summary: str = "",
-) -> int:
-    with _lock:
-        with _connect() as conn:
-            cur = conn.execute(
-                """INSERT INTO plan_sprints
-                   (plan_id, sprint_number, name, description, rationale, depends_on,
-                    acceptance_criteria, scope_hints, complexity, risk_flags, business_summary)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (plan_id, sprint_number, name, description, rationale,
-                 json.dumps(depends_on or []),
-                 acceptance_criteria,
-                 json.dumps(scope_hints or []),
-                 complexity,
-                 json.dumps(risk_flags or []),
-                 business_summary),
-            )
-            return cur.lastrowid
-
-
-def update_plan_sprint(plan_sprint_id: int, **fields) -> None:
-    if not fields:
-        return
-    try:
-        with _lock:
-            with _connect() as conn:
-                set_clause = ", ".join(f"{k}=?" for k in fields)
-                conn.execute(
-                    f"UPDATE plan_sprints SET {set_clause} WHERE id=?",
-                    [*fields.values(), plan_sprint_id],
-                )
-    except Exception as e:
-        print(f"[tracker] update_plan_sprint error: {e}", file=sys.stderr)
-
-
-def get_plan_sprints(plan_id: int) -> list[dict]:
-    con = _connect()
-    rows = con.execute(
-        "SELECT * FROM plan_sprints WHERE plan_id=? ORDER BY sprint_number ASC",
-        (plan_id,),
-    ).fetchall()
-    result = []
-    for r in rows:
-        d = dict(r)
-        for field in ("depends_on", "scope_hints", "risk_flags"):
-            try:
-                d[field] = json.loads(d.get(field) or "[]")
-            except (json.JSONDecodeError, TypeError):
-                d[field] = []
-        # If sprint is still marked 'running' but its run has finished, sync the status.
-        # Use task completion as the source of truth: if all tasks are done the sprint is
-        # done regardless of the run's status string (which can be "failed" due to
-        # failure keywords in the summary even when all code changes were applied).
-        if d.get("status") == "running" and d.get("run_id"):
-            run_row = con.execute(
-                "SELECT status FROM runs WHERE id=?", (d["run_id"],)
-            ).fetchone()
-            if run_row and run_row["status"] in (
-                "completed", "unverified", "failed", "rejected"
-            ):
-                # Check actual task outcomes
-                task_rows = con.execute(
-                    "SELECT status FROM backlog_items WHERE run_id=? AND subtask_id IS NOT NULL",
-                    (d["run_id"],),
-                ).fetchall()
-                if task_rows:
-                    all_done = all(r["status"] in ("done", "completed") for r in task_rows)
-                    any_failed = any(r["status"] == "failed" for r in task_rows)
-                    new_status = "done" if all_done else ("failed" if any_failed else "done")
-                else:
-                    # No task rows yet — fall back to run status
-                    new_status = (
-                        "done"
-                        if run_row["status"] in ("completed", "unverified")
-                        else "failed"
-                    )
-                try:
-                    with _lock:
-                        with _connect() as wcon:
-                            wcon.execute(
-                                "UPDATE plan_sprints SET status=? WHERE id=?",
-                                (new_status, d["id"]),
-                            )
-                except Exception:
-                    pass
-                d["status"] = new_status
-        result.append(d)
-    return result
-
-
-def get_plan_sprint_ready(plan_sprint_id: int) -> tuple[bool, list[str]]:
-    """Returns (is_ready, [blocking_sprint_names]).
-    Checks that all sprints listed in this sprint's depends_on are status='done' or 'skipped'.
-    """
-    try:
-        with _connect() as con:
-            row = con.execute(
-                "SELECT plan_id, depends_on FROM plan_sprints WHERE id=?",
-                (plan_sprint_id,),
-            ).fetchone()
-            if not row:
-                return True, []
-            plan_id = row["plan_id"]
-            try:
-                depends_on = json.loads(row["depends_on"] or "[]")
-            except (json.JSONDecodeError, TypeError):
-                depends_on = []
-            if not depends_on:
-                return True, []
-            blockers = []
-            for sprint_number in depends_on:
-                dep = con.execute(
-                    "SELECT name, status FROM plan_sprints WHERE plan_id=? AND sprint_number=?",
-                    (plan_id, sprint_number),
-                ).fetchone()
-                if dep is None or dep["status"] not in ("done", "skipped"):
-                    name = dep["name"] if dep else f"Sprint {sprint_number}"
-                    blockers.append(name)
-            return (len(blockers) == 0), blockers
-    except Exception as e:
-        print(f"[tracker] get_plan_sprint_ready error: {e}", file=sys.stderr)
-        return True, []
-
-
-def get_plan_sprint_tasks(plan_sprint_id: int) -> list[dict]:
-    """Return backlog_items (subtasks) created during execution of this plan sprint."""
-    try:
-        with _connect() as con:
-            row = con.execute(
-                "SELECT run_id FROM plan_sprints WHERE id=?", (plan_sprint_id,)
-            ).fetchone()
-            if not row or not row["run_id"]:
-                return []
-            items = con.execute(
-                """SELECT id, title, description, status, type, agent_type, target_files
-                   FROM backlog_items WHERE run_id=? ORDER BY id ASC""",
-                (row["run_id"],),
-            ).fetchall()
-            return [dict(r) for r in items]
-    except Exception as e:
-        print(f"[tracker] get_plan_sprint_tasks error: {e}", file=sys.stderr)
-        return []
 
 
 def get_memories(
@@ -1904,7 +1845,7 @@ async def clean_stale_runs():
         # Clean up all related tables
         tables = [
             "subtask_events", "subtask_reviews", "memories", "backlog_items",
-            "sprint_plans", "sprints", "plan_sprints", "partial_memories"
+            "sprint_plans", "partial_memories"
         ]
         for table in tables:
             await db.execute(

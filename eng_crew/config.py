@@ -112,6 +112,13 @@ class Settings(BaseSettings):
     # so a project can see its false-positive rate before it gates on this.
     verification_red_phase: str = "warn"  # strict | warn | off
 
+    # --- Ticket queue ---
+    # There are no sprints: tickets form one continuous queue, and this is the
+    # only thing bounding how much work is in flight at once. A ticket cannot
+    # enter in_progress while this many are already in_progress/in_review/in_qa
+    # for the project.
+    wip_limit: int = 3
+
     # --- General ---
     budget_usd: float = 5.0
     max_tokens: int = 8192

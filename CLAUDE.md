@@ -12,6 +12,19 @@ This is a generalized, pip-installable version of a private internal tool. It mu
 - Cross-platform (Windows, macOS, Linux)
 - Clean install: `pip install eng-crew` or `docker compose up`
 - Multi-agent pipeline: architect → critic → HITL approval → specialist coders → reviewer → executor
+- The unit of work is a **ticket** (`eng_crew/tickets.py`), not a sprint. Tickets
+  carry acceptance criteria and move along a fixed lifecycle: backlog → ready →
+  in_progress → in_review → in_qa → done/rejected → shipped. A ticket cannot
+  reach `ready` without acceptance criteria, every status change is recorded in
+  `ticket_events` with the actor who made it, and each run links back to the
+  ticket it attempts.
+- There are no sprints. Tickets form one continuous queue ordered by priority,
+  bounded by a WIP limit (`ENG_CREW_WIP_LIMIT`, default 3) on how many are in
+  flight (in_progress/in_review/in_qa) per project.
+- Planning a project creates tickets (`eng_crew/planning.py`); it does not launch
+  a build of the goal text. Running queued work builds the actual tickets — the
+  task handed to the pipeline is the ticket's title, description, and acceptance
+  criteria.
 - Agent prompts live in `.claude/skills/<name>/SKILL.md` (frontmatter + template),
   loaded by `eng_crew/prompts.py` — edit a prompt without touching agent code.
 - Runs execute in their own git worktree and branch (`worktree_isolation`, on by

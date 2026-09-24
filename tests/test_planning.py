@@ -1,9 +1,13 @@
 """Planning and architecture endpoints.
 
 Planning is the expensive half of the dashboard: each of these launches a
-background run that costs money, and the guard against launching a second one
-while the first is still thinking is the only thing standing between a stray
+background LLM call that costs money, and the guard against launching a second
+one while the first is still thinking is the only thing standing between a stray
 double-click and two concurrent planning runs.
+
+Planning produces *tickets*. It does not build the goal text — a project planned
+with the goal "ship v2" must come out with tickets to work on, not an agent
+trying to implement the string "ship v2".
 
 As elsewhere, every test on a launch path stubs the launcher and asserts the
 stub was reached — a missed patch would start a real run and still pass.
@@ -45,12 +49,15 @@ def project(client, tmp_path):
 
 @pytest.fixture
 def no_planning_runs(monkeypatch):
-    """Stub the planning launcher. Records calls; never starts a run."""
+    """Stub the planner. Records calls; never reaches an LLM."""
     calls: list = []
     import eng_crew.run as run_mod
 
-    monkeypatch.setattr(run_mod, "run_project", lambda **kw: calls.append(kw))
-    monkeypatch.setattr(run_mod, "run_sprint", lambda sid: calls.append({"sprint": sid}))
+    def fake_plan(**kw):
+        calls.append(kw)
+        return []
+
+    monkeypatch.setattr(run_mod, "run_project", fake_plan)
     return calls
 
 
@@ -164,11 +171,11 @@ def test_planning_an_unknown_project_is_a_404(client, no_planning_runs):
     assert no_planning_runs == []
 
 
-def test_creating_a_plan_launches_one_planning_run(client, project, no_planning_runs):
+def test_creating_a_plan_launches_one_planner(client, project, no_planning_runs):
     resp = client.post(f"/api/projects/{project['id']}/plan", json={"goal": "ship v2"})
     assert resp.status_code == 200
     plan_id = resp.json()["plan_id"]
-    assert resp.json()["sprints"] == []
+    assert resp.json()["tickets"] == []
 
     assert _wait_for(lambda: no_planning_runs), "the planner was never reached"
     launched = no_planning_runs[0]
@@ -202,7 +209,8 @@ def test_force_overrides_the_in_progress_guard(client, project, no_planning_runs
 
 def test_a_finished_plan_does_not_block_a_new_one(client, project, no_planning_runs):
     first = client.post(f"/api/projects/{project['id']}/plan", json={"goal": "first"}).json()
-    tracker.add_plan_sprint(first["plan_id"], 1, "sprint one", "do a thing")
+    tracker.add_backlog_item("ticket one", "do a thing", str(project["path"]), "",
+                             plan_id=first["plan_id"])
     assert _wait_for(lambda: no_planning_runs)
     no_planning_runs.clear()
 
@@ -252,28 +260,29 @@ def test_planning_from_claude_md_respects_the_in_progress_guard(
 
 def test_a_project_with_no_plan_reports_nothing(client, project):
     body = client.get(f"/api/projects/{project['id']}/plan").json()
-    assert body == {"plan": None, "sprints": [], "planning": False}
+    assert body == {"plan": None, "tickets": [], "planning": False}
 
 
-def test_a_plan_without_sprints_reads_as_still_planning(client, project, no_planning_runs):
+def test_a_plan_without_tickets_reads_as_still_planning(client, project, no_planning_runs):
     client.post(f"/api/projects/{project['id']}/plan", json={"goal": "g"})
     body = client.get(f"/api/projects/{project['id']}/plan").json()
     assert body["planning"] is True
-    assert body["sprints"] == []
+    assert body["tickets"] == []
 
 
-def test_a_plan_with_sprints_is_no_longer_planning(client, project, no_planning_runs):
+def test_a_plan_with_tickets_is_no_longer_planning(client, project, no_planning_runs):
     plan_id = client.post(f"/api/projects/{project['id']}/plan",
                           json={"goal": "g"}).json()["plan_id"]
-    tracker.add_plan_sprint(plan_id, 1, "sprint one", "do a thing")
+    tracker.add_backlog_item("ticket one", "do a thing", str(project["path"]), "",
+                             plan_id=plan_id)
 
     body = client.get(f"/api/projects/{project['id']}/plan").json()
     assert body["planning"] is False
-    assert [s["name"] for s in body["sprints"]] == ["sprint one"]
+    assert [t["title"] for t in body["tickets"]] == ["ticket one"]
 
 
-def test_a_plan_stuck_without_sprints_is_reported_as_failed(client, project, no_planning_runs):
-    """A planner that died leaves a plan with no sprints; after five minutes
+def test_a_plan_stuck_without_tickets_is_reported_as_failed(client, project, no_planning_runs):
+    """A planner that died leaves a plan with no tickets; after five minutes
     the dashboard must say so rather than spin forever."""
     plan_id = client.post(f"/api/projects/{project['id']}/plan",
                           json={"goal": "g"}).json()["plan_id"]
@@ -288,34 +297,101 @@ def test_a_plan_stuck_without_sprints_is_reported_as_failed(client, project, no_
     assert body["planning_failed"] is True
 
 
-# --- plan sprints -------------------------------------------------------
-
-
-def test_sprint_tasks_are_empty_for_an_unknown_sprint(client):
-    assert client.get("/api/plan-sprints/999999/tasks").json() == {"tasks": []}
-
-
-def test_updating_a_sprint_persists(client, project, no_planning_runs):
+def test_a_planner_that_errored_is_reported_without_waiting_out_the_timeout(
+    client, project, no_planning_runs
+):
+    """The planner records its own failure, so the dashboard does not have to
+    wait five minutes to admit nothing is coming."""
     plan_id = client.post(f"/api/projects/{project['id']}/plan",
                           json={"goal": "g"}).json()["plan_id"]
-    sprint_id = tracker.add_plan_sprint(plan_id, 1, "original", "d")
+    tracker.update_project_plan(plan_id, review_result="planning failed: no JSON")
 
-    assert client.put(f"/api/plan-sprints/{sprint_id}", json={"name": "renamed"}).status_code == 200
-    sprints = client.get(f"/api/projects/{project['id']}/plan").json()["sprints"]
-    assert [s["name"] for s in sprints] == ["renamed"]
-
-
-def test_running_an_unknown_sprint_is_a_404(client, no_planning_runs):
-    assert client.post("/api/plan-sprints/999999/run").status_code == 404
-    assert no_planning_runs == []
+    body = client.get(f"/api/projects/{project['id']}/plan").json()
+    assert body["planning"] is False
+    assert body["planning_failed"] is True
+    assert "no JSON" in body["error"]
 
 
-def test_running_a_sprint_launches_it(client, project, no_planning_runs):
-    plan_id = client.post(f"/api/projects/{project['id']}/plan",
-                          json={"goal": "g"}).json()["plan_id"]
-    sprint_id = tracker.add_plan_sprint(plan_id, 1, "sprint one", "d")
-    no_planning_runs.clear()
+# --- what the planner actually produces ---------------------------------
 
-    assert client.post(f"/api/plan-sprints/{sprint_id}/run").status_code == 200
-    assert _wait_for(lambda: no_planning_runs), "the sprint runner was never reached"
-    assert no_planning_runs[0] == {"sprint": sprint_id}
+
+PLANNER_JSON = """{
+  "tickets": [
+    {"title": "Add a renamer", "description": "rename things",
+     "acceptance_criteria": "- files get renamed", "type": "feature", "priority": 10},
+    {"title": "Add a CLI", "description": "expose it",
+     "acceptance_criteria": "", "type": "chore", "priority": 20}
+  ]
+}"""
+
+
+@pytest.fixture
+def planner(monkeypatch):
+    """Stub the single LLM call planning makes. Records the prompt."""
+    from eng_crew.agents.base import BaseAgent
+    from eng_crew.providers.base import LLMResult
+
+    seen: list[str] = []
+
+    def fake_call(self, prompt, **kw):
+        seen.append(prompt)
+        return LLMResult(text=PLANNER_JSON, provider="stub", model="stub",
+                         input_tokens=0, output_tokens=0, cost_usd=0.0)
+
+    monkeypatch.setattr(BaseAgent, "call", fake_call)
+    return seen
+
+
+def test_planning_creates_tickets_rather_than_building_the_goal(client, project, planner):
+    from eng_crew import planning
+
+    created = planning.plan_project(
+        goal="ship v2", project_id=project["id"], project_path=str(project["path"])
+    )
+
+    assert [t["title"] for t in created] == ["Add a renamer", "Add a CLI"]
+    # The goal reached the planner as something to decompose, not to implement.
+    assert "ship v2" in planner[0]
+
+
+def test_a_planned_ticket_with_criteria_is_ready_to_pull(client, project, planner):
+    from eng_crew import planning, tickets
+
+    created = planning.plan_project(
+        goal="ship v2", project_id=project["id"], project_path=str(project["path"])
+    )
+    by_title = {t["title"]: t for t in created}
+
+    assert by_title["Add a renamer"]["status"] == tickets.READY
+    # No acceptance criteria, so the gate holds this one in the backlog.
+    assert by_title["Add a CLI"]["status"] == tickets.BACKLOG
+
+
+def test_planned_tickets_land_in_the_queue(client, project, planner):
+    from eng_crew import planning
+
+    planning.plan_project(goal="ship v2", project_id=project["id"],
+                          project_path=str(project["path"]))
+
+    body = client.get(f"/api/projects/{project['id']}/queue").json()
+    assert [t["title"] for t in body["ready"]] == ["Add a renamer"]
+    assert body["counts"]["backlog"] == 1
+
+
+def test_a_planner_returning_junk_is_recorded_on_the_plan(client, project, monkeypatch):
+    from eng_crew import planning
+    from eng_crew.agents.base import BaseAgent
+    from eng_crew.providers.base import LLMResult
+
+    monkeypatch.setattr(
+        BaseAgent, "call",
+        lambda self, prompt, **kw: LLMResult(text="sorry, no", provider="s", model="s",
+                                             input_tokens=0, output_tokens=0, cost_usd=0.0),
+    )
+    plan_id = tracker.create_project_plan(project["id"], "ship v2")
+
+    with pytest.raises(planning.PlanningFailed):
+        planning.plan_project(goal="ship v2", project_id=project["id"],
+                              project_path=str(project["path"]), plan_id=plan_id)
+
+    assert "planning failed" in tracker.get_project_plan(plan_id)["review_result"]

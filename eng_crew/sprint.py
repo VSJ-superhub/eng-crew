@@ -1,3 +1,10 @@
+"""Reader for the `sprint_plans` table.
+
+Despite the name, a row here is one run's architect plan — the subtask
+decomposition a human approves at the HITL gate — not a sprint of work. Work is
+tracked as tickets in a continuous queue (see :mod:`eng_crew.tickets`); there are
+no sprints.
+"""
 from __future__ import annotations
 
 import json

@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getBacklog, getProjects, addBacklogItem, deleteBacklogItem, runBacklogItem } from '../api/client';
-import type { BacklogItem, Project } from '../api/client';
+import {
+  ApiError, createBacklogItem, deleteBacklogItem, getBacklog, getProjects,
+  moveTicket, runTicket, updateBacklogItem,
+} from '../api/client';
+import type { BacklogItem, Project, TicketStatus } from '../api/client';
 
 const TYPE_META: Record<string, { label: string; cls: string }> = {
   bug:     { label: 'Bug',     cls: 'bg-red-900/50 text-red-300' },
@@ -10,63 +13,90 @@ const TYPE_META: Record<string, { label: string; cls: string }> = {
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  pending: 'text-gray-400',
-  running: 'text-blue-400',
-  done:    'text-green-400',
-  failed:  'text-red-400',
+  backlog:     'text-gray-400',
+  ready:       'text-violet-300',
+  in_progress: 'text-blue-400',
+  in_review:   'text-amber-300',
+  in_qa:       'text-cyan-300',
+  done:        'text-green-400',
+  rejected:    'text-red-400',
+  shipped:     'text-emerald-400',
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  backlog: 'backlog', ready: 'ready', in_progress: 'in progress',
+  in_review: 'in review', in_qa: 'in QA', done: 'done',
+  rejected: 'rejected', shipped: 'shipped',
+}
+
+const FILTERS: (TicketStatus | 'all')[] = [
+  'all', 'backlog', 'ready', 'in_progress', 'in_review', 'in_qa', 'done', 'rejected',
+]
+
+/** The API reports a refused transition as {"error": "..."}; show the reason. */
+function errorText(e: unknown): string {
+  if (e instanceof ApiError) {
+    try { return JSON.parse(e.body || '{}').error ?? e.body } catch { return e.body }
+  }
+  return String(e)
 }
 
 export default function Backlog() {
   const navigate = useNavigate()
   const [items, setItems] = useState<BacklogItem[]>([])
   const [projects, setProjects] = useState<Project[]>([])
-  const [filter, setFilter] = useState('all')
+  const [filter, setFilter] = useState<string>('all')
   const [typeFilter, setTypeFilter] = useState('all')
   const [projectFilter, setProjectFilter] = useState('all')
   const [loading, setLoading] = useState(true)
-  const [running, setRunning] = useState<number | null>(null)
+  const [busy, setBusy] = useState<number | null>(null)
+  const [error, setError] = useState('')
   const [showAdd, setShowAdd] = useState(false)
   const [newTitle, setNewTitle] = useState('')
+  const [newCriteria, setNewCriteria] = useState('')
   const [newProject, setNewProject] = useState('')
   const [newType, setNewType] = useState('feature')
+  const [editing, setEditing] = useState<number | null>(null)
+  const [draftCriteria, setDraftCriteria] = useState('')
 
   const load = async () => {
     try {
       const [data, projs] = await Promise.all([getBacklog(), getProjects()])
       setItems(data)
       setProjects(projs)
-    } catch (e) { console.error(e) }
+    } catch (e) { setError(errorText(e)) }
     finally { setLoading(false) }
   }
 
   useEffect(() => { load() }, [])
 
+  const act = async (id: number, fn: () => Promise<unknown>) => {
+    setBusy(id); setError('')
+    try { await fn() }
+    catch (e) { setError(errorText(e)) }
+    finally { setBusy(null); await load() }
+  }
+
   const handleAdd = async () => {
     if (!newTitle.trim()) return
+    setError('')
     try {
-      await addBacklogItem(newTitle, newProject, newType)
-      setNewTitle(''); setNewProject(''); setNewType('feature'); setShowAdd(false)
+      await createBacklogItem({
+        title: newTitle.trim(),
+        description: newTitle.trim(),
+        project_path: newProject,
+        item_type: newType,
+        acceptance_criteria: newCriteria.trim(),
+      })
+      setNewTitle(''); setNewCriteria(''); setNewProject(''); setNewType('feature'); setShowAdd(false)
       await load()
-    } catch (e) { console.error(e) }
+    } catch (e) { setError(errorText(e)) }
   }
 
-  const handleDelete = async (id: number) => {
-    if (!confirm('Delete this item?')) return
-    try { await deleteBacklogItem(id); await load() }
-    catch (e) { console.error(e) }
-  }
-
-  const handleRun = async (id: number) => {
-    setRunning(id)
-    try { await runBacklogItem(id); await load() }
-    catch (e) { console.error(e) }
-    finally { setRunning(null) }
-  }
-
-  const handlePlan = (item: BacklogItem) => {
-    if (!item.project_id) return
-    navigate('/projects/' + item.project_id + '/tasks', {
-      state: { tab: 'plan', goal: item.description || item.title }
+  const saveCriteria = async (item: BacklogItem) => {
+    await act(item.id, async () => {
+      await updateBacklogItem(item.id, { acceptance_criteria: draftCriteria })
+      setEditing(null)
     })
   }
 
@@ -85,25 +115,34 @@ export default function Backlog() {
   return (
     <div className='space-y-5'>
       <div className='flex items-center justify-between'>
-        <h1 className='text-xl font-semibold text-white'>Backlog</h1>
+        <div>
+          <h1 className='text-xl font-semibold text-white'>Tickets</h1>
+          <p className='text-xs text-gray-500 mt-0.5'>
+            A ticket needs acceptance criteria before it can be made ready.
+          </p>
+        </div>
         <button onClick={() => setShowAdd(true)}
           className='px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm'>
-          + Log Item
+          + New Ticket
         </button>
       </div>
 
+      {error && (
+        <div className='p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-sm text-red-300'>
+          {error}
+        </div>
+      )}
+
       {/* Filters */}
       <div className='flex flex-wrap gap-2'>
-        {/* Status filter */}
         <div className='flex gap-1 flex-wrap'>
-          {(['all', 'pending', 'running', 'done', 'failed'] as const).map(s => (
+          {FILTERS.map(s => (
             <button key={s} onClick={() => setFilter(s)}
               className={'px-3 py-1 rounded text-sm ' + (filter === s ? 'bg-violet-600 text-white' : 'bg-white/5 text-gray-400 hover:bg-white/10')}>
-              {s}
+              {s === 'all' ? 'all' : STATUS_LABEL[s]}
             </button>
           ))}
         </div>
-        {/* Type filter */}
         <div className='flex gap-1'>
           {(['all', 'bug', 'feature', 'chore'] as const).map(t => (
             <button key={t} onClick={() => setTypeFilter(t)}
@@ -114,7 +153,6 @@ export default function Backlog() {
             </button>
           ))}
         </div>
-        {/* Project filter */}
         <select value={projectFilter} onChange={e => setProjectFilter(e.target.value)}
           className='ml-auto bg-[#161927] border border-[#2d3748] rounded px-3 py-1 text-sm text-[#e2e8f0] focus:outline-none focus:border-violet-500'>
           <option value='all'>All projects</option>
@@ -124,50 +162,95 @@ export default function Backlog() {
       </div>
 
       {loading && <p className='text-gray-400'>Loading...</p>}
-      {!loading && filtered.length === 0 && <p className='text-gray-500 text-sm'>No items.</p>}
+      {!loading && filtered.length === 0 && <p className='text-gray-500 text-sm'>No tickets.</p>}
 
       <div className='space-y-2'>
         {filtered.map(item => {
           const typeMeta = TYPE_META[item.type ?? 'feature'] ?? TYPE_META.feature
+          const criteria = (item.acceptance_criteria ?? '').trim()
           return (
-            <div key={item.id} className='flex items-center gap-3 p-4 bg-[#161927] rounded-xl border border-white/5'>
-              <div className='flex-1 min-w-0'>
-                <div className='flex items-center gap-2 flex-wrap'>
-                  <span className={'px-1.5 py-0.5 rounded text-[10px] font-medium ' + typeMeta.cls}>
-                    {typeMeta.label}
-                  </span>
-                  <p className='text-sm text-white font-medium'>{item.title}</p>
+            <div key={item.id} className='p-4 bg-[#161927] rounded-xl border border-white/5'>
+              <div className='flex items-center gap-3'>
+                <div className='flex-1 min-w-0'>
+                  <div className='flex items-center gap-2 flex-wrap'>
+                    <span className={'px-1.5 py-0.5 rounded text-[10px] font-medium ' + typeMeta.cls}>
+                      {typeMeta.label}
+                    </span>
+                    <p className='text-sm text-white font-medium'>{item.title}</p>
+                  </div>
+                  <p className='text-xs text-gray-500 mt-0.5'>
+                    {projectName(item)
+                      ? <span className='text-violet-400'>{projectName(item)}</span>
+                      : item.project_path
+                      ? item.project_path.replace(/\\/g, '/').split('/').filter(Boolean).pop()
+                      : <span className='text-gray-600 italic'>adhoc</span>}
+                  </p>
                 </div>
-                <p className='text-xs text-gray-500 mt-0.5'>
-                  {projectName(item)
-                    ? <span className='text-violet-400'>{projectName(item)}</span>
-                    : item.project_path
-                    ? item.project_path.replace(/\\/g, '/').split('/').filter(Boolean).pop()
-                    : <span className='text-gray-600 italic'>adhoc</span>}
-                </p>
-              </div>
-              <span className={STATUS_COLORS[item.status] || 'text-gray-400'}>{item.status}</span>
-              {item.project_id && item.status === 'pending' && (
-                <button onClick={() => handlePlan(item)}
-                  className='text-xs px-3 py-1.5 rounded bg-white/5 text-violet-400 hover:bg-violet-500/20 border border-violet-500/20'>
-                  Plan
+                <span className={STATUS_COLORS[item.status] || 'text-gray-400'}>
+                  {STATUS_LABEL[item.status] ?? item.status}
+                </span>
+                {item.status === 'backlog' && (
+                  <button onClick={() => act(item.id, () => moveTicket(item.id, 'ready'))}
+                    disabled={busy === item.id || !criteria}
+                    title={criteria ? 'Move to ready' : 'Add acceptance criteria first'}
+                    className='text-xs px-3 py-1 rounded bg-white/5 text-violet-300 hover:bg-violet-500/20 border border-violet-500/20 disabled:opacity-40'>
+                    Mark ready
+                  </button>
+                )}
+                {item.status === 'ready' && (
+                  <button onClick={() => act(item.id, () => runTicket(item.id))}
+                    disabled={busy === item.id}
+                    className='text-xs px-3 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-40'>
+                    {busy === item.id ? 'Queuing...' : 'Build'}
+                  </button>
+                )}
+                {item.project_id && (
+                  <button onClick={() => navigate('/projects/' + item.project_id + '/tasks')}
+                    className='text-xs px-3 py-1 rounded bg-white/5 text-gray-300 hover:bg-white/10'>
+                    Queue
+                  </button>
+                )}
+                <button onClick={() => act(item.id, () => deleteBacklogItem(item.id))}
+                  className='text-xs px-3 py-1 rounded bg-red-500/20 text-red-300 hover:bg-red-500/30'>
+                  Delete
                 </button>
-              )}
-              <button onClick={() => handleRun(item.id)}
-                disabled={running === item.id || item.status === 'running'}
-                className='text-xs px-3 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-40'>
-                {running === item.id ? 'Queuing...' : 'Run'}
-              </button>
-              <button onClick={() => handleDelete(item.id)}
-                className='text-xs px-3 py-1 rounded bg-red-500/20 text-red-300 hover:bg-red-500/30'>
-                Delete
-              </button>
+              </div>
+
+              {/* Acceptance criteria — the gate on becoming ready, so it is editable here. */}
+              <div className='mt-3 pt-3 border-t border-white/5'>
+                <p className='text-[10px] uppercase text-gray-500 font-bold mb-1'>Acceptance criteria</p>
+                {editing === item.id ? (
+                  <div className='space-y-2'>
+                    <textarea value={draftCriteria} onChange={e => setDraftCriteria(e.target.value)}
+                      rows={3} autoFocus
+                      placeholder={'- what must be true when this is done'}
+                      className='w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-white placeholder:text-gray-500 focus:outline-none focus:border-violet-500 resize-none' />
+                    <div className='flex gap-2'>
+                      <button onClick={() => saveCriteria(item)}
+                        className='text-xs px-3 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white'>
+                        Save
+                      </button>
+                      <button onClick={() => setEditing(null)}
+                        className='text-xs px-3 py-1 rounded bg-white/5 text-gray-300 hover:bg-white/10'>
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button onClick={() => { setEditing(item.id); setDraftCriteria(criteria) }}
+                    className='text-left w-full'>
+                    {criteria
+                      ? <p className='text-xs text-gray-400 whitespace-pre-wrap hover:text-gray-200'>{criteria}</p>
+                      : <p className='text-xs text-amber-500 hover:text-amber-400'>None — add some to make this ready.</p>}
+                  </button>
+                )}
+              </div>
             </div>
           )
         })}
       </div>
 
-      {/* Add item sheet — div overlay (mobile safe) */}
+      {/* Add ticket sheet — div overlay (mobile safe) */}
       {showAdd && (
         <div className='fixed inset-0 z-[200] flex flex-col justify-end sm:items-center sm:justify-center'>
           <div className='absolute inset-0 bg-black/60' onClick={() => setShowAdd(false)} />
@@ -175,9 +258,8 @@ export default function Backlog() {
             <div className='flex justify-center mb-3 sm:hidden'>
               <div className='w-10 h-1 rounded-full bg-[#4a5568]' />
             </div>
-            <h2 className='text-lg font-semibold mb-4 text-white'>Log Backlog Item</h2>
+            <h2 className='text-lg font-semibold mb-4 text-white'>New Ticket</h2>
 
-            {/* Type selector */}
             <div className='flex gap-2 mb-3'>
               {(['bug', 'feature', 'chore'] as const).map(t => (
                 <button key={t} onClick={() => setNewType(t)}
@@ -197,6 +279,13 @@ export default function Backlog() {
                 placeholder={newType === 'bug' ? 'Describe the bug...' : newType === 'chore' ? 'Describe the chore...' : 'Describe the feature...'}
                 rows={3}
                 autoFocus
+                className='w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-500 focus:outline-none focus:border-violet-500 resize-none'
+              />
+              <textarea
+                value={newCriteria}
+                onChange={e => setNewCriteria(e.target.value)}
+                placeholder={'Acceptance criteria — required before this can be made ready\n- ...'}
+                rows={3}
                 className='w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-500 focus:outline-none focus:border-violet-500 resize-none'
               />
               <input

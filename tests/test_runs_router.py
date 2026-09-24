@@ -2,8 +2,8 @@
 
 These are the endpoints that spend money: they launch builds. That makes the
 guards in front of them the valuable part — an endpoint that starts a second
-concurrent run on the same project, or relaunches a deleted backlog item, costs
-real API spend to discover in production.
+concurrent run on the same project, or relaunches a ticket already in flight,
+costs real API spend to discover in production.
 
 Every test that touches a launch path stubs the launcher AND asserts the stub
 was reached. Without that assertion a missed patch would start a real run and
@@ -44,12 +44,17 @@ def project(client, tmp_path):
 
 @pytest.fixture
 def backlog_item(client, project):
+    """A ticket that is ready to pull: it has acceptance criteria and has been
+    moved to `ready`, which is the only state work can start from."""
     resp = client.post("/api/backlog", json={
         "title": "build a thing",
         "description": "details",
         "project_path": project["path"],
+        "acceptance_criteria": "- the thing is built",
     })
-    return resp.json()["id"]
+    item_id = resp.json()["id"]
+    client.put(f"/api/tickets/{item_id}/status", json={"status": "ready", "actor": "tester"})
+    return item_id
 
 
 @pytest.fixture
@@ -86,12 +91,26 @@ def test_running_an_unknown_backlog_item_is_a_404(client, no_real_launches):
     assert no_real_launches == []
 
 
-def test_an_item_already_running_is_not_launched_again(client, backlog_item, no_real_launches):
-    tracker.update_backlog_item(backlog_item, status="running")
+def test_a_ticket_already_in_flight_is_not_launched_again(client, backlog_item, no_real_launches):
+    tracker.update_backlog_item(backlog_item, status="in_progress")
     resp = client.post(f"/api/backlog/{backlog_item}/run")
     assert resp.status_code == 400
     assert "already running" in resp.json()["error"]
     assert no_real_launches == [], "a duplicate launch was started"
+
+
+def test_a_ticket_that_is_not_ready_cannot_be_launched(client, project, no_real_launches):
+    """The lifecycle is the gate: a ticket still in the backlog — which is where
+    one with no acceptance criteria is stuck — is not work anyone can start."""
+    item_id = client.post("/api/backlog", json={
+        "title": "half an idea",
+        "project_path": project["path"],
+    }).json()["id"]
+
+    resp = client.post(f"/api/backlog/{item_id}/run")
+    assert resp.status_code == 400
+    assert "backlog" in resp.json()["error"]
+    assert no_real_launches == [], "an unready ticket was built"
 
 
 def test_a_second_run_on_the_same_project_is_refused(client, project, backlog_item, no_real_launches):
@@ -104,7 +123,7 @@ def test_a_second_run_on_the_same_project_is_refused(client, project, backlog_it
     assert no_real_launches == [], "a concurrent run was started for the same project"
 
 
-def test_launching_marks_the_item_running_and_starts_one_process(
+def test_launching_claims_the_ticket_and_starts_one_process(
     client, project, backlog_item, no_real_launches
 ):
     resp = client.post(f"/api/backlog/{backlog_item}/run")
@@ -113,20 +132,130 @@ def test_launching_marks_the_item_running_and_starts_one_process(
 
     assert _wait_for(lambda: len(no_real_launches) == 1), "the launcher was never reached"
     cmd = no_real_launches[0]["cmd"]
-    assert "eng_crew" in cmd and "run" in cmd
-    assert project["path"] in cmd
-    # the task text handed to the builder is the item's title and description
-    assert any("build a thing" in str(part) for part in cmd)
+    # The builder is pointed at the ticket, not at a task string assembled here:
+    # it reads the ticket's own title, description, and acceptance criteria.
+    assert "eng_crew" in cmd and "ticket" in cmd
+    assert str(backlog_item) in [str(part) for part in cmd]
 
     item = tracker.get_backlog_item(backlog_item)
-    assert item["status"] == "running"
+    assert item["status"] == "in_progress"
 
 
-def test_launching_opens_a_sprint_for_the_item(client, project, backlog_item, no_real_launches):
+def test_launching_records_who_claimed_the_ticket(client, backlog_item, no_real_launches):
     client.post(f"/api/backlog/{backlog_item}/run")
     assert _wait_for(lambda: len(no_real_launches) == 1)
-    sprints = client.get(f"/api/projects/{project['id']}/sprints").json()["sprints"]
-    assert len(sprints) == 1
+
+    events = client.get(f"/api/tickets/{backlog_item}/events").json()["events"]
+    claim = events[-1]
+    assert (claim["from_status"], claim["to_status"]) == ("ready", "in_progress")
+    assert claim["actor"], "a status change with no actor is not worth recording"
+
+
+def test_the_wip_limit_stops_a_launch(client, project, backlog_item, no_real_launches,
+                                      monkeypatch):
+    """The queue is continuous, so the WIP limit is the only backpressure there
+    is — a launch past it must be refused rather than queued up."""
+    from eng_crew import tickets
+
+    monkeypatch.setattr(tickets, "wip_limit", lambda settings=None: 1)
+    other = client.post("/api/backlog", json={
+        "title": "already in flight",
+        "project_path": project["path"],
+        "acceptance_criteria": "- done",
+    }).json()["id"]
+    tracker.update_backlog_item(other, status="in_progress")
+
+    resp = client.post(f"/api/backlog/{backlog_item}/run")
+    assert resp.status_code == 409
+    assert "WIP limit" in resp.json()["error"]
+    assert no_real_launches == [], "a launch was started past the WIP limit"
+    assert tracker.get_backlog_item(backlog_item)["status"] == "ready"
+
+
+# --- running queued work ------------------------------------------------
+#
+# The bug this replaced launched the literal string "Execute sprint N". Queued
+# work now means: take the next ready ticket and build that.
+
+
+def ready_ticket(client, project, title, priority=50):
+    item_id = client.post("/api/backlog", json={
+        "title": title,
+        "project_path": project["path"],
+        "priority": priority,
+        "acceptance_criteria": "- it works",
+    }).json()["id"]
+    client.put(f"/api/tickets/{item_id}/status", json={"status": "ready", "actor": "tester"})
+    return item_id
+
+
+def test_running_the_queue_builds_the_highest_priority_ticket(
+    client, project, no_real_launches
+):
+    ready_ticket(client, project, "later", priority=90)
+    first = ready_ticket(client, project, "sooner", priority=10)
+
+    body = client.post(f"/api/projects/{project['id']}/queue/run").json()
+
+    assert [s["ticket_id"] for s in body["started"]] == [first]
+    assert body["waiting"] == 1, "the rest of the queue should still be waiting"
+    assert _wait_for(lambda: len(no_real_launches) == 1), "the builder was never reached"
+    assert str(first) in [str(part) for part in no_real_launches[0]["cmd"]]
+    assert tracker.get_backlog_item(first)["status"] == "in_progress"
+
+
+def test_running_the_queue_starts_one_build_at_a_time(client, project, no_real_launches):
+    """A project builds one ticket at a time — runs share its checkout. The WIP
+    limit bounds tickets in flight, which is a different thing."""
+    ready_ticket(client, project, "one", priority=10)
+    ready_ticket(client, project, "two", priority=20)
+
+    client.post(f"/api/projects/{project['id']}/queue/run")
+    assert _wait_for(lambda: len(no_real_launches) == 1)
+
+    resp = client.post(f"/api/projects/{project['id']}/queue/run")
+    assert resp.status_code == 409
+    assert "Already running" in resp.json()["error"]
+    assert len(no_real_launches) == 1, "a second concurrent build was started"
+
+
+def test_running_an_empty_queue_starts_nothing(client, project, no_real_launches):
+    body = client.post(f"/api/projects/{project['id']}/queue/run").json()
+    assert body["started"] == []
+    assert body["waiting"] == 0
+    assert no_real_launches == []
+
+
+def test_a_backlog_ticket_is_not_queued_work(client, project, no_real_launches):
+    """Only `ready` tickets are pullable, which is what the acceptance-criteria
+    gate is for: work with no definition of done never reaches the queue."""
+    client.post("/api/backlog", json={"title": "vague idea", "project_path": project["path"]})
+
+    body = client.post(f"/api/projects/{project['id']}/queue/run").json()
+    assert body["started"] == []
+    assert body["waiting"] == 0
+    assert no_real_launches == []
+
+
+def test_running_the_queue_at_the_wip_limit_is_refused(
+    client, project, no_real_launches, monkeypatch
+):
+    from eng_crew import tickets
+
+    monkeypatch.setattr(tickets, "wip_limit", lambda settings=None: 1)
+    held = ready_ticket(client, project, "in flight")
+    tracker.update_backlog_item(held, status="in_review")
+    ready_ticket(client, project, "next up")
+
+    resp = client.post(f"/api/projects/{project['id']}/queue/run")
+    assert resp.status_code == 409
+    assert "WIP limit" in resp.json()["error"]
+    assert no_real_launches == [], "a build started past the WIP limit"
+
+
+def test_running_the_queue_of_an_unknown_project_is_a_404(client, no_real_launches):
+    assert client.post("/api/projects/999999/queue/run").status_code == 404
+    assert no_real_launches == []
 
 
 # --- retry --------------------------------------------------------------
