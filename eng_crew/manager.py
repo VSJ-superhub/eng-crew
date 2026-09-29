@@ -1,29 +1,34 @@
-"""
-Grounded Manager (PM) agent — ideates against the real codebase, then dispatches builds.
+"""Grounded Manager (PM) agent — ideates against the real codebase, then writes tickets.
 
 Surface-agnostic: the dashboard, Discord, and a CLI are thin frontends. The manager
 holds a conversation (history is passed in per turn), explores the *actual* code with
 read-only tools while it ideates, and — when a concrete, buildable unit of work has
-emerged and the user wants to move forward — proposes it. On the human's confirm,
-`dispatch()` hands the task to the single-agent builder (`run.run_task`) on a
-background thread and returns a run_id to poll.
+emerged — proposes it as a ticket: title, description, acceptance criteria. On the
+human's accept, :func:`accept` files that ticket in the project's backlog.
+
+Filing a ticket starts nothing. The manager is the product manager, not the dispatcher:
+a human moving the ticket to ``ready`` is the approval, and the existing ticket queue
+builds it from there. That is why there is no dispatch here any more — a free-text task
+fired straight at the builder skipped both the approval and the definition of done.
 
 Design invariants:
   - The manager is GROUNDED: claude_cli with Read/Grep/Glob and cwd=project, so its
     ideas reflect the real code, not a vacuum. (Contrast the old dashboard intake,
     which ran with --allowedTools none --max-turns 1.)
-  - The manager NEVER writes code. It has read-only tools; building is a separate,
-    explicit, human-confirmed step.
+  - The manager NEVER writes code and never starts a run. It has read-only tools;
+    building is a separate, explicit, human-approved step.
+  - A proposal with no acceptance criteria still becomes a ticket, but the gap is
+    handed back to the surface to show — the lifecycle will refuse to make such a
+    ticket ready, and a silent un-buildable ticket is worse than a visible one.
   - Ideation runs on the Claude subscription (claude_cli) — effectively flat cost.
-    Metered spend happens only when a build is dispatched.
+    Metered spend happens only when a ticket is built.
 """
 from __future__ import annotations
 
 import json
 import re
-import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from .providers import call_llm
 
@@ -33,50 +38,68 @@ MANAGER_MODEL = "claude-sonnet-5"
 MANAGER_TOOLS = "Read,Grep,Glob"
 MANAGER_MAX_TURNS = 10
 
-_SYSTEM = """\
-You are a senior engineering program manager and tech lead. A product person (the \
-"program manager") talks to you in natural language about what they want. Your job is \
-to IDEATE WITH THEM and turn fuzzy intent into one concrete, buildable unit of work — \
-grounded in the real codebase.
+_SYSTEM = """You are a senior engineering program manager and tech lead. A product person (the "program manager") talks to you in natural language about what they want. Your job is to IDEATE WITH THEM and turn fuzzy intent into one concrete, buildable TICKET — grounded in the real codebase.
 
 How you work:
-- Ground every idea in reality. Use Read, Grep, and Glob to inspect the actual project \
-before you propose anything. Reference what you find ("you already have X in file Y, so \
-this would hook in there").
+- Ground every idea in reality. Use Read, Grep, and Glob to inspect the actual project before you propose anything. Reference what you find ("you already have X in file Y, so this would hook in there").
 - Ask at most 1-2 focused clarifying questions at a time. Do not interrogate.
 - Be concise. This is a fast planning conversation on a phone or a chat panel, not a doc.
-- You do NOT write code. When work is ready, it is dispatched to the engineering team, \
-which implements it on an isolated branch.
-- Propose ONE buildable unit at a time — the smallest coherent slice that delivers value.
+- You do NOT write code. A ticket you write goes to the project's backlog; a human approves it, and the engineering team then implements it on an isolated branch.
+- Propose ONE ticket at a time — the smallest coherent slice that delivers value.
 
-When (and only when) you and the user have converged on something concrete AND the user \
-signals they want to move forward, end your reply with EXACTLY one fenced block:
+When (and only when) you and the user have converged on something concrete AND the user signals they want it written up, end your reply with EXACTLY one fenced block:
 
-```build
-{"task": "<one precise, self-contained task the engineering team can act on without \
-further questions>", "rationale": "<one sentence: why this, and how it fits the code>"}
+```ticket
+{"title": "<short imperative title>", "description": "<what the work is, in a sentence or two, self-contained enough to act on without further questions>", "acceptance_criteria": ["<observable condition that must hold when this is done>", "..."], "rationale": "<one sentence: why this, and how it fits the code>"}
 ```
 
-Rules for the build block:
-- Emit it only when the user is ready to build — not while still exploring options.
-- The "task" must be specific and intent-level (name the outcome), but must NOT invent \
-file paths or APIs you did not verify by reading the code.
-- Never emit more than one build block. If you are still ideating, do not emit one at all.\
-"""
+Rules for the ticket block:
+- Emit it only when the user is ready to write the ticket up — not while still exploring options.
+- ALWAYS include acceptance_criteria: concrete, checkable statements about behaviour, not restatements of the title. A ticket with no acceptance criteria cannot be approved for build, so leaving them out blocks the work.
+- The title and description must be specific and intent-level (name the outcome), but must NOT invent file paths or APIs you did not verify by reading the code.
+- Never emit more than one ticket block. If you are still ideating, do not emit one at all."""
 
-_BUILD_RE = re.compile(r"```build\s*(\{.*?\})\s*```", re.DOTALL)
+_TICKET_RE = re.compile(r"```ticket\s*(\{.*?\})\s*```", re.DOTALL)
 
 
 @dataclass
 class ManagerReply:
-    """One manager turn. `proposal` is set only when a build is ready to confirm."""
+    """One manager turn. `proposal` is set only when a ticket is ready to accept."""
     reply: str
-    proposal: Optional[dict] = None   # {"task": str, "rationale": str}
+    #: {"title", "description", "acceptance_criteria": list[str], "rationale"}
+    proposal: Optional[dict] = None
+
+
+#: What a surface tells the user when the manager wrote a ticket with no definition
+#: of done. Such a ticket exists, but the lifecycle will not let it become ready.
+MISSING_CRITERIA_WARNING = (
+    "This ticket has no acceptance criteria, so it cannot be approved for build. "
+    "Add them on the ticket (or ask the manager for them) before moving it to ready."
+)
+
+
+def _criteria_list(raw: Any) -> list[str]:
+    """Normalise acceptance criteria to a list of non-empty lines."""
+    if isinstance(raw, str):
+        raw = raw.splitlines()
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out = []
+    for item in raw:
+        text = str(item).strip().lstrip("-*").strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def criteria_text(criteria: Any) -> str:
+    """Acceptance criteria as the bulleted text a ticket stores."""
+    return "\n".join(f"- {c}" for c in _criteria_list(criteria))
 
 
 def _extract_proposal(text: str) -> tuple[str, Optional[dict]]:
-    """Split a manager response into (conversational reply, optional build proposal)."""
-    m = _BUILD_RE.search(text or "")
+    """Split a manager response into (conversational reply, optional ticket proposal)."""
+    m = _TICKET_RE.search(text or "")
     if not m:
         return (text or "").strip(), None
     try:
@@ -84,10 +107,16 @@ def _extract_proposal(text: str) -> tuple[str, Optional[dict]]:
     except Exception:
         return (text or "").strip(), None
     reply = ((text[: m.start()] + text[m.end():]) or "").strip()
-    task = str(obj.get("task", "")).strip()
-    if not task:
+    # "task" is what the manager used to emit, before a proposal was a ticket.
+    title = str(obj.get("title") or obj.get("task") or "").strip()
+    if not title:
         return reply, None
-    return reply, {"task": task, "rationale": str(obj.get("rationale", "")).strip()}
+    return reply, {
+        "title": title,
+        "description": str(obj.get("description") or "").strip(),
+        "acceptance_criteria": _criteria_list(obj.get("acceptance_criteria")),
+        "rationale": str(obj.get("rationale", "")).strip(),
+    }
 
 
 def _build_prompt(history: list[dict], message: str, project_context: str, vision: str) -> str:
@@ -140,38 +169,58 @@ def chat(
     return ManagerReply(reply=reply or "(no response)", proposal=proposal)
 
 
-def dispatch(task: str, project_path: str, *, claude_md_path: str = "") -> int:
-    """Dispatch a confirmed task to the single-agent builder on a background thread.
+def accept(proposal: dict, project_path: str, *, actor: str = "manager",
+           claude_md_path: str = "", project_id: int | None = None,
+           priority: int = 50) -> dict:
+    """File an accepted proposal as a ticket in the project's backlog.
 
-    Returns a run_id immediately; the build runs asynchronously. Poll status(run_id)
-    (or the dashboard) for progress.
+    This is where the manager's job ends. No run is started: the ticket lands in
+    ``backlog``, and a human moving it to ``ready`` is the approval that releases
+    it into the queue. The ticket's first event names ``actor`` (the manager), so
+    its history shows who wrote it.
+
+    Returns ``{"ticket_id", "ticket", "needs_acceptance_criteria", "warning"}``.
+    A proposal with no acceptance criteria is still filed — losing the write
+    would lose the thinking — but ``warning`` is non-empty so the surface can say
+    so rather than leaving an un-approvable ticket sitting silently in the backlog.
     """
     from . import tracker
-    from .config import load_settings
-    from .run import run_task
 
-    # Single-agent default has no HITL gate; disable approval so the build proceeds.
-    settings = load_settings().model_copy(update={"require_approval": False})
-    run_id = tracker.create_run(task, project_path)
+    title = str((proposal or {}).get("title") or (proposal or {}).get("task") or "").strip()
+    if not title:
+        raise ValueError("a proposal needs a title before it can become a ticket")
 
-    # Remember the dispatched work as part of the product vision.
+    criteria = criteria_text((proposal or {}).get("acceptance_criteria"))
+    description = str((proposal or {}).get("description") or "").strip() or title
+    rationale = str((proposal or {}).get("rationale") or "").strip()
+    if rationale:
+        description = f"{description}\n\nWhy: {rationale}"
+
+    ticket_id = tracker.add_backlog_item(
+        title=title[:200],
+        description=description,
+        project_path=project_path,
+        claude_md_path=claude_md_path,
+        priority=priority,
+        project_id=project_id,
+        item_type="feature",
+        acceptance_criteria=criteria,
+        created_by=actor,
+    )
+
+    # Remember the accepted work as part of the product vision.
     try:
         from . import vision as _vision
-        _vision.record_build(project_path, task)
+        _vision.record_build(project_path, title)
     except Exception:
         pass
 
-    def _bg() -> None:
-        try:
-            run_task(task=task, project_path=project_path, run_id=run_id, settings=settings)
-        except Exception as e:  # run_pipeline finishes the run on its own errors; this is a backstop
-            try:
-                tracker.finish_run(run_id, status="failed", final_summary=str(e))
-            except Exception:
-                pass
-
-    threading.Thread(target=_bg, daemon=True).start()
-    return run_id
+    return {
+        "ticket_id": ticket_id,
+        "ticket": tracker.get_backlog_item(ticket_id) or {},
+        "needs_acceptance_criteria": not criteria,
+        "warning": "" if criteria else MISSING_CRITERIA_WARNING,
+    }
 
 
 def status(run_id: int) -> Optional[dict]:

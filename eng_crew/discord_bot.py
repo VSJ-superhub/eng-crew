@@ -3,6 +3,12 @@ eng-crew Discord bot — dispatch tasks to your engineering team from mobile.
 
 Thin, single-agent-first bot:
   /task project:<alias> task:<desc>   Dispatch a task (with a Run/Cancel confirm)
+  /ideate project:<alias>             Ideate with the manager. It writes tickets,
+                                      not builds: accepting a proposal files a
+                                      backlog ticket with acceptance criteria and
+                                      starts nothing. Approving that ticket to
+                                      `ready` is what releases it to the queue.
+  /endideate                          Leave ideation mode (and remember the session)
   /status                             Recent and active runs
   /projects                           Configured project aliases
   /newtopic                           Forget this channel's conversation
@@ -208,22 +214,47 @@ async def _post_confirm(target, projects: dict, project_key: str, task: str) -> 
 
 # ── Ideation mode (grounded manager) ────────────────────────────────────────────
 
+def accept_proposal(cfg: dict, proposal: dict) -> str:
+    """File a manager proposal as a backlog ticket. Returns what to tell the channel.
+
+    No build starts here — the ticket waits in the backlog until someone approves
+    it to `ready`. If the manager left out acceptance criteria the ticket still
+    exists, but the message says so, because the lifecycle will refuse to make it
+    ready and a silently un-approvable ticket is how work disappears.
+    """
+    from . import manager
+
+    result = manager.accept(proposal, cfg["path"])
+    ticket = result["ticket"]
+    lines = [
+        f"📋 Filed ticket **#{ticket.get('id', result['ticket_id'])}** in the "
+        f"{cfg.get('name') or 'project'} backlog: {ticket.get('title', '')}",
+    ]
+    if result["needs_acceptance_criteria"]:
+        lines.append(f"⚠️ {result['warning']}")
+    else:
+        lines.append("Approve it (move it to **ready**) and the queue will build it.")
+    return "\n".join(lines)
+
+
 class IdeateBuildView(discord.ui.View):
-    """Shown on a manager build proposal — dispatch it or keep ideating."""
-    def __init__(self, cfg: dict, task: str):
+    """Shown on a manager ticket proposal — file it in the backlog or keep ideating."""
+    def __init__(self, cfg: dict, proposal: dict):
         super().__init__(timeout=600)
         self._cfg = cfg
-        self._task = task
+        self._proposal = proposal
 
-    @discord.ui.button(label="🚀 Build it", style=discord.ButtonStyle.success)
-    async def build(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="📋 Add to backlog", style=discord.ButtonStyle.success)
+    async def backlog(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer()
             for item in self.children:
                 item.disabled = True
-            await interaction.edit_original_response(content="🚀 Dispatching to eng-crew...", view=self)
             loop = asyncio.get_running_loop()
-            asyncio.create_task(_execute(interaction.channel, self._cfg, self._task, loop))
+            message = await loop.run_in_executor(
+                bot.executor, accept_proposal, self._cfg, self._proposal
+            )
+            await interaction.edit_original_response(content=message, view=self)
             self.stop()
         except Exception as e:
             try:
@@ -295,13 +326,24 @@ async def _handle_ideate(message: discord.Message, text: str) -> None:
     for chunk in [body[i:i + 1900] for i in range(0, len(body), 1900)]:
         await message.channel.send(chunk)
 
-    if reply.proposal and reply.proposal.get("task"):
+    if reply.proposal and reply.proposal.get("title"):
         prop = reply.proposal
-        desc = prop["task"]
+        desc = prop.get("description") or prop["title"]
+        criteria = prop.get("acceptance_criteria") or []
+        if criteria:
+            desc += "\n\n**Acceptance criteria**\n" + "\n".join(f"• {c}" for c in criteria)
+        else:
+            from .manager import MISSING_CRITERIA_WARNING
+
+            desc += f"\n\n⚠️ {MISSING_CRITERIA_WARNING}"
         if prop.get("rationale"):
             desc += f"\n\n*{prop['rationale']}*"
-        embed = discord.Embed(title="💡 Ready to build", description=desc, color=discord.Color.purple())
-        await message.channel.send(embed=embed, view=IdeateBuildView(cfg, prop["task"]))
+        embed = discord.Embed(
+            title=f"📋 Ticket: {prop['title']}"[:256],
+            description=desc[:4000],
+            color=discord.Color.purple(),
+        )
+        await message.channel.send(embed=embed, view=IdeateBuildView(cfg, prop))
 
 
 # ── Bot ─────────────────────────────────────────────────────────────────────────
@@ -454,7 +496,8 @@ async def cmd_ideate(interaction: discord.Interaction, project: str):
     _ideate_mode.add(cid)
     await interaction.response.send_message(
         f"💡 **Ideation mode on {cfg.get('name', project)}.** Talk through an idea — I'll ground it "
-        f"in the real code, ask a question or two, and propose something to build.\n"
+        f"in the real code, ask a question or two, and write it up as a ticket for the backlog. "
+        f"Approving that ticket (moving it to **ready**) is what starts a build.\n"
         f"`/task` still works for direct dispatch · `/endideate` to exit."
     )
 
