@@ -8,13 +8,16 @@ interface Msg {
 }
 
 interface Proposal {
-  task: string;
+  title: string;
+  description: string;
+  acceptance_criteria: string[];
   rationale: string;
 }
 
-interface DispatchedBuild {
-  run_id: number;
-  task: string;
+interface FiledTicket {
+  id: number;
+  title: string;
+  needsCriteria: boolean;
 }
 
 export default function Ideate() {
@@ -24,8 +27,8 @@ export default function Ideate() {
   const [input, setInput] = useState('');
   const [thinking, setThinking] = useState(false);
   const [proposal, setProposal] = useState<Proposal | null>(null);
-  const [dispatching, setDispatching] = useState(false);
-  const [builds, setBuilds] = useState<DispatchedBuild[]>([]);
+  const [filing, setFiling] = useState(false);
+  const [tickets, setTickets] = useState<FiledTicket[]>([]);
   const [error, setError] = useState('');
   const endRef = useRef<HTMLDivElement | null>(null);
 
@@ -35,7 +38,7 @@ export default function Ideate() {
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, thinking, proposal, builds]);
+  }, [messages, thinking, proposal, tickets]);
 
   const selectedProject = projects.find(p => p.id.toString() === selectedProjectId) ?? null;
 
@@ -69,7 +72,7 @@ export default function Ideate() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Server error ' + res.status);
       setMessages(prev => [...prev, { role: 'manager', content: data.reply }]);
-      if (data.proposal?.task) setProposal(data.proposal);
+      if (data.proposal?.title) setProposal(data.proposal);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -77,28 +80,43 @@ export default function Ideate() {
     }
   };
 
-  const build = async () => {
+  // Accepting a proposal files a ticket in the backlog. It starts no build —
+  // approving the ticket to `ready` is what releases it into the queue.
+  const fileTicket = async () => {
     if (!proposal || !selectedProject?.project_path) return;
-    setDispatching(true);
+    setFiling(true);
     setError('');
     try {
-      const res = await fetch('/api/manager/dispatch', {
+      const res = await fetch('/api/manager/accept', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task: proposal.task, project_path: selectedProject.project_path }),
+        body: JSON.stringify({
+          title: proposal.title,
+          description: proposal.description ?? '',
+          acceptance_criteria: proposal.acceptance_criteria ?? [],
+          rationale: proposal.rationale ?? '',
+          project_path: selectedProject.project_path,
+          project_id: selectedProject.id,
+        }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Dispatch failed');
-      setBuilds(prev => [...prev, { run_id: data.run_id, task: proposal.task }]);
-      setMessages(prev => [
-        ...prev,
-        { role: 'manager', content: `🚀 Dispatched build #${data.run_id}. I'll build it on an isolated branch — track it on the dashboard.` },
-      ]);
+      if (!res.ok) throw new Error(data.error ?? 'Could not file the ticket');
+      setTickets(prev => [...prev, {
+        id: data.ticket?.id ?? data.ticket_id,
+        title: proposal.title,
+        needsCriteria: !!data.needs_acceptance_criteria,
+      }]);
+      setMessages(prev => [...prev, {
+        role: 'manager',
+        content: data.needs_acceptance_criteria
+          ? `Filed ticket #${data.ticket_id} in the backlog. ${data.warning}`
+          : `Filed ticket #${data.ticket_id} in the backlog. Approve it (move it to ready) and the queue will build it.`,
+      }]);
       setProposal(null);
     } catch (e) {
       setError(String(e));
     } finally {
-      setDispatching(false);
+      setFiling(false);
     }
   };
 
@@ -126,7 +144,7 @@ export default function Ideate() {
 
   const reset = () => {
     rememberSession();
-    setMessages([]); setProposal(null); setBuilds([]); setError(''); setInput('');
+    setMessages([]); setProposal(null); setTickets([]); setError(''); setInput('');
   };
 
   return (
@@ -134,7 +152,7 @@ export default function Ideate() {
       <div className='flex items-center justify-between mb-3'>
         <div>
           <h1 className='text-lg font-semibold text-white'>Ideate</h1>
-          <p className='text-xs text-gray-500'>Talk through an idea — the manager grounds it in your code, then builds it.</p>
+          <p className='text-xs text-gray-500'>Talk through an idea — the manager grounds it in your code, then writes a ticket for it.</p>
         </div>
         {messages.length > 0 && (
           <button onClick={reset} className='text-sm text-gray-400 active:text-white py-1'>← New</button>
@@ -190,23 +208,39 @@ export default function Ideate() {
           </div>
         )}
 
-        {/* Build proposal */}
+        {/* Ticket proposal */}
         {proposal && !thinking && (
           <div className='bg-violet-600/10 border border-violet-500/40 rounded-xl p-4 space-y-3'>
             <div>
-              <p className='text-xs uppercase tracking-wider text-violet-400 font-semibold mb-1'>Ready to build</p>
-              <p className='text-sm text-white leading-snug'>{proposal.task}</p>
+              <p className='text-xs uppercase tracking-wider text-violet-400 font-semibold mb-1'>Proposed ticket</p>
+              <p className='text-sm text-white leading-snug font-medium'>{proposal.title}</p>
+              {proposal.description && (
+                <p className='text-sm text-gray-300 mt-1.5 leading-relaxed whitespace-pre-wrap'>{proposal.description}</p>
+              )}
+              {proposal.acceptance_criteria?.length ? (
+                <div className='mt-2'>
+                  <p className='text-xs uppercase tracking-wider text-gray-500 font-semibold mb-1'>Acceptance criteria</p>
+                  <ul className='text-xs text-gray-300 space-y-1 list-disc list-inside leading-relaxed'>
+                    {proposal.acceptance_criteria.map((c, i) => <li key={i}>{c}</li>)}
+                  </ul>
+                </div>
+              ) : (
+                <p className='text-xs text-amber-300 mt-2 leading-relaxed'>
+                  No acceptance criteria — this ticket cannot be approved for build until it has
+                  some. File it and add them, or ask the manager for them.
+                </p>
+              )}
               {proposal.rationale && (
-                <p className='text-xs text-gray-400 mt-1.5 leading-relaxed'>{proposal.rationale}</p>
+                <p className='text-xs text-gray-400 mt-2 leading-relaxed'>{proposal.rationale}</p>
               )}
             </div>
             <div className='flex gap-2'>
               <button
-                onClick={build}
-                disabled={dispatching}
+                onClick={fileTicket}
+                disabled={filing}
                 className='flex-1 py-2.5 rounded-lg bg-violet-600 active:bg-violet-700 text-white text-sm font-medium disabled:opacity-40 transition-colors'
               >
-                {dispatching ? 'Dispatching…' : '🚀 Build it'}
+                {filing ? 'Filing…' : '📋 Add to backlog'}
               </button>
               <button
                 onClick={() => setProposal(null)}
@@ -218,11 +252,18 @@ export default function Ideate() {
           </div>
         )}
 
-        {/* Dispatched builds */}
-        {builds.map(b => (
-          <a key={b.run_id} href={`/run/${b.run_id}`}
-            className='block bg-green-600/10 border border-green-500/30 rounded-lg px-4 py-2.5 text-sm text-green-300 active:bg-green-600/20'>
-            ✓ Building #{b.run_id} — tap to track
+        {/* Filed tickets */}
+        {tickets.map(t => (
+          <a key={t.id} href='/backlog'
+            className={
+              'block rounded-lg px-4 py-2.5 text-sm border ' +
+              (t.needsCriteria
+                ? 'bg-amber-600/10 border-amber-500/30 text-amber-300 active:bg-amber-600/20'
+                : 'bg-green-600/10 border-green-500/30 text-green-300 active:bg-green-600/20')
+            }>
+            {t.needsCriteria
+              ? `⚠ Ticket #${t.id} filed without acceptance criteria — add them before approving`
+              : `✓ Ticket #${t.id} in the backlog — approve it to build`}
           </a>
         ))}
 

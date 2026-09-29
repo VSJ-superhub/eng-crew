@@ -1,13 +1,15 @@
 """Dashboard API for the grounded Manager (PM) agent.
 
-The Manager ideates against the real codebase and, on the user's confirm,
-dispatches a build. This replaces the old blind intake chat
-(claude -p --allowedTools none --max-turns 1) as the conversational surface.
+The Manager ideates against the real codebase and, on the user's accept, files a
+ticket in the project's backlog — it does not start a build. This replaces the old
+blind intake chat (claude -p --allowedTools none --max-turns 1) as the
+conversational surface, and the old /dispatch endpoint, which fired a free-text
+task straight at the builder with neither approval nor a definition of done.
 """
 from __future__ import annotations
 
 import asyncio
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -23,9 +25,14 @@ class ManagerChatPayload(BaseModel):
     project_context: str = ""
 
 
-class ManagerDispatchPayload(BaseModel):
-    task: str
+class ManagerAcceptPayload(BaseModel):
+    """An accepted ticket proposal. Criteria may arrive as a list or as lines."""
+    title: str = ""
+    description: str = ""
+    acceptance_criteria: Union[List[str], str] = []
+    rationale: str = ""
     project_path: str
+    project_id: Optional[int] = None
 
 
 class ManagerRememberPayload(BaseModel):
@@ -60,19 +67,34 @@ async def api_manager_chat(payload: ManagerChatPayload):
     return JSONResponse({"reply": result.reply, "proposal": result.proposal})
 
 
-@router.post("/dispatch")
-async def api_manager_dispatch(payload: ManagerDispatchPayload):
-    """Dispatch a confirmed proposal to the single-agent builder. Returns {run_id}."""
-    if not payload.task or not payload.project_path:
-        return JSONResponse({"error": "task and project_path are required."}, status_code=400)
-    from ...manager import dispatch
+@router.post("/accept")
+async def api_manager_accept(payload: ManagerAcceptPayload):
+    """File an accepted proposal as a backlog ticket. Starts no run.
+
+    Returns {ticket, ticket_id, needs_acceptance_criteria, warning}. Approving the
+    ticket to `ready` (PUT /api/tickets/{id}/status) is what releases it to build.
+    """
+    if not payload.title.strip() or not payload.project_path:
+        return JSONResponse(
+            {"error": "title and project_path are required."}, status_code=400
+        )
+    from ...manager import accept
 
     try:
-        run_id = dispatch(payload.task, payload.project_path)
+        result = accept(
+            {
+                "title": payload.title,
+                "description": payload.description,
+                "acceptance_criteria": payload.acceptance_criteria,
+                "rationale": payload.rationale,
+            },
+            payload.project_path,
+            project_id=payload.project_id,
+        )
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-    return JSONResponse({"run_id": run_id})
+    return JSONResponse(result)
 
 
 @router.post("/remember")

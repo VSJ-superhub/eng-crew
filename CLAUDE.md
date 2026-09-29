@@ -25,6 +25,13 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   a build of the goal text. Running queued work builds the actual tickets — the
   task handed to the pipeline is the ticket's title, description, and acceptance
   criteria.
+- The Manager (`eng_crew/manager.py`) is the product manager: an Ideate
+  conversation (dashboard or Discord `/ideate`) ends in a ticket proposal — title,
+  description, acceptance criteria — and accepting it files a backlog ticket
+  credited to `manager`. It starts no run. A proposal that arrived without
+  acceptance criteria still becomes a ticket, but the surface says so, because the
+  lifecycle will refuse to make that ticket `ready`. Approving the ticket to
+  `ready` is what releases it into the ticket queue to be built.
 - Agent prompts live in `.claude/skills/<name>/SKILL.md` (frontmatter + template),
   loaded by `eng_crew/prompts.py` — edit a prompt without touching agent code.
 - Runs execute in their own git worktree and branch (`worktree_isolation`, on by
