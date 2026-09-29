@@ -574,12 +574,23 @@ async def api_run_queue(project_id: int):
     if not waiting:
         return JSONResponse({"started": [], "refused": [], "waiting": 0, "wip": state})
 
-    ticket = waiting[0]
+    # A ticket that has spent its budget is waiting on a person, not on the
+    # queue. Pulling it would be refused every time and block everything behind
+    # it, so the queue passes over it and says so.
+    over_budget = [t for t in waiting if (budget.status(t["id"]) or {}).get("exhausted")]
+    pullable = [t for t in waiting if t not in over_budget]
+    held = [{"ticket_id": t["id"], "detail": "over budget — needs a human decision"}
+            for t in over_budget]
+    if not pullable:
+        return JSONResponse({"started": [], "refused": held,
+                             "waiting": len(waiting), "wip": state})
+
+    ticket = pullable[0]
     ok, detail = launch_ticket_run(ticket["id"], actor="queue")
     entry = {"ticket_id": ticket["id"], "detail": detail}
     return JSONResponse({
         "started": [entry] if ok else [],
-        "refused": [] if ok else [entry],
+        "refused": held + ([] if ok else [entry]),
         "waiting": len(waiting) - (1 if ok else 0),
         "wip": tickets.wip(path),
     })

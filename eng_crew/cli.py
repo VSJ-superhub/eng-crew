@@ -220,6 +220,9 @@ def budget(
     Raising it is what releases a ticket whose work was stopped for budget; the
     next build picks up the new figure. This starts no run.
     """
+    if amount is not None and amount < 0:
+        console.print("[red]a budget cannot be negative[/red]")
+        raise typer.Exit(1)
     cfg = load_settings(env_file)
     from eng_crew import budget as budget_mod
 
