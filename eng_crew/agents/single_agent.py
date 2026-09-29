@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 
 from .base import BaseAgent
-from .. import prompts
+from .. import prompts, tickets
 from ..providers import call_llm
 from ..state import TeamState
 from .. import tracker
@@ -35,8 +35,29 @@ class SingleAgentEngineer(BaseAgent):
     # Budget for the project-context orientation block (kept lean on purpose).
     CONTEXT_TOKEN_BUDGET = 1200
     # Long-horizon agentic runs need room; a low cap silently truncates the
-    # implementation (see claude_cli's max-turns soft-stop).
+    # implementation (see claude_cli's max-turns soft-stop). Test-first work
+    # spends turns on the red phase before any implementation starts.
     MAX_TURNS = 60
+
+    # Budget for the acceptance criteria quoted back into the test-first block.
+    # Generous — criteria are the definition of done and truncating one loses a
+    # test; a runaway description still cannot swamp the prompt.
+    CRITERIA_TOKEN_BUDGET = 1500
+
+    def _test_first_block(self, task: str) -> str:
+        """The test-first directive, when the task carries acceptance criteria.
+
+        Criteria are a definition of done written before the code exists, which
+        is exactly what a test is. Tickets carry them, so ticket-driven runs get
+        told to encode them as failing tests first; a bare task string has no
+        such definition and gets the ordinary approach.
+        """
+        criteria = tickets.acceptance_criteria_of(task)
+        if not criteria:
+            return ""
+        criteria = self.truncate_to_tokens(criteria, self.CRITERIA_TOKEN_BUDGET)
+        print("[single_agent] acceptance criteria present — test-first mode", file=sys.stderr)
+        return "\n" + prompts.render("test-first", criteria=criteria) + "\n"
 
     def run(self, state: TeamState) -> dict:
         task = state.get("raw_task", "")
@@ -54,6 +75,7 @@ class SingleAgentEngineer(BaseAgent):
         prompt = prompts.render(
             "single-agent-implement",
             task=task,
+            test_first_block=self._test_first_block(task),
             context_block=context_block,
         )
 

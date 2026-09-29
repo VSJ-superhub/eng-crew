@@ -15,6 +15,7 @@ from dataclasses import replace as dc_replace
 from .base import BaseAgent
 from .. import prompts, tracker, verify as verify_mod
 from ..providers import call_llm
+from ..providers.base import LLMResult
 from ..state import TeamState
 
 
@@ -90,18 +91,14 @@ class VerifierAgent(BaseAgent):
                     + ", ".join(violations),
                     file=sys.stderr,
                 )
-                if run_id:
-                    try:
-                        tracker.log_event(run_id, -1, "verify_test_lock", "\n".join(violations))
-                    except Exception as exc:
-                        print(f"[tracker] log_event error: {exc}", file=sys.stderr)
+                self._note(run_id, "verify_test_lock", "\n".join(violations))
 
         lock_failed = bool(violations) and lock_mode == verify_mod.LOCK_STRICT
 
         # Only worth asking "do these tests prove anything?" once the suite is
         # green. On a broken tree the answer is noise, and it costs a checkout.
         red = None
-        red_mode = getattr(self.settings, "verification_red_phase", verify_mod.RED_OFF)
+        red_mode = getattr(self.settings, "verification_red_phase", verify_mod.RED_STRICT)
         if red_mode != verify_mod.RED_OFF and result.passed and not lock_failed:
             try:
                 red = verify_mod.verify_red(project_path, timeout=timeout)
@@ -112,11 +109,8 @@ class VerifierAgent(BaseAgent):
             if red is not None:
                 print(f"[verify] red phase: {red.status} — {red.output.splitlines()[0] if red.output else ''}",
                       file=sys.stderr)
-                if red.status == verify_mod.FAILED and run_id:
-                    try:
-                        tracker.log_event(run_id, -1, "verify_red_phase", red.output)
-                    except Exception as exc:
-                        print(f"[tracker] log_event error: {exc}", file=sys.stderr)
+                if red.status == verify_mod.FAILED:
+                    self._note(run_id, "verify_red_phase", red.output)
 
         red_failed = red is not None and red.status == verify_mod.FAILED and red_mode == verify_mod.RED_STRICT
         summary = result.summary()
@@ -158,6 +152,17 @@ class VerifierAgent(BaseAgent):
         }
 
     # ------------------------------------------------------------------
+
+    def _note(self, run_id: int, name: str, text: str) -> None:
+        """Record a gate finding as a zero-cost event on the run's timeline.
+
+        ``tracker.log_event`` takes an LLMResult; handing it a bare string made
+        it raise on ``.text`` inside its own catch-all, so the lock and red-phase
+        findings — the evidence for failing the run — never reached the database.
+        """
+        if not run_id:
+            return
+        tracker.log_event(run_id, -1, name, LLMResult(text=text))
 
     def _agent_output(self, state: TeamState) -> str:
         """Everything the execution tiers reported, for truncation detection."""

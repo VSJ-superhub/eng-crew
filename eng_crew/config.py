@@ -107,10 +107,13 @@ class Settings(BaseSettings):
     # Test files named in the failure output stay editable — fixing a broken
     # new test is legitimate. "strict" fails the run, "warn" only reports it.
     verification_test_lock: str = "strict"  # strict | warn | off
-    # Replay the run's new tests against pre-change code; they must fail
-    # there, or they do not demonstrate the change works. Defaults to warn
-    # so a project can see its false-positive rate before it gates on this.
-    verification_red_phase: str = "warn"  # strict | warn | off
+    # Replay the run's new tests against pre-change code; they must fail there,
+    # or they do not demonstrate the change works. Strict by default: the
+    # builder is told to work test-first when a task carries acceptance
+    # criteria, so "the new tests failed before the change" is a promise the
+    # gate should hold it to, not a note in the log. A run that adds no tests
+    # skips this rather than failing it. "warn" only reports, "off" disables.
+    verification_red_phase: str = "strict"  # strict | warn | off
 
     # --- Ticket queue ---
     # There are no sprints: tickets form one continuous queue, and this is the
