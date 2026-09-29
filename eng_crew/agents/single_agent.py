@@ -35,9 +35,10 @@ class SingleAgentEngineer(BaseAgent):
     # Budget for the project-context orientation block (kept lean on purpose).
     CONTEXT_TOKEN_BUDGET = 1200
     # Long-horizon agentic runs need room; a low cap silently truncates the
-    # implementation (see claude_cli's max-turns soft-stop). Test-first work
-    # spends turns on the red phase before any implementation starts.
+    # implementation (see claude_cli's max-turns soft-stop). These are the
+    # fallbacks when settings do not say (see Settings.builder_*max_turns).
     MAX_TURNS = 60
+    TEST_FIRST_MAX_TURNS = 100
 
     # Budget for the acceptance criteria quoted back into the test-first block.
     # Generous — criteria are the definition of done and truncating one loses a
@@ -59,6 +60,14 @@ class SingleAgentEngineer(BaseAgent):
         print("[single_agent] acceptance criteria present — test-first mode", file=sys.stderr)
         return "\n" + prompts.render("test-first", criteria=criteria) + "\n"
 
+    def _max_turns(self, *, test_first: bool) -> int:
+        """The turn budget for this build. Test-first work spends turns on the
+        red phase before implementing, so it gets the larger budget."""
+        if test_first:
+            return int(getattr(self.settings, "builder_test_first_max_turns",
+                               self.TEST_FIRST_MAX_TURNS))
+        return int(getattr(self.settings, "builder_max_turns", self.MAX_TURNS))
+
     def run(self, state: TeamState) -> dict:
         task = state.get("raw_task", "")
         project_path = state.get("project_path", ".")
@@ -72,10 +81,11 @@ class SingleAgentEngineer(BaseAgent):
             oriented = self.truncate_to_tokens(project_context, self.CONTEXT_TOKEN_BUDGET)
             context_block = f"\n=== PROJECT CONTEXT (orientation only) ===\n{oriented}\n"
 
+        test_first_block = self._test_first_block(task)
         prompt = prompts.render(
             "single-agent-implement",
             task=task,
-            test_first_block=self._test_first_block(task),
+            test_first_block=test_first_block,
             context_block=context_block,
         )
 
@@ -83,7 +93,7 @@ class SingleAgentEngineer(BaseAgent):
         result = call_llm(
             cfg["provider"], cfg["model"], prompt,
             allowed_tools="Glob,Grep,Read,Edit,Write,Bash,Task,TodoWrite,WebSearch,WebFetch",
-            max_turns=self.MAX_TURNS,
+            max_turns=self._max_turns(test_first=bool(test_first_block)),
             cwd=project_path,
             on_event=_progress_reporter(run_id, "single-agent"),
         )

@@ -201,3 +201,41 @@ def test_a_project_without_a_test_suite_is_not_held_to_it(green_gate, monkeypatc
     monkeypatch.setattr(verify, "detect_checks", lambda *a, **k: [
         verify.Check("npm run build", ["npm", "run", "build"], "build")])
     assert _gate(CRITERIA_TASK)["verification_passed"] is True
+
+
+# --- test-first work gets a bigger turn budget --------------------------
+#
+# Writing and running failing tests happens before any implementation, so a
+# test-first build that shares the ordinary cap gets cut off mid-change.
+
+
+def _turns_used_for(task: str, monkeypatch, settings=None) -> int:
+    from eng_crew.agents import single_agent as single_agent_mod
+    from eng_crew.providers.base import LLMResult
+
+    seen = {}
+
+    def fake_call(*a, **kw):
+        seen["max_turns"] = kw["max_turns"]
+        return LLMResult(text="done")
+
+    monkeypatch.setattr(single_agent_mod, "call_llm", fake_call)
+    SingleAgentEngineer(settings or Settings()).run(
+        {"raw_task": task, "project_path": ".", "run_id": 0})
+    return seen["max_turns"]
+
+
+def test_a_test_first_build_gets_the_larger_turn_budget(monkeypatch):
+    s = Settings()
+    assert s.builder_test_first_max_turns > s.builder_max_turns
+    assert _turns_used_for(CRITERIA_TASK, monkeypatch) == s.builder_test_first_max_turns
+
+
+def test_a_bare_task_keeps_the_ordinary_turn_budget(monkeypatch):
+    assert _turns_used_for("update the README", monkeypatch) == Settings().builder_max_turns
+
+
+def test_turn_budgets_come_from_settings(monkeypatch):
+    s = Settings(builder_max_turns=7, builder_test_first_max_turns=9)
+    assert _turns_used_for("update the README", monkeypatch, s) == 7
+    assert _turns_used_for(CRITERIA_TASK, monkeypatch, s) == 9

@@ -97,6 +97,14 @@ class Settings(BaseSettings):
     # worth keeping. Age-based retention alone lets a week of runs pile up.
     worktree_prune_on_finish: bool = True
 
+    # --- Builder turn budget ---
+    # How many agent turns the single-agent builder gets before it is cut off.
+    # Hitting the cap truncates the work mid-change and hands it to a repair
+    # pass. Test-first work spends turns writing and running failing tests before
+    # any implementation starts, so it gets more room.
+    builder_max_turns: int = 60
+    builder_test_first_max_turns: int = 100
+
     # --- Verification gate ---
     # Runs the project's own tests/build after the agent tiers and decides the
     # run's final status. Disable only for a project with no runnable checks.
