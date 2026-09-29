@@ -150,6 +150,13 @@ def events(ticket_id: int) -> list[dict]:
     return _tracker().get_ticket_events(ticket_id)
 
 
+# The heading task_text writes above a ticket's criteria, and the marker
+# acceptance_criteria_of() reads them back out of a task string. An execution
+# tier only ever sees the flat task, so this is the one channel by which it can
+# learn that the work has a definition of done.
+CRITERIA_HEADING = "Acceptance criteria:"
+
+
 def task_text(ticket: dict) -> str:
     """The build instruction for a ticket — what a run is actually asked to do.
 
@@ -162,8 +169,22 @@ def task_text(ticket: dict) -> str:
         parts.append(description)
     criteria = str(ticket.get("acceptance_criteria") or "").strip()
     if criteria:
-        parts.append("Acceptance criteria:\n" + criteria)
+        parts.append(f"{CRITERIA_HEADING}\n" + criteria)
     return "\n\n".join(p for p in parts if p)
+
+
+def acceptance_criteria_of(task: str) -> str:
+    """The acceptance criteria carried by a task string, or "".
+
+    The inverse of :func:`task_text`, for the execution tiers: they are handed a
+    flat task with no ticket to consult, and "does this work have a definition of
+    done?" changes how they should go about it.
+    """
+    text = str(task or "")
+    index = text.lower().rfind(CRITERIA_HEADING.lower())
+    if index == -1:
+        return ""
+    return text[index + len(CRITERIA_HEADING):].strip()
 
 
 def summarize(tickets: Iterable[dict]) -> dict[str, int]:

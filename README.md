@@ -136,6 +136,12 @@ backlog -> ready -> in_progress -> in_review -> in_qa -> done -> shipped
   shows how it got where it is (`GET /api/tickets/<id>/events`).
 - **Runs are linked to the ticket they attempt**, and a run is handed the
   ticket's own title, description, and acceptance criteria.
+- **Acceptance criteria make the build test-first.** The builder writes tests
+  that encode the criteria and confirms they fail before implementing anything,
+  and the verification gate replays those tests against the pre-change code to
+  check they actually discriminate. A test that would have passed anyway fails
+  the run (`ENG_CREW_VERIFICATION_RED_PHASE=warn` to only report it, `off` to
+  disable).
 - **There are no sprints.** Tickets form one continuous queue ordered by
   priority; `ENG_CREW_WIP_LIMIT` bounds how many are in flight at once. Nothing
   enters `in_progress` past the limit.

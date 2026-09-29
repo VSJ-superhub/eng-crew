@@ -44,5 +44,10 @@ This is a generalized, pip-installable version of a private internal tool. It mu
 - Every execution tier (simple / single-agent / full graph) exits through a deterministic
   verification gate (`eng_crew/verify.py`) that runs the project's own tests and build.
   A run that leaves the tree broken is recorded as `failed`, not `completed`.
+- When a task carries acceptance criteria (tickets do), the single-agent builder
+  works test-first: it writes tests encoding the criteria, confirms they fail,
+  then implements until they pass. The gate's red phase then replays those tests
+  against pre-change code and is strict by default — a new test that passes
+  without the change fails the run. A run that adds no tests skips the phase.
 - Dashboard at configurable port (default 9000)
 - Supports multiple LLM providers: Anthropic Claude CLI, OpenRouter, Gemini
