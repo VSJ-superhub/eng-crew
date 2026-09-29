@@ -508,6 +508,26 @@ def prune_spent_worktrees(
     )
 
 
+def branch_diff(
+    project_path: str | Path,
+    branch: str,
+    base: str = "HEAD",
+    *,
+    max_chars: int = 0,
+) -> str:
+    """The diff a branch adds on top of ``base`` — what a run produced.
+
+    Three dots, not two: the comparison is against the merge base, so commits
+    that landed on ``base`` after the run forked do not show up as the run's
+    work. ``max_chars`` truncates, for a reader with a context window.
+    """
+    root = repo_root(project_path)
+    text = _git(["diff", f"{base}...{branch}"], cwd=root)
+    if max_chars and len(text) > max_chars:
+        return text[:max_chars] + "\n... [diff truncated]"
+    return text
+
+
 def changed_paths(project_path: str | Path, base: str = "HEAD") -> list[str]:
     """Repo-relative paths this working tree changed since ``base``.
 

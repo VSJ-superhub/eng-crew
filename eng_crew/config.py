@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     reviewer_provider: Optional[str] = None
     reviewer_model: Optional[str] = None
 
+    # --- Ticket reviewer ---
+    # The independent review of a landed run against its ticket's acceptance
+    # criteria (eng_crew/review.py): one cheap call, and never a CLI provider —
+    # a reviewer that can edit the code it is judging is not a reviewer.
+    ticket_reviewer_provider: Optional[str] = None
+    ticket_reviewer_model: Optional[str] = None
+    ticket_review_enabled: bool = True
+
     # --- Executor ---
     executor_provider: Optional[str] = None
     executor_model: Optional[str] = None
