@@ -32,7 +32,10 @@ export interface RunDetailResponse {
 export type TicketStatus = 'backlog' | 'ready' | 'in_progress' | 'in_review' | 'in_qa' | 'done' | 'rejected' | 'shipped'
 export const TICKET_STATUSES: TicketStatus[] = ['backlog', 'ready', 'in_progress', 'in_review', 'in_qa', 'done', 'rejected', 'shipped']
 /** A ticket. `BacklogItem` is the legacy name for the same row. */
-export interface BacklogItem { id: number; title: string; description?: string; project_path?: string; claude_md_path?: string; priority: number; status: TicketStatus | string; acceptance_criteria?: string; created_at: string; project_id?: number; plan_id?: number; type?: string; run_id?: number }
+export interface BacklogItem { id: number; title: string; description?: string; project_path?: string; claude_md_path?: string; priority: number; status: TicketStatus | string; acceptance_criteria?: string; created_at: string; project_id?: number; plan_id?: number; type?: string; run_id?: number; budget_usd?: number; spent_usd?: number; budget_exhausted?: boolean }
+
+/** A ticket's spend authority and what it has spent against it. */
+export interface TicketBudget { ticket_id: number; budget_usd: number; spent_usd: number; remaining_usd: number; exhausted: boolean }
 export type Ticket = BacklogItem
 export interface TicketEvent { id: number; ticket_id: number; from_status: string; to_status: string; actor: string; note: string; created_at: string }
 export interface Wip { limit: number; in_flight: number; slots: number; statuses: string[] }
@@ -90,7 +93,13 @@ export function updateBacklogItem(id: number, f: { title?: string; description?:
 export function moveTicket(id: number, status: TicketStatus, actor = 'user', note = ''): Promise<{ ok: boolean; ticket: Ticket }> {
   return put('/api/tickets/' + id + '/status', { status, actor, note })
 }
-export function getTicket(id: number): Promise<{ ticket: Ticket; events: TicketEvent[]; allowed_transitions: TicketStatus[] }> { return api('/api/tickets/' + id) }
+export function getTicket(id: number): Promise<{ ticket: Ticket; budget: TicketBudget | null; events: TicketEvent[]; allowed_transitions: TicketStatus[] }> { return api('/api/tickets/' + id) }
+
+/** Change a ticket's spend authority. Raising it releases work stopped for
+ *  budget; it starts nothing on its own. */
+export function setTicketBudget(id: number, budget_usd: number, actor = 'user'): Promise<{ ok: boolean; budget: TicketBudget }> {
+  return put('/api/tickets/' + id + '/budget', { budget_usd, actor })
+}
 export function getTicketEvents(id: number): Promise<{ events: TicketEvent[] }> { return api('/api/tickets/' + id + '/events') }
 export function runTicket(id: number): Promise<{ ok: boolean }> { return post('/api/tickets/' + id + '/run', {}) }
 export function getTicketQueue(projectId: number): Promise<TicketQueue> { return api('/api/projects/' + projectId + '/queue') }

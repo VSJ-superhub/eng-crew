@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   ApiError, createProjectPlan, getProjectPlan, getTicketQueue, getTicketEvents,
-  moveTicket, planFromClaudeMd, runQueue, runTicket,
+  moveTicket, planFromClaudeMd, runQueue, runTicket, setTicketBudget,
 } from '../api/client';
 import type { Project, Ticket, TicketEvent, TicketStatus, Wip } from '../api/client';
 
@@ -99,15 +99,24 @@ function TicketHistory({ ticketId }: { ticketId: number }) {
   )
 }
 
-function TicketCard({ ticket, busy, onMove, onRun }: {
+/** `$1.23 of $15.00` — what a ticket has spent against what it may spend. */
+function money(n: number): string {
+  return '$' + n.toFixed(2)
+}
+
+function TicketCard({ ticket, busy, onMove, onRun, onBudget }: {
   ticket: Ticket
   busy: boolean
   onMove: (id: number, status: TicketStatus) => void
   onRun: (id: number) => void
+  onBudget: (id: number, amount: number) => void
 }) {
   const [open, setOpen] = useState(false)
   const criteria = (ticket.acceptance_criteria ?? '').trim()
   const nexts = NEXT[ticket.status] ?? []
+  const limit = ticket.budget_usd
+  const spent = ticket.spent_usd ?? 0
+  const overBudget = ticket.budget_exhausted === true
 
   return (
     <div className='bg-[#161927] rounded-lg border border-white/5 p-3'>
@@ -124,6 +133,14 @@ function TicketCard({ ticket, busy, onMove, onRun }: {
             {!criteria && (
               <span className='text-[10px] text-amber-500' title='A ticket cannot be made ready without acceptance criteria.'>
                 no acceptance criteria
+              </span>
+            )}
+            {limit !== undefined && (
+              <span className={'text-[10px] font-mono ' + (overBudget ? 'text-red-400' : 'text-gray-600')}
+                title={overBudget
+                  ? 'This ticket has spent its budget. No further build, repair or review starts until someone raises it.'
+                  : 'Spent so far, against this ticket’s budget.'}>
+                {money(spent)}/{money(limit)}
               </span>
             )}
           </div>
@@ -147,6 +164,25 @@ function TicketCard({ ticket, busy, onMove, onRun }: {
               ? <p className='text-xs text-gray-400 whitespace-pre-wrap'>{criteria}</p>
               : <p className='text-xs text-amber-500'>None yet — add some on the Backlog page before this can be made ready.</p>}
           </div>
+
+          {limit !== undefined && (
+            <div>
+              <p className='text-[10px] uppercase text-gray-500 font-bold mb-1'>Budget</p>
+              <p className={'text-xs ' + (overBudget ? 'text-red-400' : 'text-gray-400')}>
+                {money(spent)} spent of {money(limit)}
+                {overBudget && ' — work is stopped until someone raises it'}
+              </p>
+              <button disabled={busy}
+                onClick={() => {
+                  const answer = window.prompt('New budget for this ticket, in USD:', limit.toFixed(2))
+                  const amount = Number(answer)
+                  if (answer !== null && Number.isFinite(amount) && amount >= 0) onBudget(ticket.id, amount)
+                }}
+                className='mt-1.5 text-[11px] px-2 py-1 rounded bg-white/5 text-gray-300 hover:bg-white/10 disabled:opacity-40'>
+                Change budget
+              </button>
+            </div>
+          )}
 
           {nexts.length > 0 && (
             <div className='flex flex-wrap gap-1.5'>
@@ -346,7 +382,8 @@ export default function ProjectTasks() {
                 : lane.items.map(t => (
                     <TicketCard key={t.id} ticket={t} busy={busy === t.id}
                       onMove={(tid, status) => act(tid, () => moveTicket(tid, status))}
-                      onRun={tid => act(tid, () => runTicket(tid))} />
+                      onRun={tid => act(tid, () => runTicket(tid))}
+                      onBudget={(tid, amount) => act(tid, () => setTicketBudget(tid, amount))} />
                   ))}
             </div>
           ))}

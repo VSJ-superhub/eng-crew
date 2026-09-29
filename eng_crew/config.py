@@ -138,6 +138,13 @@ class Settings(BaseSettings):
     # for the project.
     wip_limit: int = 3
 
+    # --- Ticket spend authority ---
+    # What a ticket is authorised to spend across all of its runs — builds,
+    # repair passes, and reviews together. Work proceeds within it; reaching it
+    # stops the next paid step and escalates to a person, rather than carrying
+    # on spending. Overridable per ticket (backlog_items.budget_usd).
+    ticket_budget_usd: float = 15.0
+
     # --- General ---
     budget_usd: float = 5.0
     max_tokens: int = 8192

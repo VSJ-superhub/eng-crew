@@ -189,6 +189,16 @@ def review_ticket(
     if not getattr(cfg, "ticket_review_enabled", True):
         raise ReviewUnavailable("ticket review is disabled (ENG_CREW_TICKET_REVIEW_ENABLED)")
 
+    # The review is cheap, but it is still a paid step, and a ticket that has
+    # already spent its authority does not get to spend more on its own say-so.
+    # The build it would have judged is safe on its branch either way.
+    from . import budget
+
+    try:
+        budget.check(ticket_id, "the review", settings=cfg)
+    except budget.BudgetExhausted as exc:
+        raise ReviewUnavailable(str(exc)) from exc
+
     # Resolve (and vet) the reviewer before spending anything.
     reviewer_config(cfg)
 
