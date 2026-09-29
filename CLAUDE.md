@@ -48,6 +48,8 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   works test-first: it writes tests encoding the criteria, confirms they fail,
   then implements until they pass. The gate's red phase then replays those tests
   against pre-change code and is strict by default — a new test that passes
-  without the change fails the run. A run that adds no tests skips the phase.
+  without the change fails the run. A run that adds no tests skips the phase,
+  unless the task carried acceptance criteria and the project has a test suite:
+  then adding no tests fails the run too, since test-first never happened.
 - Dashboard at configurable port (default 9000)
 - Supports multiple LLM providers: Anthropic Claude CLI, OpenRouter, Gemini

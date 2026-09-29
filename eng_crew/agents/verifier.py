@@ -13,7 +13,7 @@ import sys
 from dataclasses import replace as dc_replace
 
 from .base import BaseAgent
-from .. import prompts, tracker, verify as verify_mod
+from .. import prompts, tickets, tracker, verify as verify_mod
 from ..providers import call_llm
 from ..providers.base import LLMResult
 from ..state import TeamState
@@ -113,10 +113,27 @@ class VerifierAgent(BaseAgent):
                     self._note(run_id, "verify_red_phase", red.output)
 
         red_failed = red is not None and red.status == verify_mod.FAILED and red_mode == verify_mod.RED_STRICT
+
+        # The red phase skips a run that added no tests, which is right for a
+        # bare task — but a task with acceptance criteria was told to encode
+        # them as tests first. Adding none means test-first never happened.
+        untested = False
+        if red_mode != verify_mod.RED_OFF and result.passed and not lock_failed:
+            untested = self._criteria_untested(state, project_path)
+            if untested:
+                print("[verify] acceptance criteria present but the run added no tests",
+                      file=sys.stderr)
+                self._note(run_id, "verify_untested_criteria",
+                           tickets.acceptance_criteria_of(state.get("raw_task", "")))
+        untested_failed = untested and red_mode == verify_mod.RED_STRICT
+
         summary = result.summary()
         if red is not None and red.status == verify_mod.FAILED:
             note = "new tests pass without the change"
             summary = f"FAILED (red phase) — {note}" if red_failed else f"{summary} [WARNING: {note}]"
+        if untested:
+            note = "the task has acceptance criteria but the run added no tests"
+            summary = f"FAILED (untested) — {note}" if untested_failed else f"{summary} [WARNING: {note}]"
         if violations:
             note = "test files rewritten during repair: " + ", ".join(violations)
             summary = (
@@ -130,6 +147,8 @@ class VerifierAgent(BaseAgent):
         final_summary = state.get("final_summary") or ""
         if red_failed:
             final_summary = f"{final_summary}\n\n[RED] {summary}".strip()
+        elif untested_failed:
+            final_summary = f"{final_summary}\n\n[UNTESTED] {summary}".strip()
         elif lock_failed:
             final_summary = f"{final_summary}\n\n[TEST LOCK] {summary}".strip()
         elif not result.passed:
@@ -143,15 +162,36 @@ class VerifierAgent(BaseAgent):
             **state,
             "execution_results": execution_results,
             "final_summary": final_summary,
-            "verification_passed": result.passed and not lock_failed and not red_failed,
+            "verification_passed": (
+                result.passed and not lock_failed and not red_failed and not untested_failed
+            ),
             "verification_summary": summary,
-            "verification_unverified": result.unverified and not lock_failed and not red_failed,
+            "verification_unverified": (
+                result.unverified and not lock_failed and not red_failed and not untested_failed
+            ),
             "verification_test_lock_violations": violations or None,
             "verification_red_phase": red.status if red is not None else None,
             "verify_fix_count": attempts,
         }
 
     # ------------------------------------------------------------------
+
+    def _criteria_untested(self, state: TeamState, project_path: str) -> bool:
+        """Did a task with acceptance criteria finish without adding any tests?
+
+        Only asked of projects that have a test suite: with nowhere to put a
+        test, "no tests" is not the builder skipping the step.
+        """
+        if not tickets.acceptance_criteria_of(state.get("raw_task", "")):
+            return False
+        try:
+            if not any(c.kind == "test" for c in verify_mod.detect_checks(project_path)):
+                return False
+            changed = verify_mod.new_test_files(project_path)
+        except Exception as exc:  # an unanswerable question never fails the gate
+            print(f"[verify] untested-criteria check errored: {exc}", file=sys.stderr)
+            return False
+        return not [p for p in changed if p.rsplit("/", 1)[-1] != "conftest.py"]
 
     def _note(self, run_id: int, name: str, text: str) -> None:
         """Record a gate finding as a zero-cost event on the run's timeline.

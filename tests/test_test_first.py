@@ -135,3 +135,69 @@ def test_gate_findings_are_recorded(db):
 def test_noting_without_a_run_is_a_no_op(db):
     VerifierAgent(Settings())._note(0, "verify_red_phase", "orphan")
     assert tracker.get_run_events(0) == []
+
+
+# --- a task with criteria must actually add tests -----------------------
+#
+# The red phase skips a run that added no tests, which is right for a bare task.
+# It would also wave through a ticket whose builder ignored test-first entirely,
+# so the gate asks that question on its own.
+
+
+CRITERIA_TASK = tickets.task_text(
+    {"title": "rename files", "acceptance_criteria": "- files are renamed"}
+)
+
+
+@pytest.fixture
+def green_gate(monkeypatch, tmp_path):
+    """A verifier whose checks pass, with the test-file answer under test control."""
+    changed: list[str] = []
+    monkeypatch.setattr(verify, "verify", lambda *a, **k: verify.VerificationResult(
+        results=[verify.CheckResult("pytest", "test", verify.PASSED)]))
+    monkeypatch.setattr(verify, "snapshot_tests", lambda *a, **k: {})
+    monkeypatch.setattr(verify, "verify_red", lambda *a, **k: verify.CheckResult(
+        "red phase", verify.RED, verify.SKIPPED, "run added no new tests"))
+    monkeypatch.setattr(verify, "detect_checks", lambda *a, **k: [
+        verify.Check("pytest", ["pytest"], "test")])
+    monkeypatch.setattr(verify, "new_test_files", lambda *a, **k: list(changed))
+    return changed
+
+
+def _gate(task: str, mode: str = verify.RED_STRICT) -> dict:
+    settings = Settings(verification_red_phase=mode)
+    return VerifierAgent(settings).run({"raw_task": task, "project_path": ".", "run_id": 0})
+
+
+def test_criteria_with_no_new_tests_fails_the_gate(green_gate):
+    out = _gate(CRITERIA_TASK)
+    assert out["verification_passed"] is False
+    assert "added no tests" in out["verification_summary"]
+    assert "[UNTESTED]" in out["final_summary"]
+
+
+def test_criteria_with_new_tests_passes(green_gate):
+    green_gate.append("tests/test_rename.py")
+    assert _gate(CRITERIA_TASK)["verification_passed"] is True
+
+
+def test_a_conftest_alone_does_not_count_as_a_test(green_gate):
+    green_gate.append("tests/conftest.py")
+    assert _gate(CRITERIA_TASK)["verification_passed"] is False
+
+
+def test_a_bare_task_with_no_new_tests_still_passes(green_gate):
+    """Docs, config, refactors: no criteria means no test-first promise to hold."""
+    assert _gate("update the README")["verification_passed"] is True
+
+
+def test_warn_mode_reports_but_passes(green_gate):
+    out = _gate(CRITERIA_TASK, mode=verify.RED_WARN)
+    assert out["verification_passed"] is True
+    assert "WARNING" in out["verification_summary"]
+
+
+def test_a_project_without_a_test_suite_is_not_held_to_it(green_gate, monkeypatch):
+    monkeypatch.setattr(verify, "detect_checks", lambda *a, **k: [
+        verify.Check("npm run build", ["npm", "run", "build"], "build")])
+    assert _gate(CRITERIA_TASK)["verification_passed"] is True
