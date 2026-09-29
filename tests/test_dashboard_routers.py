@@ -132,7 +132,7 @@ def test_delete_a_project(client, project):
 
 
 def test_project_runs_and_tasks_are_empty_lists_not_errors(client, project):
-    for suffix in ("runs", "tasks", "features"):
+    for suffix in ("runs", "tasks", "queue"):
         resp = client.get(f"/api/projects/{project['id']}/{suffix}")
         assert resp.status_code == 200, f"{suffix}: {resp.text}"
         assert isinstance(resp.json(), (list, dict))
@@ -329,7 +329,7 @@ def test_write_claude_md_refuses_traversal(client, project, tmp_path):
     assert not (tmp_path / "CLAUDE.md").exists()
 
 
-# --- issues and sprints -------------------------------------------------
+# --- issues and the queue -----------------------------------------------
 
 
 def test_issues_start_empty_and_carry_the_project(client, project):
@@ -366,14 +366,16 @@ def test_issues_on_an_unknown_project_are_a_404(client):
     assert client.post("/api/projects/999999/issues", json={"title": "x"}).status_code == 404
 
 
-def test_sprints_start_empty(client, project):
-    resp = client.get(f"/api/projects/{project['id']}/sprints")
-    assert resp.status_code == 200
-    assert resp.json()["sprints"] == []
+def test_the_queue_starts_empty_with_wip_accounting(client, project):
+    body = client.get(f"/api/projects/{project['id']}/queue").json()
+    assert body["tickets"] == []
+    assert body["ready"] == []
+    assert body["wip"]["in_flight"] == 0
+    assert body["wip"]["limit"] >= 1
 
 
-def test_sprints_on_an_unknown_project_are_a_404(client):
-    assert client.get("/api/projects/999999/sprints").status_code == 404
+def test_the_queue_of_an_unknown_project_is_a_404(client):
+    assert client.get("/api/projects/999999/queue").status_code == 404
 
 
 def test_creating_an_issue_requires_a_title(client, project):

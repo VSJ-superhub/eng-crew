@@ -29,7 +29,14 @@ export interface RunDetailResponse {
   plan_summary: string
   clarification?: Clarification
 }
-export interface BacklogItem { id: number; title: string; description?: string; project_path?: string; claude_md_path?: string; priority: number; status: string; created_at: string; project_id?: number; type?: string }
+export type TicketStatus = 'backlog' | 'ready' | 'in_progress' | 'in_review' | 'in_qa' | 'done' | 'rejected' | 'shipped'
+export const TICKET_STATUSES: TicketStatus[] = ['backlog', 'ready', 'in_progress', 'in_review', 'in_qa', 'done', 'rejected', 'shipped']
+/** A ticket. `BacklogItem` is the legacy name for the same row. */
+export interface BacklogItem { id: number; title: string; description?: string; project_path?: string; claude_md_path?: string; priority: number; status: TicketStatus | string; acceptance_criteria?: string; created_at: string; project_id?: number; plan_id?: number; type?: string; run_id?: number }
+export type Ticket = BacklogItem
+export interface TicketEvent { id: number; ticket_id: number; from_status: string; to_status: string; actor: string; note: string; created_at: string }
+export interface Wip { limit: number; in_flight: number; slots: number; statuses: string[] }
+export interface TicketQueue { project: Project; tickets: Ticket[]; ready: Ticket[]; counts: Record<string, number>; wip: Wip }
 export interface ProjectStats { total_runs: number; completed: number; failed: number; running: number; total_cost_usd: number }
 export interface Project { id: number; name: string; project_path: string; claude_md_path: string; repo_url?: string; default_branch?: string; tech_stack?: string[]; test_command?: string; description?: string; active?: number; created_at?: string; stats?: ProjectStats }
 export interface FsEntry { name: string; path: string }
@@ -75,10 +82,23 @@ export function getBacklog(status?: string, project?: string): Promise<BacklogIt
   if (project) p.set('project', project)
   return api('/api/backlog' + (p.toString() ? '?' + p.toString() : ''))
 }
-export function createBacklogItem(i: { title: string; description?: string; project_path?: string; claude_md_path?: string; priority?: number; project_id?: number; item_type?: string }): Promise<{ id: number }> { return post('/api/backlog', i) }
-export function updateBacklogItem(id: number, f: Partial<BacklogItem>): Promise<{ ok: boolean }> { return put('/api/backlog/' + id, f) }
+export function createBacklogItem(i: { title: string; description?: string; project_path?: string; claude_md_path?: string; priority?: number; project_id?: number; item_type?: string; acceptance_criteria?: string }): Promise<{ id: number }> { return post('/api/backlog', i) }
+export function updateBacklogItem(id: number, f: { title?: string; description?: string; priority?: number; acceptance_criteria?: string }): Promise<{ ok: boolean }> { return put('/api/backlog/' + id, f) }
+
+/** Move a ticket along the lifecycle. The actor is recorded with the change; a
+ *  refused move (not a legal transition, no acceptance criteria, WIP limit) is a 409. */
+export function moveTicket(id: number, status: TicketStatus, actor = 'user', note = ''): Promise<{ ok: boolean; ticket: Ticket }> {
+  return put('/api/tickets/' + id + '/status', { status, actor, note })
+}
+export function getTicket(id: number): Promise<{ ticket: Ticket; events: TicketEvent[]; allowed_transitions: TicketStatus[] }> { return api('/api/tickets/' + id) }
+export function getTicketEvents(id: number): Promise<{ events: TicketEvent[] }> { return api('/api/tickets/' + id + '/events') }
+export function runTicket(id: number): Promise<{ ok: boolean }> { return post('/api/tickets/' + id + '/run', {}) }
+export function getTicketQueue(projectId: number): Promise<TicketQueue> { return api('/api/projects/' + projectId + '/queue') }
+/** Pull the next ready ticket and build it. One build per project at a time. */
+export function runQueue(projectId: number): Promise<{ started: { ticket_id: number }[]; refused: { ticket_id: number; detail: string }[]; waiting: number; wip: Wip }> {
+  return post('/api/projects/' + projectId + '/queue/run', {})
+}
 export function deleteBacklogItem(id: number): Promise<{ ok: boolean }> { return del('/api/backlog/' + id) }
-export function runBacklogItem(id: number): Promise<{ ok: boolean }> { return post('/api/backlog/' + id + '/run', {}) }
 export function getProjects(): Promise<Project[]> { return api('/api/projects') }
 export function createProject(i: { name: string; project_path: string; claude_md_path: string; repo_url?: string; tech_stack?: string[]; test_command?: string; description?: string }): Promise<{ id: number }> { return post('/api/projects', i) }
 export function getProject(id: number): Promise<Project> { return api('/api/projects/' + id) }
@@ -162,14 +182,6 @@ export async function retrySubtask(runId: string, subtaskId: string | number): P
   });
 }
 
-export async function addBacklogItem(title: string, projectPath: string, itemType: string = 'feature'): Promise<void> {
-  await fetch('/api/backlog', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, project_path: projectPath, item_type: itemType }),
-  });
-}
-
 export async function addProject(name: string, projectPath: string, claudeMdPath: string): Promise<{ id: number }> {
   const res = await fetch('/api/projects', {
     method: 'POST',
@@ -195,22 +207,6 @@ export async function scanProject(path: string): Promise<ProjectScanResult> {
   return r.json();
 }
 
-export async function addProjectTask(projectId: string, title: string, projectPath: string, claudeMdPath: string, itemType: string = 'feature'): Promise<void> {
-  await fetch('/api/backlog', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, project_id: parseInt(projectId), project_path: projectPath, claude_md_path: claudeMdPath, item_type: itemType }),
-  });
-}
-
-export async function deleteProjectTask(taskId: number): Promise<void> {
-  await fetch('/api/backlog/' + taskId, { method: 'DELETE' });
-}
-
-export async function runProjectTask(taskId: number): Promise<void> {
-  await fetch('/api/backlog/' + taskId + '/run', { method: 'POST' });
-}
-
 export async function intakeChat(
   history: {role: string; content: string}[],
   projectId: string,
@@ -232,23 +228,6 @@ export async function intakeGenerateClaudeMd(messages: Array<{role:string,conten
   return r.json();
 }
 
-export interface PlanSprint {
-  id: number
-  plan_id: number
-  sprint_number: number
-  name: string
-  description: string
-  rationale?: string
-  status: string
-  depends_on: number[]
-  acceptance_criteria?: string
-  scope_hints?: string[]
-  complexity?: string
-  risk_flags?: string[]
-  run_id?: number
-  created_at?: string
-}
-
 export interface ProjectPlan {
   id: number
   project_id: number
@@ -258,23 +237,28 @@ export interface ProjectPlan {
   created_at?: string
 }
 
-export function getProjectPlan(projectId: number): Promise<{ plan: ProjectPlan | null; sprints: PlanSprint[]; planning: boolean }> {
+export interface PlanResponse {
+  plan: ProjectPlan | null
+  tickets: Ticket[]
+  planning: boolean
+  planning_failed?: boolean
+  error?: string
+}
+
+/** Planning produces tickets — it does not build the goal. */
+export function getProjectPlan(projectId: number): Promise<PlanResponse> {
   return api('/api/projects/' + projectId + '/plan')
 }
 
-export function createProjectPlan(projectId: number, goal: string, force = false): Promise<{ plan_id: number; sprints: PlanSprint[]; existing?: boolean }> {
+export function createProjectPlan(projectId: number, goal: string, force = false): Promise<{ plan_id: number; tickets: Ticket[] }> {
   return post('/api/projects/' + projectId + '/plan', { goal, force })
 }
 
 export function getProjectArchitecture(projectId: number): Promise<{ content: string | null; path: string; filename: string; error?: string }> {
   return api('/api/projects/' + projectId + '/architecture')
 }
-export function planFromClaudeMd(projectId: number): Promise<{ plan_id: number; sprints: PlanSprint[]; existing?: boolean }> {
+export function planFromClaudeMd(projectId: number): Promise<{ plan_id: number; tickets: Ticket[] }> {
   return post('/api/projects/' + projectId + '/plan-from-claude-md', {})
-}
-
-export function runPlanSprint(planSprintId: number): Promise<{ ok: boolean }> {
-  return post('/api/plan-sprints/' + planSprintId + '/run', {})
 }
 
 export async function updateArchitecture(
@@ -290,38 +274,4 @@ export async function updateArchitecture(
   } catch (e) { onError(String(e)) }
 }
 
-export function skipPlanSprint(planSprintId: number): Promise<{ ok: boolean }> {
-  return put('/api/plan-sprints/' + planSprintId, { status: 'skipped' })
-}
 
-export interface SprintTask {
-  id: number
-  title: string
-  description?: string
-  status: string
-  type?: string
-  agent_type?: string
-}
-
-export interface Feature {
-  id: number;
-  title: string;
-  description?: string;
-  status: string;
-  project_id: number;
-  progress: number;
-  sprint_count: number;
-  done_sprints: number;
-}
-
-export function getProjectFeatures(projectId: number): Promise<{ features: Feature[] }> {
-  return api('/api/projects/' + projectId + '/features')
-}
-
-export function getPlanSprintTasks(planSprintId: number): Promise<{ tasks: SprintTask[] }> {
-  return api('/api/plan-sprints/' + planSprintId + '/tasks')
-}
-
-export function runSprintTask(taskId: number): Promise<{ ok: boolean }> {
-  return post('/api/backlog/' + taskId + '/run', {})
-}

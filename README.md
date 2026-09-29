@@ -112,13 +112,49 @@ All settings are environment variables (see `.env.example` for the full list).
 | `ENG_CREW_BUDGET_USD` | `5.00` | Max spend per run in USD (0 = unlimited) |
 | `ENG_CREW_DASHBOARD_PORT` | `9000` | Dashboard port |
 | `ENG_CREW_REQUIRE_APPROVAL` | `true` | Pause for human approval before coding |
+| `ENG_CREW_WIP_LIMIT` | `3` | Max tickets in flight per project at once |
 | `ENG_CREW_CODER_PARALLELISM` | `2` | Number of parallel coder agents (1–8) |
 | `ENG_CREW_DATA_DIR` | `.eng-crew` | Directory for run artifacts and checkpoints |
+
+## Tickets
+
+The unit of work is a **ticket**, not a sprint. A ticket carries acceptance
+criteria and moves along a fixed lifecycle:
+
+```
+backlog -> ready -> in_progress -> in_review -> in_qa -> done -> shipped
+                                                    \-> rejected -/
+```
+
+- **Acceptance criteria are required to reach `ready`.** "Ready" means an agent
+  could pick the ticket up and know when it is finished, so a ticket with no
+  definition of done cannot get there.
+- **Moving a ticket to `ready` is the approval step.** The planner only
+  proposes: its tickets land in `backlog`, and a human promotes the ones worth
+  building.
+- **Every status change is recorded** with who made it, so a ticket's history
+  shows how it got where it is (`GET /api/tickets/<id>/events`).
+- **Runs are linked to the ticket they attempt**, and a run is handed the
+  ticket's own title, description, and acceptance criteria.
+- **There are no sprints.** Tickets form one continuous queue ordered by
+  priority; `ENG_CREW_WIP_LIMIT` bounds how many are in flight at once. Nothing
+  enters `in_progress` past the limit.
+
+Planning a project produces tickets — it does not build the goal text:
+
+```bash
+# On the dashboard: open a project -> "Plan project"
+eng-crew queue  /path/to/project        # see the queue and the WIP count
+eng-crew ticket 42                      # build one ticket
+```
 
 ## CLI reference
 
 ```
 eng-crew run      --project PATH  "task description"   Run a task
+eng-crew ticket   TICKET_ID                            Build one ticket
+eng-crew queue    PATH                                 Show the ticket queue and WIP
+eng-crew plans    PATH                                 Show run plans for a project
 eng-crew resume   RUN_ID                               Resume an interrupted run
 eng-crew status                                         Show recent runs
 eng-crew dashboard                                      Open the dashboard

@@ -38,33 +38,79 @@ def run_project(
     plan_id: Optional[int] = None,
     *,
     settings=None,
-) -> TeamState:
-    """Run a planning task for a project (same as run_task — plan mode is not yet separate)."""
+) -> list[dict]:
+    """Plan a project: decompose the goal into tickets. Does not build anything.
+
+    Returns the tickets created. Building is a separate step — pull a ticket off
+    the queue with :func:`run_ticket`.
+    """
+    from .planning import plan_project
+
     cfg = settings or load_settings()
-    return run_pipeline(task=goal, project_path=project_path, settings=cfg)
+    return plan_project(
+        goal=goal,
+        project_id=project_id,
+        project_path=project_path,
+        claude_md_path=claude_md_path,
+        plan_id=plan_id,
+        settings=cfg,
+    )
 
 
-def run_sprint(plan_sprint_id: int, *, settings=None) -> None:
-    """Execute a planned sprint by its plan_sprint_id."""
-    from . import tracker
+def run_ticket(ticket_id: int, *, actor: str = "queue", log_path: str | None = None,
+               settings=None) -> TeamState | None:
+    """Build one ticket. Blocking.
+
+    The task handed to the pipeline is the ticket itself — title, description,
+    and acceptance criteria — and the run row is linked back to the ticket, so
+    the ticket's history shows every run that attempted it. Moving the ticket to
+    in_progress goes through the lifecycle, which means the WIP limit is
+    enforced here too: over the limit, nothing is launched. A caller that
+    already claimed the ticket (the dashboard does, so it can refuse over-limit
+    requests with an HTTP error) finds it in_progress and keeps it there.
+    """
+    from . import tickets, tracker
+
     cfg = settings or load_settings()
-    row = tracker.get_plan_sprint_tasks(plan_sprint_id)
-    if not row:
-        log.warning("run_sprint: no tasks found for plan_sprint_id=%s", plan_sprint_id)
-        return
-    # Get project_path from the plan
-    sprint_info = tracker._connect().execute(
-        "SELECT pp.project_id, p.project_path FROM plan_sprints ps "
-        "JOIN project_plans pp ON ps.plan_id = pp.id "
-        "JOIN projects p ON pp.project_id = p.id "
-        "WHERE ps.id = ?", (plan_sprint_id,)
-    ).fetchone()
-    if not sprint_info:
-        log.warning("run_sprint: could not find project for plan_sprint_id=%s", plan_sprint_id)
-        return
-    project_path = sprint_info["project_path"]
-    task = f"Execute sprint {plan_sprint_id}"
-    run_pipeline(task=task, project_path=project_path, settings=cfg)
+    ticket = tracker.get_backlog_item(ticket_id)
+    if not ticket:
+        log.warning("run_ticket: no ticket %s", ticket_id)
+        return None
+
+    if ticket["status"] != tickets.IN_PROGRESS:
+        tickets.move(ticket_id, tickets.IN_PROGRESS, actor, "build started", settings=cfg)
+
+    task = tickets.task_text(ticket)
+    project_path = ticket["project_path"]
+    run_id = tracker.create_run(task, project_path, log_path=log_path, ticket_id=ticket_id)
+    tracker.update_backlog_item(ticket_id, run_id=run_id)
+
+    try:
+        state = run_pipeline(task=task, project_path=project_path, settings=cfg, run_id=run_id)
+    except Exception:
+        _settle_ticket(ticket_id, tickets.REJECTED, actor, f"run {run_id} raised")
+        raise
+
+    status = tracker.get_run_detail(run_id)
+    landed = bool(status) and status["status"] in ("completed", "unverified")
+    _settle_ticket(
+        ticket_id,
+        tickets.IN_REVIEW if landed else tickets.REJECTED,
+        actor,
+        f"run {run_id} finished as {status['status'] if status else 'unknown'}",
+    )
+    return state
+
+
+def _settle_ticket(ticket_id: int, to_status: str, actor: str, note: str) -> None:
+    """Move a ticket off in_progress once its run is over. Never raises — the
+    run already happened, and a refused transition must not mask its result."""
+    from . import tickets
+
+    try:
+        tickets.move(ticket_id, to_status, actor, note)
+    except tickets.TransitionRefused as exc:
+        log.warning("ticket %s stayed put after its run: %s", ticket_id, exc)
 
 
 def resume_run(run_id: int, clarification_answer: str = "") -> bool:

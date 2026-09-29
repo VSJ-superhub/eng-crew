@@ -19,10 +19,6 @@ from ...tracker import (
     get_sprint_plan,
     get_backlog_item,
     update_backlog_item,
-    create_sprint,
-    get_sprint,
-    get_project_sprints,
-    get_sprint_subtasks,
     get_active_runs_for_project,
     get_run_subtask_statuses,
     list_issues,
@@ -34,6 +30,7 @@ from ...tracker import (
     get_runs_by_status,
 )
 from ...config import CLAUDE_WEEKLY_BUDGET
+from ... import tickets
 
 router = APIRouter(prefix="/api", tags=["runs"])
 
@@ -173,71 +170,109 @@ async def api_run_clarify(run_id: int, payload: ClarifyPayload):
         
     return JSONResponse({"ok": True})
 
-# ── Sprints ───────────────────────────────────────────────────────────────────
-
-@router.get("/projects/{project_id}/sprints")
-async def api_project_sprints(project_id: int):
-    from ...tracker import get_project
-    p = get_project(project_id)
-    if not p: return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse({"project": p, "sprints": get_project_sprints(project_id)})
-
-@router.get("/sprints/{sprint_id}")
-async def api_sprint_detail(sprint_id: int):
-    sprint = get_sprint(sprint_id)
-    if not sprint: return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse({"sprint": sprint, "subtasks": get_sprint_subtasks(sprint_id)})
-
 # ── Launch & HITL ─────────────────────────────────────────────────────────────
+
+
+def _python_exe() -> str:
+    root = Path(__file__).parents[3]
+    venv_python = root / ".venv" / "Scripts" / "python.exe"
+    if not venv_python.exists():
+        venv_python = root / ".venv" / "bin" / "python"
+    return str(venv_python) if venv_python.exists() else sys.executable
+
+
+def launch_ticket_run(ticket_id: int, *, actor: str = "user",
+                      require_approval: bool = False) -> tuple[bool, str]:
+    """Claim a ticket and build it in a subprocess. Returns (started, detail).
+
+    The ticket is claimed here rather than in the subprocess so an over-WIP or
+    otherwise illegal request can be refused synchronously, with a reason. The
+    subprocess then runs `eng-crew ticket <id>`, which builds the ticket's own
+    text and links its run back to the ticket.
+    """
+    import subprocess
+    import time
+
+    ticket = get_backlog_item(ticket_id)
+    if not ticket:
+        return False, "not found"
+    if get_active_runs_for_project(ticket["project_path"]):
+        return False, "Already running for this project"
+
+    try:
+        tickets.move(ticket_id, tickets.IN_PROGRESS, actor, "build requested")
+    except tickets.TransitionRefused as exc:
+        return False, str(exc)
+
+    root = Path(__file__).parents[3]
+    log_file = root / "logs" / f"run_{int(time.time())}.log"
+    log_file.parent.mkdir(exist_ok=True)
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "_DASHBOARD_PROCESS": "1"}
+    if not require_approval:
+        env["CI"] = "1"
+
+    cmd = [_python_exe(), "-u", "-m", "eng_crew", "ticket", str(ticket_id),
+           "--log-path", str(log_file)]
+    if not require_approval:
+        cmd.append("--no-approval")
+
+    try:
+        with open(log_file, "w") as log:
+            subprocess.Popen(
+                cmd, cwd=str(root), env=env, stdout=log, stderr=log,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+            )
+    except Exception as e:
+        print(f"[dashboard] Failed to launch ticket {ticket_id}: {e}", file=sys.stderr)
+        try:
+            tickets.move(ticket_id, tickets.BACKLOG, actor, f"launch failed: {e}")
+        except tickets.TransitionRefused:
+            pass
+        return False, str(e)
+    return True, str(log_file)
+
+
+def _launch_response(ticket_id: int, *, require_approval: bool = False):
+    ticket = get_backlog_item(ticket_id)
+    if not ticket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if ticket["status"] == tickets.IN_PROGRESS:
+        return JSONResponse({"error": "already running"}, status_code=400)
+
+    started = threading.Event()
+    outcome: dict = {}
+
+    def _bg():
+        outcome["ok"], outcome["detail"] = launch_ticket_run(
+            ticket_id, require_approval=require_approval
+        )
+        started.set()
+
+    threading.Thread(target=_bg, daemon=True).start()
+    started.wait(timeout=30)
+    if not outcome:
+        return JSONResponse({"error": "launch timed out"}, status_code=504)
+    if not outcome["ok"]:
+        detail = outcome["detail"]
+        code = 409 if ("Already running" in detail or "WIP limit" in detail) else 400
+        return JSONResponse({"error": detail}, status_code=code)
+    return JSONResponse({"ok": True, "log_path": outcome["detail"]})
+
 
 @router.post("/backlog/{item_id}/run")
 async def api_backlog_run(item_id: int):
-    item = get_backlog_item(item_id)
-    if not item: return JSONResponse({"error": "not found"}, status_code=404)
-    if item["status"] == "running": return JSONResponse({"error": "already running"}, status_code=400)
-    active = get_active_runs_for_project(item["project_path"])
-    if active: return JSONResponse({"error": "Already running for this project"}, status_code=409)
+    return _launch_response(item_id)
 
-    project_id = item.get("project_id")
-    sid = create_sprint(project_id, item_id, name=(item["title"] or "")[:80]) if project_id else None
-    update_backlog_item(item_id, status="running", active_sprint_id=sid)
 
-    # Launch via subprocess to capture logs
-    import time
-    import subprocess
-    from pathlib import Path
-    
-    root = Path(__file__).parents[3]
-    venv_python = root / ".venv" / "Scripts" / "python.exe"
-    if not venv_python.exists(): venv_python = root / ".venv" / "bin" / "python"
-    python_exe = str(venv_python) if venv_python.exists() else sys.executable
-    
-    log_file = root / "logs" / f"run_{int(time.time())}.log"
-    log_file.parent.mkdir(exist_ok=True)
-    
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "_DASHBOARD_PROCESS": "1"}
-    
-    def _bg():
-        try:
-            with open(log_file, "w") as log:
-                cmd = [python_exe, "-u", "-m", "eng_crew", "run", item["title"] + "\n\n" + item.get("description", ""), item["project_path"], "--log-path", str(log_file)]
-                if item.get("claude_md_path"):
-                    cmd.insert(6, item["claude_md_path"])
-                
-                subprocess.Popen(
-                    cmd,
-                    cwd=str(root),
-                    env=env,
-                    stdout=log,
-                    stderr=log,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
-                )
-        except Exception as e:
-            print(f"[dashboard] Failed to launch backlog run: {e}", file=sys.stderr)
-            update_backlog_item(item_id, status="failed")
+@router.post("/tickets/{ticket_id}/run")
+async def api_ticket_run(ticket_id: int):
+    return _launch_response(ticket_id)
 
-    threading.Thread(target=_bg, daemon=True).start()
-    return JSONResponse({"ok": True, "sprint_id": sid})
+
+@router.post("/tickets/{ticket_id}/run-with-review")
+async def api_ticket_run_with_review(ticket_id: int):
+    return _launch_response(ticket_id, require_approval=True)
+
 
 @router.post("/runs/{run_id}/approve")
 async def api_run_approve(run_id: int, payload: ApprovePayload):
@@ -401,11 +436,15 @@ async def api_subtask_files(run_id: int, subtask_idx: int):
     return JSONResponse({"files": files})
 
 # ── Issues ───────────────────────────────────────────────────────────────────
+#
+# An "issue" is a ticket tagged type='issue'; it runs through the same queue and
+# the same launcher as any other ticket.
 
 class IssueIn(BaseModel):
     title: str
     description: str = ""
     priority: int = 50
+    acceptance_criteria: str = ""
 
 @router.get("/projects/{project_id}/issues")
 async def api_project_issues(project_id: int, status: Optional[str] = None):
@@ -421,66 +460,15 @@ async def api_project_issues_create(project_id: int, item: IssueIn):
     if not p: return JSONResponse({"error": "not found"}, status_code=404)
     issue_id = add_backlog_item(title=item.title, description=item.description or item.title,
                                 project_path=p["project_path"], claude_md_path=p["claude_md_path"],
-                                priority=item.priority, project_id=project_id)
-    update_backlog_item(issue_id, type="issue")
+                                priority=item.priority, project_id=project_id,
+                                item_type="issue",
+                                acceptance_criteria=item.acceptance_criteria)
     return JSONResponse({"id": issue_id})
-
-def _launch_issue_run(issue_id: int, require_approval: bool = False):
-    from ...tracker import get_project
-    item = get_backlog_item(issue_id)
-    if not item: return JSONResponse({"error": "not found"}, status_code=404)
-    if item["status"] == "running": return JSONResponse({"error": "already running"}, status_code=400)
-    project_id = item.get("project_id")
-    if not project_id: return JSONResponse({"error": "issue has no associated project"}, status_code=400)
-    
-    sprint_id_val = create_sprint(project_id, issue_id, name=(item["title"] or "")[:80])
-    update_backlog_item(issue_id, status="running", active_sprint_id=sprint_id_val)
-    p = get_project(project_id)
-    
-    # Launch via subprocess to capture logs
-    import time
-    import subprocess
-    from pathlib import Path
-    
-    root = Path(__file__).parents[3]
-    venv_python = root / ".venv" / "Scripts" / "python.exe"
-    if not venv_python.exists(): venv_python = root / ".venv" / "bin" / "python"
-    python_exe = str(venv_python) if venv_python.exists() else sys.executable
-    
-    log_file = root / "logs" / f"run_{int(time.time())}.log"
-    log_file.parent.mkdir(exist_ok=True)
-    
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "_DASHBOARD_PROCESS": "1"}
-    if not require_approval:
-        env["CI"] = "1"
-    
-    def _bg():
-        try:
-            with open(log_file, "w") as log:
-                cmd = [python_exe, "-u", "-m", "eng_crew", "run", item["title"] + "\n\n" + item.get("description", ""), item["project_path"], "--log-path", str(log_file)]
-                claude_md = p["claude_md_path"] if p and p.get("claude_md_path") else item["claude_md_path"]
-                if claude_md:
-                    cmd.insert(6, claude_md)
-                
-                subprocess.Popen(
-                    cmd,
-                    cwd=str(root),
-                    env=env,
-                    stdout=log,
-                    stderr=log,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
-                )
-        except Exception as e:
-            print(f"[dashboard] Failed to launch issue run: {e}", file=sys.stderr)
-            update_backlog_item(issue_id, status="failed")
-
-    threading.Thread(target=_bg, daemon=True).start()
-    return JSONResponse({"ok": True, "sprint_id": sprint_id_val})
 
 @router.post("/issues/{issue_id}/run")
 async def api_issue_run(issue_id: int):
-    return _launch_issue_run(issue_id, require_approval=False)
+    return _launch_response(issue_id)
 
 @router.post("/issues/{issue_id}/run-with-review")
 async def api_issue_run_with_review(issue_id: int):
-    return _launch_issue_run(issue_id, require_approval=True)
+    return _launch_response(issue_id, require_approval=True)

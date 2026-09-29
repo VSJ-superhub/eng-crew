@@ -132,14 +132,14 @@ def project(
 
 
 @app.command()
-def sprint(
+def plans(
     project_path: Path = typer.Argument(
         ..., help="Path to the project root.", exists=True, file_okay=False, resolve_path=True
     ),
-    list_plans: bool = typer.Option(False, "--list", "-l", help="List existing sprint plans."),
+    list_plans: bool = typer.Option(False, "--list", "-l", help="List existing run plans."),
     env_file: Optional[Path] = typer.Option(None, "--env", help="Path to .env file."),
 ) -> None:
-    """View and manage sprint plans for a project."""
+    """List the architect plans produced by this project's runs."""
     cfg = load_settings(env_file)
 
     try:
@@ -147,20 +147,82 @@ def sprint(
 
         plans = get_sprint_plans(project_path=project_path, settings=cfg)
     except ImportError:
-        console.print("[yellow]Sprint module not available — run `pip install eng-crew[full]`.[/yellow]")
+        console.print("[yellow]Plan module not available — run `pip install eng-crew[full]`.[/yellow]")
         raise typer.Exit(1)
 
     if not plans:
-        console.print("[dim]No sprint plans found for this project.[/dim]")
+        console.print("[dim]No run plans found for this project.[/dim]")
         return
 
-    table = Table(title=f"Sprint plans: {project_path.name}")
+    table = Table(title=f"Run plans: {project_path.name}")
     table.add_column("ID", style="bold cyan")
     table.add_column("Title")
     table.add_column("Status")
     for plan in plans:
         table.add_row(str(plan.get("id", "")), str(plan.get("title", "")), str(plan.get("status", "")))
     console.print(table)
+
+
+@app.command()
+def queue(
+    project_path: Path = typer.Argument(
+        ..., help="Path to the project root.", exists=True, file_okay=False, resolve_path=True
+    ),
+    env_file: Optional[Path] = typer.Option(None, "--env", help="Path to .env file."),
+) -> None:
+    """Show a project's ticket queue and how much work is in flight."""
+    cfg = load_settings(env_file)
+    from eng_crew import tickets, tracker
+
+    path = str(project_path)
+    state = tickets.wip(path, cfg)
+    console.print(
+        f"[bold]WIP[/] {state['in_flight']}/{state['limit']} in flight "
+        f"({state['slots']} slot(s) free)"
+    )
+
+    rows = tracker.list_project_tickets(path)
+    if not rows:
+        console.print("[dim]No tickets for this project.[/dim]")
+        return
+
+    table = Table(title=f"Tickets: {project_path.name}")
+    table.add_column("ID", style="bold cyan")
+    table.add_column("Pri")
+    table.add_column("Status")
+    table.add_column("Title")
+    table.add_column("AC", justify="center")
+    for t in rows:
+        table.add_row(
+            str(t["id"]), str(t.get("priority", "")), str(t.get("status", "")),
+            str(t.get("title", ""))[:60],
+            "yes" if (t.get("acceptance_criteria") or "").strip() else "[red]no[/red]",
+        )
+    console.print(table)
+
+
+@app.command()
+def ticket(
+    ticket_id: int = typer.Argument(..., help="Ticket ID to build (see `eng-crew queue`)."),
+    env_file: Optional[Path] = typer.Option(None, "--env", help="Path to .env file."),
+    no_approval: bool = typer.Option(False, "--no-approval", help="Skip human-in-the-loop approval step."),
+    log_path: Optional[Path] = typer.Option(
+        None, "--log-path", help="Where this run's output is being captured."
+    ),
+) -> None:
+    """Build one ticket — the ticket's own text, not a placeholder."""
+    cfg = load_settings(env_file)
+    if no_approval:
+        cfg = cfg.model_copy(update={"require_approval": False})
+
+    from eng_crew import tickets as _tickets
+    from eng_crew.run import run_ticket
+
+    try:
+        run_ticket(ticket_id, actor="cli", log_path=str(log_path) if log_path else None, settings=cfg)
+    except _tickets.TransitionRefused as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
 
 
 @app.command()
