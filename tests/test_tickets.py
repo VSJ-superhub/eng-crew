@@ -408,3 +408,15 @@ def test_cleanup_leaves_a_ticket_whose_run_is_still_going(db):
 
     assert tracker.cleanup_stale_backlog_items() == 0
     assert tracker.get_backlog_item(ticket_id)["status"] == tickets.IN_PROGRESS
+
+
+def test_archived_items_migrate_to_a_status_they_can_leave(db):
+    """Pre-lifecycle rows marked `archived` must land on a real status, or they
+    are stranded: a status outside the lifecycle has no legal moves at all."""
+    ticket_id = make_ticket()
+    with tracker._connect() as conn:
+        conn.execute("UPDATE backlog_items SET status='archived' WHERE id=?", (ticket_id,))
+        tracker._migrate_ticket_statuses(conn)
+
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.REJECTED
+    assert tickets.move(ticket_id, tickets.BACKLOG, "tester")["status"] == tickets.BACKLOG

@@ -129,6 +129,9 @@ backlog -> ready -> in_progress -> in_review -> in_qa -> done -> shipped
 - **Acceptance criteria are required to reach `ready`.** "Ready" means an agent
   could pick the ticket up and know when it is finished, so a ticket with no
   definition of done cannot get there.
+- **Moving a ticket to `ready` is the approval step.** The planner only
+  proposes: its tickets land in `backlog`, and a human promotes the ones worth
+  building.
 - **Every status change is recorded** with who made it, so a ticket's history
   shows how it got where it is (`GET /api/tickets/<id>/events`).
 - **Runs are linked to the ticket they attempt**, and a run is handed the

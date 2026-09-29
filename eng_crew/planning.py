@@ -10,10 +10,9 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from typing import Any
 
-from . import prompts, tickets, tracker
+from . import prompts, tracker
 from .agents.base import BaseAgent
 from .project_context import load_project_context
 
@@ -74,9 +73,10 @@ def plan_tickets(
 ) -> list[dict]:
     """Decompose a goal into tickets and put them in the project's queue.
 
-    Each ticket that came back with acceptance criteria is moved straight to
-    `ready` — it is pullable. One that did not stays in `backlog` for a human to
-    fill in, because the lifecycle will not let it through without them.
+    Every ticket lands in `backlog`. Moving one to `ready` is the approval step —
+    a human deciding the scope is worth building — so the planner proposes and
+    never promotes. A ticket without acceptance criteria cannot be promoted
+    until someone fills them in.
     """
     context = load_project_context(project_path).render()[:_MAX_CONTEXT_CHARS]
     prompt = prompts.render("plan-tickets", project_context=context, goal=goal)
@@ -104,12 +104,6 @@ def plan_tickets(
             created_by=actor,
             plan_id=plan_id,
         )
-        if cleaned["acceptance_criteria"]:
-            try:
-                tickets.move(ticket_id, tickets.READY, actor,
-                             "planned with acceptance criteria", settings=settings)
-            except tickets.TransitionRefused as exc:
-                print(f"[planning] ticket {ticket_id} stays in backlog: {exc}", file=sys.stderr)
         created.append(tracker.get_backlog_item(ticket_id) or {})
 
     if not created:

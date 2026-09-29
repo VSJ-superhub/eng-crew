@@ -354,24 +354,32 @@ def test_planning_creates_tickets_rather_than_building_the_goal(client, project,
     assert "ship v2" in planner[0]
 
 
-def test_a_planned_ticket_with_criteria_is_ready_to_pull(client, project, planner):
+def test_planned_tickets_wait_in_the_backlog_for_approval(client, project, planner):
+    """Moving a ticket to ready is the human approval step, so the planner only
+    proposes: every ticket it creates lands in the backlog, criteria or not."""
     from eng_crew import planning, tickets
 
     created = planning.plan_project(
         goal="ship v2", project_id=project["id"], project_path=str(project["path"])
     )
-    by_title = {t["title"]: t for t in created}
 
-    assert by_title["Add a renamer"]["status"] == tickets.READY
-    # No acceptance criteria, so the gate holds this one in the backlog.
-    assert by_title["Add a CLI"]["status"] == tickets.BACKLOG
+    assert {t["status"] for t in created} == {tickets.BACKLOG}
 
 
-def test_planned_tickets_land_in_the_queue(client, project, planner):
+def test_a_planned_ticket_with_criteria_can_be_approved_into_the_queue(client, project, planner):
     from eng_crew import planning
 
-    planning.plan_project(goal="ship v2", project_id=project["id"],
-                          project_path=str(project["path"]))
+    created = planning.plan_project(goal="ship v2", project_id=project["id"],
+                                    project_path=str(project["path"]))
+    by_title = {t["title"]: t for t in created}
+
+    ok = client.put(f"/api/tickets/{by_title['Add a renamer']['id']}/status",
+                    json={"status": "ready", "actor": "ceo"})
+    assert ok.status_code == 200
+    # No acceptance criteria, so the gate refuses this one.
+    refused = client.put(f"/api/tickets/{by_title['Add a CLI']['id']}/status",
+                         json={"status": "ready", "actor": "ceo"})
+    assert refused.status_code >= 400
 
     body = client.get(f"/api/projects/{project['id']}/queue").json()
     assert [t["title"] for t in body["ready"]] == ["Add a renamer"]

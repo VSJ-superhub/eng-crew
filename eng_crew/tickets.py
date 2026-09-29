@@ -62,6 +62,8 @@ LEGACY_STATUS = {
     "failed": REJECTED,
     "completed": DONE,
     "done": DONE,
+    # Shelved work: nobody is building it, but it can be picked back up.
+    "archived": REJECTED,
 }
 
 
