@@ -67,6 +67,15 @@ LEGACY_STATUS = {
 }
 
 
+#: Actors that are eng-crew itself rather than a person. They may move a ticket
+#: anywhere the lifecycle allows except into `shipped`: shipping is the one step
+#: that says "this is live for users", and no agent gets to decide that.
+ROBOTS: frozenset[str] = frozenset({
+    "queue", "cleanup", "system", "migration", "planner", "manager",
+    "architect", "builder", "reviewer", "qa",
+})
+
+
 class TransitionRefused(ValueError):
     """A status change the lifecycle does not allow."""
 
@@ -126,6 +135,11 @@ def move(ticket_id: int, to_status: str, actor: str, note: str = "",
             f"a ticket in {from_status} can only move to {allowed}, not {to_status}"
         )
 
+    if to_status == SHIPPED and (actor or "system").strip().lower() in ROBOTS:
+        raise TransitionRefused(
+            f"only a person can ship ticket {ticket_id} — {actor!r} is eng-crew itself"
+        )
+
     if to_status == READY and not (ticket.get("acceptance_criteria") or "").strip():
         raise TransitionRefused(
             f"ticket {ticket_id} has no acceptance criteria — it cannot be ready"
@@ -144,6 +158,21 @@ def move(ticket_id: int, to_status: str, actor: str, note: str = "",
             f"ticket {ticket_id} changed status underneath us; it is no longer {from_status}"
         )
     return tracker.get_backlog_item(ticket_id) or ticket
+
+
+def note(ticket_id: int, actor: str, text: str) -> bool:
+    """Record something about a ticket without moving it.
+
+    A review verdict belongs in the same history as the status changes — it is
+    the reason the next move happened, or the reason none did — but a
+    changes-requested verdict moves the ticket nowhere. This writes the event
+    with the ticket's current status on both sides.
+    """
+    ticket = _tracker().get_backlog_item(ticket_id)
+    if not ticket:
+        return False
+    status = ticket.get("status") or BACKLOG
+    return _tracker().add_ticket_event(ticket_id, status, status, actor, text)
 
 
 def events(ticket_id: int) -> list[dict]:

@@ -99,7 +99,32 @@ def run_ticket(ticket_id: int, *, actor: str = "queue", log_path: str | None = N
         actor,
         f"run {run_id} finished as {status['status'] if status else 'unknown'}",
     )
+    if landed:
+        _review_ticket(ticket_id, run_id, state, cfg)
     return state
+
+
+def _review_ticket(ticket_id: int, run_id: int, state, settings) -> None:
+    """Hand the landed run to the independent reviewer. Never raises.
+
+    The build already happened; a reviewer that cannot be reached or is not
+    configured must leave the ticket awaiting review rather than lose the run.
+    """
+    from . import review
+
+    try:
+        verdict = review.review_ticket(
+            ticket_id, run_id, diff=review.run_diff(state), settings=settings
+        )
+    except review.ReviewUnavailable as exc:
+        log.warning("ticket %s was not reviewed: %s", ticket_id, exc)
+    except Exception:
+        log.exception("reviewing ticket %s failed", ticket_id)
+    else:
+        if verdict:
+            log.info(
+                "ticket %s review: %s -> %s", ticket_id, verdict["verdict"], verdict["status"]
+            )
 
 
 def _settle_ticket(ticket_id: int, to_status: str, actor: str, note: str) -> None:

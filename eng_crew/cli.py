@@ -215,7 +215,9 @@ def ticket(
     if no_approval:
         cfg = cfg.model_copy(update={"require_approval": False})
 
+    from eng_crew import review as _review
     from eng_crew import tickets as _tickets
+    from eng_crew import tracker as _tracker
     from eng_crew.run import run_ticket
 
     try:
@@ -223,6 +225,14 @@ def ticket(
     except _tickets.TransitionRefused as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
+
+    # What the independent reviewer said, and where that left the ticket.
+    verdict = _review.latest_verdict(ticket_id)
+    status = (_tracker.get_backlog_item(ticket_id) or {}).get("status", "?")
+    if verdict:
+        colour = "green" if verdict["verdict"] == _review.APPROVE else "yellow"
+        console.print(f"[{colour}]review: {verdict['verdict']}[/] — {verdict['reasons']}")
+    console.print(f"ticket {ticket_id} is now [bold]{status}[/]")
 
 
 @app.command()

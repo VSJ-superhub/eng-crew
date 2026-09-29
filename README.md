@@ -142,6 +142,16 @@ backlog -> ready -> in_progress -> in_review -> in_qa -> done -> shipped
   check they actually discriminate. A test that would have passed anyway fails
   the run (`ENG_CREW_VERIFICATION_RED_PHASE=warn` to only report it, `off` to
   disable).
+- **A landed run is reviewed by something that is not the builder.** One cheap
+  model call reads the run's diff against the ticket's acceptance criteria and
+  records `approve` or `changes_requested` with reasons in the ticket's history;
+  its cost lands on the run. It has no file tools — a CLI provider is refused for
+  this role. An approved ticket whose run also passed the verification gate moves
+  through `in_qa` to `done`, credited to `reviewer` and `qa`. Changes requested
+  leaves the ticket in `in_review` with the reasons and starts no new build —
+  moving it back to `in_progress` is your call
+  (`ENG_CREW_TICKET_REVIEWER_MODEL`, `ENG_CREW_TICKET_REVIEW_ENABLED=false`).
+- **`done -> shipped` is a human action.** No eng-crew actor can make that move.
 - **There are no sprints.** Tickets form one continuous queue ordered by
   priority; `ENG_CREW_WIP_LIMIT` bounds how many are in flight at once. Nothing
   enters `in_progress` past the limit.

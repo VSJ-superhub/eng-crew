@@ -128,9 +128,14 @@ async def api_ticket_get(ticket_id: int):
     ticket = get_backlog_item(ticket_id)
     if not ticket:
         return JSONResponse({"error": "not found"}, status_code=404)
+    from ... import review
+
     return JSONResponse({
         "ticket": ticket,
         "events": tickets.events(ticket_id),
+        # The verdict on the ticket's last review, pulled out of the history so
+        # a ticket held back at in_review can show why without reading events.
+        "review": review.latest_verdict(ticket_id),
         "allowed_transitions": sorted(tickets.allowed_transitions(ticket["status"])),
     })
 

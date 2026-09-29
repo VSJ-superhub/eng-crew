@@ -32,6 +32,16 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   acceptance criteria still becomes a ticket, but the surface says so, because the
   lifecycle will refuse to make that ticket `ready`. Approving the ticket to
   `ready` is what releases it into the ticket queue to be built.
+- When a ticket's run lands, an independent reviewer (`eng_crew/review.py`)
+  checks the run's diff against the ticket's acceptance criteria: one cheap model
+  call on the `ticket_reviewer` role, never a CLI provider (it must not be able
+  to edit the code it judges), with its cost recorded against the run. The
+  verdict and its reasons go into `ticket_events`. An approved ticket whose run
+  also passed the verification gate moves in_review → in_qa → done, credited to
+  `reviewer` and `qa`. A changes-requested verdict leaves the ticket in
+  in_review with the reasons attached and starts no new build. `done → shipped`
+  is refused for every eng-crew actor (`tickets.ROBOTS`) — shipping is a human
+  action.
 - Agent prompts live in `.claude/skills/<name>/SKILL.md` (frontmatter + template),
   loaded by `eng_crew/prompts.py` — edit a prompt without touching agent code.
 - Runs execute in their own git worktree and branch (`worktree_isolation`, on by

@@ -1102,6 +1102,51 @@ def set_ticket_status(ticket_id: int, from_status: str, to_status: str,
             return True
 
 
+def add_ticket_event(ticket_id: int, from_status: str, to_status: str,
+                     actor: str, note: str = "") -> bool:
+    """Append to a ticket's history without touching its status.
+
+    set_ticket_status writes the event for a move; this is for what has to be
+    recorded when nothing moved — a review verdict that requested changes, say.
+    """
+    try:
+        with _lock:
+            with _connect() as con:
+                con.execute(
+                    """INSERT INTO ticket_events (ticket_id, from_status, to_status, actor, note)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (ticket_id, from_status, to_status, actor or "system", note or ""),
+                )
+        return True
+    except Exception as e:
+        print(f"[tracker] add_ticket_event error: {e}", file=sys.stderr)
+        return False
+
+
+def recalculate_run_cost(run_id: int) -> float:
+    """Re-total a run's cost from its events. Returns the new total.
+
+    finish_run totals the cost when the run ends, so anything charged to the run
+    afterwards — the ticket review is one call past that point — would otherwise
+    be recorded on the event but missing from the run.
+    """
+    try:
+        with _lock:
+            with _connect() as conn:
+                row = conn.execute(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM subtask_events WHERE run_id=?",
+                    (run_id,),
+                ).fetchone()
+                total = float(row[0]) if row else 0.0
+                conn.execute(
+                    "UPDATE runs SET total_cost_usd=? WHERE id=?", (total, run_id)
+                )
+                return total
+    except Exception as e:
+        print(f"[tracker] recalculate_run_cost error: {e}", file=sys.stderr)
+        return 0.0
+
+
 def get_ticket_events(ticket_id: int) -> list[dict]:
     """Every recorded status change for a ticket, oldest first."""
     con = _connect()
