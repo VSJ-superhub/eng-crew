@@ -52,6 +52,7 @@ class VerifierAgent(BaseAgent):
         exempt_output = ""
 
         attempts = 0
+        repair_account = ""
         while not result.passed and attempts < max_fixes:
             attempts += 1
             # Each pass may implicate different tests; a file stays editable
@@ -61,7 +62,7 @@ class VerifierAgent(BaseAgent):
                 f"[verify] repair pass {attempts}/{max_fixes} — {len(result.failures)} failing check(s)",
                 file=sys.stderr,
             )
-            self._repair(state, result, run_id, attempts)
+            repair_account = self._repair(state, result, run_id, attempts) or repair_account
             # Re-verify against the tree, not the repair agent's own account of it.
             # Passing agent_output="" drops the repair's narration on purpose, so
             # an established truncation is handed over explicitly — otherwise a
@@ -145,6 +146,14 @@ class VerifierAgent(BaseAgent):
         execution_results.append(f"[verify] {summary}")
 
         final_summary = state.get("final_summary") or ""
+        if verify_mod.TRUNCATION_MARKER in final_summary and repair_account:
+            # A builder cut off by its turn limit leaves no account of its work,
+            # only the truncation notice. The repair pass that finished the job
+            # wrote one, so that is what the run's summary should say.
+            final_summary = (
+                f"{repair_account}\n\n(The implementation pass hit its turn limit; "
+                "this is the repair pass's account.)"
+            )
         if red_failed:
             final_summary = f"{final_summary}\n\n[RED] {summary}".strip()
         elif untested_failed:
@@ -220,7 +229,8 @@ class VerifierAgent(BaseAgent):
 
         return report
 
-    def _repair(self, state: TeamState, result, run_id: int, attempt: int) -> None:
+    def _repair(self, state: TeamState, result, run_id: int, attempt: int) -> str:
+        """Run one repair pass. Returns the repair agent's own account, or ""."""
         task = state.get("raw_task", "")
         project_path = state.get("project_path", ".")
 
@@ -254,10 +264,13 @@ class VerifierAgent(BaseAgent):
             )
         except Exception as exc:  # a failed repair must not crash the gate
             print(f"[verify] repair call failed: {exc}", file=sys.stderr)
-            return
+            return ""
 
         if run_id:
             try:
                 tracker.log_event(run_id, -1, f"verify_repair_{attempt}", llm_result)
             except Exception as exc:
                 print(f"[tracker] log_event error: {exc}", file=sys.stderr)
+        text = (llm_result.text or "").strip()
+        # A repair cut off by its own turn limit has no account worth keeping.
+        return "" if verify_mod.TRUNCATION_MARKER in text else text
