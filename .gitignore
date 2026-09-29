@@ -16,8 +16,10 @@ build/
 htmlcov/
 
 # Virtual environments
-.venv/
-venv/
+# No trailing slash: a run worktree links these in, and a link (or the plain
+# file git writes for one on Windows) is not a directory, so "dir/" misses it.
+.venv
+venv
 env/
 
 # eng-crew runtime data
@@ -34,7 +36,7 @@ logs/
 *.key
 
 # Node (dashboard frontend, if added later)
-node_modules/
+node_modules
 .next/
 
 # IDE
