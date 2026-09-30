@@ -5,7 +5,7 @@ eng_crew.mcp_server — MCP server exposing eng-crew project tools to Claude.
 Launch:  python -m eng_crew.mcp_server
 
 Tools:
-  run_task(project_path, task)   — dispatch a task to eng-crew (background, returns run info)
+  run_task(project_path, task)   — file a task as a ticket and build it (background)
   list_projects()                — registered projects and their paths
   resume_run(run_id)             — resume an interrupted run from its last checkpoint
   start_services(project_path?)  — start dashboard (+ discord bot if token set)
@@ -13,10 +13,14 @@ Tools:
   services_status()              — what is running + ports
 
 Design notes:
+  - A dispatched task is a ticket (see eng_crew/dispatch.py), so its build gets
+    the independent review, the spending cap and the retro that a ticket's build
+    gets, and the WIP limit bounds how many a caller can start at once.
   - eng-crew defaults to the single-agent tier (one capable agentic CLI call);
-    there is no pre-execution plan-approval gate on the default path, so tasks
-    are dispatched fire-and-forget with approval disabled. The full multi-agent
-    graph (with the dashboard HITL gate) is opt-in via ENG_CREW_ENABLE_MULTI_AGENT.
+    there is no pre-execution plan-approval gate on the default path, so builds
+    are launched with approval disabled — the dispatch itself is the approval.
+    The full multi-agent graph (with the dashboard HITL gate) is opt-in via
+    ENG_CREW_ENABLE_MULTI_AGENT.
   - Sprint/plan tooling from the legacy system is intentionally omitted.
 """
 from __future__ import annotations
@@ -133,74 +137,79 @@ def _popen(args: list[str], cwd: str | None = None, log=None):
 
 # ── Tools ───────────────────────────────────────────────────────────────────────
 @mcp.tool()
-def run_task(project_path: str, task: str, base_branch: str = "") -> str:
+def run_task(project_path: str, task: str, acceptance_criteria: str = "",
+             base_branch: str = "") -> str:
     """
     Dispatch a task to eng-crew for any project.
 
-    Runs the single-agent pipeline as a background process and returns
-    immediately with run info. Track progress on the dashboard.
+    The task becomes a ticket, and the ticket is built: its run is checked by an
+    independent reviewer against the acceptance criteria, capped by the ticket's
+    budget, and written into a retro when it ships. Dispatching counts as your
+    approval to build. Returns immediately with the ticket id; track progress on
+    the dashboard.
 
     Args:
-        project_path: Absolute path to the project root.
-        task:         Natural-language description of what to build or fix.
-        base_branch:  Optional branch to base the run's branch on, instead of
-                      whatever the project checkout currently has checked out.
-                      Pass a previous run's branch to stack work on top of it.
+        project_path:        Absolute path to the project root.
+        task:                Natural-language description of what to build or fix.
+        acceptance_criteria: Optional; one observable condition per line. Leave it
+                             empty and the Manager drafts criteria from the task
+                             and the real codebase before anything is built.
+        base_branch:         Optional branch to base the run's branch on, instead
+                             of whatever the project checkout currently has checked
+                             out. Pass a previous run's branch to stack work on it.
     """
-    proj = Path(project_path).resolve()
-    if not proj.is_dir():
-        return f"Error: '{project_path}' is not a directory."
-
-    base_branch = (base_branch or "").strip()
-    if base_branch:
-        # Check here rather than letting the background process fail silently
-        # into a log file the caller is not reading.
-        try:
-            from eng_crew import git_skill
-
-            if not git_skill.branch_exists(proj, base_branch):
-                return f"Error: no branch '{base_branch}' in {proj}."
-        except ImportError:
-            pass
-
-    env = {
-        **_base_env,
-        "PYTHONIOENCODING": "utf-8",
-        # Fire-and-forget dispatch: no interactive/HITL gate on the default
-        # single-agent path. (The multi-agent gate is opt-in and dashboard-driven.)
-        "ENG_CREW_REQUIRE_APPROVAL": "false",
-    }
-
-    log_file = _ENG_CREW_ROOT / "logs" / f"run_{int(time.time())}.log"
-    log_file.parent.mkdir(exist_ok=True)
+    try:
+        from eng_crew.dispatch import dispatch_task
+    except ImportError as e:
+        return f"Failed to dispatch task: {e}"
 
     try:
-        log = open(log_file, "w")
-        proc = subprocess.Popen(
-            [
-                _PYTHON, "-u", "-m", "eng_crew", "run", task, str(proj),
-                "--no-approval", "--log-path", str(log_file),
-                *(["--base", base_branch] if base_branch else []),
-            ],
-            cwd=str(_ENG_CREW_ROOT),
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=log,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
-        )
-        dash_port = _load_state().get("services", {}).get("dashboard", {}).get("port", _DEFAULT_DASH_PORT)
-        return (
-            f"Task dispatched (pid={proc.pid})\n"
-            f"  Project : {proj}\n"
-            f"  Task    : {task}\n"
-            + (f"  Base    : {base_branch}\n" if base_branch else "")
-            + f"  Log     : {log_file}\n"
-            f"  Track   : http://localhost:{dash_port}\n\n"
-            f"Run services_status() or open the dashboard to monitor progress."
+        result = dispatch_task(
+            project_path,
+            task,
+            acceptance_criteria,
+            base_branch=base_branch,
+            actor="user",
+            env=_base_env,
+            python_exe=_PYTHON,
         )
     except Exception as e:
         return f"Failed to dispatch task: {e}"
+
+    if not result.ok:
+        return f"Error: {result.detail}"
+
+    dash_port = _load_state().get("services", {}).get("dashboard", {}).get("port", _DEFAULT_DASH_PORT)
+    criteria_note = {
+        "given": "as given",
+        "manager": "drafted by the Manager from the codebase",
+    }.get(result.criteria_source, "none")
+    lines = [
+        "Task dispatched" if result.started else "Task filed, not started",
+        f"  Ticket  : #{result.ticket_id}",
+        f"  Project : {Path(project_path).expanduser().resolve()}",
+        f"  Task    : {task}",
+        f"  Criteria: {criteria_note}",
+    ]
+    if base_branch.strip():
+        lines.append(f"  Base    : {base_branch.strip()}")
+    if result.wip:
+        lines.append(
+            f"  WIP     : {result.wip['in_flight']}/{result.wip['limit']} in flight"
+        )
+    if result.log_path:
+        lines.append(f"  Log     : {result.log_path}")
+    lines.append(f"  Status  : {result.detail}")
+    if result.warning:
+        lines.append(f"  Warning : {result.warning}")
+    lines.append(f"  Track   : http://localhost:{dash_port}")
+    if not result.started:
+        lines.append("")
+        lines.append(
+            "Nothing is building this ticket yet. Run the project's queue (dashboard "
+            "or `eng-crew ticket <id>`) once a slot frees up."
+        )
+    return "\n".join(lines)
 
 
 @mcp.tool()

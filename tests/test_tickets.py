@@ -271,7 +271,7 @@ def test_running_a_ticket_hands_the_pipeline_the_tickets_own_text(db, monkeypatc
     ticket_id = ready_ticket(title="Add pagination")
     seen = {}
 
-    def fake_pipeline(*, task, project_path, settings, run_id):
+    def fake_pipeline(*, task, project_path, settings, run_id, base_branch=None):
         seen.update(task=task, project_path=project_path, run_id=run_id)
         tracker.finish_run(run_id, status="completed")
         return {}
@@ -290,7 +290,7 @@ def test_a_run_is_linked_to_the_ticket_it_attempts(db, monkeypatch):
     ticket_id = ready_ticket()
     run_ids = []
 
-    def fake_pipeline(*, task, project_path, settings, run_id):
+    def fake_pipeline(*, task, project_path, settings, run_id, base_branch=None):
         run_ids.append(run_id)
         tracker.finish_run(run_id, status="completed")
         return {}
@@ -308,7 +308,7 @@ def test_a_finished_run_leaves_the_ticket_awaiting_review(db, monkeypatch):
 
     ticket_id = ready_ticket()
 
-    def fake_pipeline(*, task, project_path, settings, run_id):
+    def fake_pipeline(*, task, project_path, settings, run_id, base_branch=None):
         tracker.finish_run(run_id, status="completed")
         return {}
 
@@ -323,7 +323,7 @@ def test_a_failed_run_rejects_the_ticket(db, monkeypatch):
 
     ticket_id = ready_ticket()
 
-    def fake_pipeline(*, task, project_path, settings, run_id):
+    def fake_pipeline(*, task, project_path, settings, run_id, base_branch=None):
         tracker.finish_run(run_id, status="failed")
         return {}
 
@@ -340,7 +340,7 @@ def test_a_pipeline_that_raises_still_releases_the_ticket(db, monkeypatch):
 
     ticket_id = ready_ticket()
 
-    def boom(*, task, project_path, settings, run_id):
+    def boom(*, task, project_path, settings, run_id, base_branch=None):
         raise RuntimeError("the provider died")
 
     monkeypatch.setattr(run_mod, "run_pipeline", boom)

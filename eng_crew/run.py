@@ -58,7 +58,7 @@ def run_project(
 
 
 def run_ticket(ticket_id: int, *, actor: str = "queue", log_path: str | None = None,
-               settings=None) -> TeamState | None:
+               base_branch: str | None = None, settings=None) -> TeamState | None:
     """Build one ticket. Blocking.
 
     The task handed to the pipeline is the ticket itself — title, description,
@@ -68,6 +68,9 @@ def run_ticket(ticket_id: int, *, actor: str = "queue", log_path: str | None = N
     enforced here too: over the limit, nothing is launched. A caller that
     already claimed the ticket (the dashboard does, so it can refuse over-limit
     requests with an HTTP error) finds it in_progress and keeps it there.
+
+    ``base_branch`` stacks the ticket's run on that ref instead of the project
+    checkout's HEAD, the same as a plain task run.
     """
     from . import tickets, tracker
 
@@ -86,7 +89,10 @@ def run_ticket(ticket_id: int, *, actor: str = "queue", log_path: str | None = N
     tracker.update_backlog_item(ticket_id, run_id=run_id)
 
     try:
-        state = run_pipeline(task=task, project_path=project_path, settings=cfg, run_id=run_id)
+        state = run_pipeline(
+            task=task, project_path=project_path, settings=cfg, run_id=run_id,
+            base_branch=base_branch,
+        )
     except Exception:
         _settle_ticket(ticket_id, tickets.REJECTED, actor, f"run {run_id} raised")
         raise

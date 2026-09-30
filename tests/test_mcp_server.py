@@ -55,7 +55,50 @@ def test_tools_carry_descriptions():
 def test_run_task_takes_project_path_and_task():
     tool = next(t for t in _list_tools() if t.name == "run_task")
     schema = getattr(tool, "input_schema", None) or tool.inputSchema  # 2.x / 1.x
-    assert set(schema["properties"]) == {"project_path", "task", "base_branch"}
-    # base_branch stays optional: a caller that does not care about stacking
-    # keeps dispatching with two arguments.
+    assert set(schema["properties"]) == {
+        "project_path", "task", "acceptance_criteria", "base_branch",
+    }
+    # Everything but the task stays optional: a caller that does not care about
+    # stacking, and one with no criteria of its own (the Manager drafts those),
+    # both keep dispatching with two arguments.
     assert set(schema.get("required", [])) == {"project_path", "task"}
+
+
+def test_run_task_dispatches_through_a_ticket(monkeypatch):
+    """The tool is a thin wrapper over dispatch_task — a task is a ticket now."""
+    from eng_crew import dispatch
+
+    seen = {}
+
+    def fake_dispatch(project_path, task, acceptance_criteria="", **kwargs):
+        seen.update(project_path=project_path, task=task,
+                    criteria=acceptance_criteria, **kwargs)
+        return dispatch.Dispatch(
+            True, "building ticket 7", ticket_id=7, started=True,
+            criteria_source="given", wip={"in_flight": 1, "limit": 3, "slots": 2},
+        )
+
+    monkeypatch.setattr(dispatch, "dispatch_task", fake_dispatch)
+
+    out = mcp_server.run_task(".", "add pagination", "- 20 rows")
+
+    assert seen["task"] == "add pagination"
+    assert seen["criteria"] == "- 20 rows"
+    assert "#7" in out and "1/3 in flight" in out
+
+
+def test_run_task_reports_a_ticket_that_was_filed_but_not_started(monkeypatch):
+    from eng_crew import dispatch
+
+    monkeypatch.setattr(
+        dispatch, "dispatch_task",
+        lambda *a, **k: dispatch.Dispatch(
+            True, "WIP limit reached (3/3 in flight) — ticket 9 is ready and waiting",
+            ticket_id=9, started=False, criteria_source="manager",
+        ),
+    )
+
+    out = mcp_server.run_task(".", "add pagination")
+
+    assert "not started" in out
+    assert "WIP limit reached" in out

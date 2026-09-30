@@ -244,7 +244,7 @@ def test_approving_the_ticket_to_ready_and_running_it_builds_the_ticket(db, monk
 
     seen = {}
 
-    def fake_pipeline(*, task, project_path, settings, run_id):
+    def fake_pipeline(*, task, project_path, settings, run_id, base_branch=None):
         seen.update(task=task, run_id=run_id)
         tracker.finish_run(run_id, status="completed")
         return {}
