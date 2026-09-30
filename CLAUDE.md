@@ -52,6 +52,15 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   stopped ticket records why in `ticket_events` and waits — nothing retries it.
   Raising the budget (`eng-crew budget <id> <amount>`, or the dashboard) is what
   releases it. A run with no ticket is never budget-checked.
+- Shipping a ticket ends in a retro (`eng_crew/retro.py`). `done → shipped`
+  writes a short note into the existing lessons store (the `memories` table)
+  built from the ticket's own history — its runs, what it spent against its
+  budget, the review verdicts and QA outcome, how many builds it took. The
+  retro is assembled from recorded facts, not a model call, so it costs
+  nothing; a retro that fails never unships the ticket. Starting a later build
+  feeds the relevant past retros (ranked by overlap with the task, this
+  project's first) into the builder's prompt, so the lessons are read by the
+  agent that could act on them rather than sitting in a table.
 - Agent prompts live in `.claude/skills/<name>/SKILL.md` (frontmatter + template),
   loaded by `eng_crew/prompts.py` — edit a prompt without touching agent code.
 - Runs execute in their own git worktree and branch (`worktree_isolation`, on by

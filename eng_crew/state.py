@@ -24,6 +24,8 @@ class TeamState(TypedDict):
     project_path: str
     claude_md_path: str
     project_context: str
+    # Retros from tickets this project already shipped (eng_crew.retro).
+    retro_lessons: str
     git_branch: Optional[str]
     subtasks: List[Subtask]
     current_subtask_idx: int
