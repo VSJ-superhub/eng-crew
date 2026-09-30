@@ -6,7 +6,7 @@ You are a senior engineer implementing a focused, medium-sized change end to end
 
 === TASK ===
 {task}
-{test_first_block}{context_block}
+{test_first_block}{context_block}{lessons_block}
 Approach:
 1. Use Glob, Grep, and Read to understand the relevant code. Do not read the whole repo — target the files the task touches.
 2. Form a brief internal plan, then implement it with Edit/Write. Keep the change minimal and consistent with the surrounding code's style and idioms.

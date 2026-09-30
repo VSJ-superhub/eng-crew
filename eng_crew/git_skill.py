@@ -528,6 +528,30 @@ def branch_diff(
     return text
 
 
+def branch_files(project_path: str | Path, branch: str, base: str = "HEAD") -> list[str]:
+    """The paths a branch changed on top of ``base`` — the shape of a run's work.
+
+    The name-only companion to :func:`branch_diff`, and against the merge base
+    for the same reason. Used by the retro, which wants to say *where* a ticket
+    landed without carrying the whole diff around.
+
+    Once the branch is merged into ``base`` the merge base *is* the branch tip
+    and that diff is empty — which is the normal state by the time a ticket
+    ships. In that case the branch's work is read off the merge commit that
+    brought it in, against that merge's first parent.
+    """
+    root = repo_root(project_path)
+    text = _git(["diff", "--name-only", f"{base}...{branch}"], cwd=root)
+    if not text:
+        merges = _git(
+            ["rev-list", "--merges", "--ancestry-path", "--reverse", f"{branch}..{base}"],
+            cwd=root,
+        ).split()
+        if merges:
+            text = _git(["diff", "--name-only", f"{merges[0]}^1...{branch}"], cwd=root)
+    return sorted({line.strip() for line in text.splitlines() if line.strip()})
+
+
 def changed_paths(project_path: str | Path, base: str = "HEAD") -> list[str]:
     """Repo-relative paths this working tree changed since ``base``.
 

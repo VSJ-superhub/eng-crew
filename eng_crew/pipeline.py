@@ -20,6 +20,7 @@ from eng_crew.agents.verifier import VerifierAgent
 from eng_crew.agents.single_agent import SingleAgentEngineer
 from eng_crew.config import Settings
 from eng_crew.project_context import load_project_context
+from eng_crew import retro
 from eng_crew.state import TeamState
 
 log = logging.getLogger(__name__)
@@ -353,9 +354,23 @@ def run_pipeline(
         except Exception as exc:
             log.warning("git branch creation failed: %s", exc)
 
+    if run_id and branch:
+        tracker.update_run_branch(run_id, branch)
+
     ctx = load_project_context(work_path)
     project_context = ctx.render()
     claude_md_path = str(Path(work_path).expanduser().resolve() / "CLAUDE.md")
+
+    # Retros from tickets this project already shipped. Looked up against the
+    # main checkout, not the worktree: the lessons store is keyed by the
+    # project, and a run's private worktree is not one.
+    try:
+        retro_lessons = retro.lessons_block(main_project_path, task)
+    except Exception as exc:
+        log.warning("could not load past retros: %s", exc)
+        retro_lessons = ""
+    if retro_lessons:
+        log.info("carrying past ticket retros into the build")
 
     initial_state: TeamState = {
         "run_id": run_id,
@@ -363,6 +378,7 @@ def run_pipeline(
         "project_path": work_path,
         "claude_md_path": claude_md_path,
         "project_context": project_context,
+        "retro_lessons": retro_lessons,
         "git_branch": branch,
         "subtasks": [],
         "current_subtask_idx": 0,

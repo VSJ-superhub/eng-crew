@@ -40,6 +40,10 @@ class SingleAgentEngineer(BaseAgent):
     MAX_TURNS = 60
     TEST_FIRST_MAX_TURNS = 100
 
+    # Budget for the past-ticket retros carried into the build. Small: they are
+    # hints from finished work, and must not crowd out the task or the code.
+    LESSONS_TOKEN_BUDGET = 600
+
     # Budget for the acceptance criteria quoted back into the test-first block.
     # Generous — criteria are the definition of done and truncating one loses a
     # test; a runaway description still cannot swamp the prompt.
@@ -59,6 +63,20 @@ class SingleAgentEngineer(BaseAgent):
         criteria = self.truncate_to_tokens(criteria, self.CRITERIA_TOKEN_BUDGET)
         print("[single_agent] acceptance criteria present — test-first mode", file=sys.stderr)
         return "\n" + prompts.render("test-first", criteria=criteria) + "\n"
+
+    def _lessons_block(self, state: TeamState) -> str:
+        """Retros from tickets this project already shipped.
+
+        The lessons store only pays for itself if what is in it reaches the
+        agent that could act on it, so the builder is where it is spent — one
+        bounded block, below the task and the project context.
+        """
+        lessons = (state.get("retro_lessons") or "").strip()
+        if not lessons:
+            return ""
+        lessons = self.truncate_to_tokens(lessons, self.LESSONS_TOKEN_BUDGET)
+        print("[single_agent] carrying past ticket retros into context", file=sys.stderr)
+        return "\n" + lessons + "\n"
 
     def _max_turns(self, *, test_first: bool) -> int:
         """The turn budget for this build. Test-first work spends turns on the
@@ -87,6 +105,7 @@ class SingleAgentEngineer(BaseAgent):
             task=task,
             test_first_block=test_first_block,
             context_block=context_block,
+            lessons_block=self._lessons_block(state),
         )
 
         cfg = self.settings.get_agent_config("single_agent")

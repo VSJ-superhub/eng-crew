@@ -7,7 +7,7 @@ lifecycle:
     backlog -> ready -> in_progress -> in_review -> in_qa -> done -> shipped
                                                         \\-> rejected -/
 
-Two rules make the lifecycle worth having rather than decorative:
+Three rules make the lifecycle worth having rather than decorative:
 
   - **Acceptance criteria gate.** A ticket cannot reach ``ready`` without
     acceptance criteria. "Ready" means an agent could pick it up and know when
@@ -15,6 +15,9 @@ Two rules make the lifecycle worth having rather than decorative:
   - **WIP limit.** There is no sprint. Work is a continuous queue, and the only
     thing bounding how much is in flight at once is the limit checked here
     (``ENG_CREW_WIP_LIMIT``). Nothing enters ``in_progress`` past the limit.
+  - **Retro on ship.** Reaching ``shipped`` writes the ticket's history into the
+    lessons store (:mod:`eng_crew.retro`), where the next ticket's builder will
+    read it. A lifecycle whose end produces nothing is a queue, not a process.
 
 Every accepted move is written to ``ticket_events`` with the actor who made it,
 so a ticket's history is auditable — who moved it, when, and why. The rules live
@@ -72,7 +75,7 @@ LEGACY_STATUS = {
 #: that says "this is live for users", and no agent gets to decide that.
 ROBOTS: frozenset[str] = frozenset({
     "queue", "cleanup", "system", "migration", "planner", "manager",
-    "architect", "builder", "reviewer", "qa", "budget",
+    "architect", "builder", "reviewer", "qa", "budget", "retro",
 })
 
 
@@ -165,6 +168,16 @@ def move(ticket_id: int, to_status: str, actor: str, note: str = "",
         raise TransitionRefused(
             f"ticket {ticket_id} changed status underneath us; it is no longer {from_status}"
         )
+
+    if to_status == SHIPPED:
+        # Shipping is the last thing that happens to a ticket, which makes it
+        # the only moment its history is complete. The retro is written here,
+        # next to the budget check and for the same reason: every surface that
+        # can ship one goes through this function. It never raises — the ticket
+        # has already shipped.
+        from . import retro
+        retro.on_shipped(ticket_id, settings)
+
     return tracker.get_backlog_item(ticket_id) or ticket
 
 

@@ -340,6 +340,11 @@ def _init_db():
             # pick up the configured default rather than being frozen at it.
             if "budget_usd" not in bl_cols:
                 _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN budget_usd REAL")
+            # The branch a run produced. The retro reads a shipped ticket's
+            # history back and wants to know which files its runs touched;
+            # without the branch there is nothing to diff against.
+            if "git_branch" not in run_cols:
+                _alter(_mig, "ALTER TABLE runs ADD COLUMN git_branch TEXT DEFAULT ''")
             if "ticket_id" not in run_cols:
                 _alter(_mig, "ALTER TABLE runs ADD COLUMN ticket_id INTEGER REFERENCES backlog_items(id)")
                 _mig.execute(
@@ -508,6 +513,18 @@ def update_run_log_path(run_id: int, log_path: str) -> None:
     with _lock:
         with _connect() as conn:
             conn.execute("UPDATE runs SET log_path=? WHERE id=?", (log_path, run_id))
+
+
+def update_run_branch(run_id: int, branch: str) -> None:
+    """Record the branch a run is building on, so its diff can be found later."""
+    try:
+        with _lock:
+            with _connect() as conn:
+                conn.execute(
+                    "UPDATE runs SET git_branch=? WHERE id=?", (branch or "", run_id)
+                )
+    except Exception as e:
+        print(f"[tracker] update_run_branch error: {e}", file=sys.stderr)
 
 
 def update_run_subtask_count(run_id: int, total: int):
@@ -1238,6 +1255,23 @@ def list_plan_tickets(plan_id: int) -> list[dict]:
         (plan_id,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_ticket_runs(ticket_id: int) -> list[dict]:
+    """Every run that attempted this ticket, oldest first.
+
+    The retro is written from all of them, not just the last: how many builds a
+    ticket took is one of the few things its history says about difficulty.
+    """
+    try:
+        con = _connect()
+        rows = con.execute(
+            "SELECT * FROM runs WHERE ticket_id=? ORDER BY id ASC", (ticket_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[tracker] get_ticket_runs error: {e}", file=sys.stderr)
+        return []
 
 
 def get_ticket_run(ticket_id: int) -> dict | None:
