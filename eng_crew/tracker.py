@@ -154,6 +154,10 @@ def _init_db():
                 priority            INTEGER DEFAULT 50,
                 status              TEXT DEFAULT 'backlog',
                 acceptance_criteria TEXT DEFAULT '',
+                -- What this ticket may spend across all of its runs. NULL means
+                -- "the configured default" (ENG_CREW_TICKET_BUDGET_USD), so
+                -- changing that default moves every ticket that never set one.
+                budget_usd          REAL,
                 plan_id             INTEGER REFERENCES project_plans(id),
                 created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );
@@ -332,6 +336,10 @@ def _init_db():
                 _migrate_ticket_statuses(_mig)
             if "plan_id" not in bl_cols:
                 _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN plan_id INTEGER REFERENCES project_plans(id)")
+            # A ticket's spend authority. Left NULL for existing tickets so they
+            # pick up the configured default rather than being frozen at it.
+            if "budget_usd" not in bl_cols:
+                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN budget_usd REAL")
             if "ticket_id" not in run_cols:
                 _alter(_mig, "ALTER TABLE runs ADD COLUMN ticket_id INTEGER REFERENCES backlog_items(id)")
                 _mig.execute(
@@ -1055,18 +1063,22 @@ def add_backlog_item(title: str, description: str, project_path: str,
                      claude_md_path: str, priority: int = 50,
                      project_id: int = None, item_type: str = 'feature',
                      acceptance_criteria: str = "", created_by: str = "user",
-                     plan_id: int = None) -> int:
-    """Create a ticket. It starts in `backlog`; use tickets.move to advance it."""
+                     plan_id: int = None, budget_usd: float | None = None) -> int:
+    """Create a ticket. It starts in `backlog`; use tickets.move to advance it.
+
+    ``budget_usd`` overrides the configured default spend authority for this one
+    ticket; None leaves it on the default.
+    """
     from .tickets import BACKLOG
 
     with _lock:
         with _connect() as con:
             cur = con.execute(
                 "INSERT INTO backlog_items (title, description, project_path, claude_md_path,"
-                " priority, project_id, type, status, acceptance_criteria, plan_id)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                " priority, project_id, type, status, acceptance_criteria, plan_id, budget_usd)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (title, description, project_path, claude_md_path, priority, project_id,
-                 item_type, BACKLOG, acceptance_criteria, plan_id),
+                 item_type, BACKLOG, acceptance_criteria, plan_id, budget_usd),
             )
             ticket_id = cur.lastrowid
             con.execute(
@@ -1145,6 +1157,38 @@ def recalculate_run_cost(run_id: int) -> float:
     except Exception as e:
         print(f"[tracker] recalculate_run_cost error: {e}", file=sys.stderr)
         return 0.0
+
+
+def ticket_spend(ticket_id: int) -> float:
+    """Everything charged to a ticket, across every run that attempted it.
+
+    A run's stored total is written by finish_run, but paid steps land after
+    that — the ticket review is one, and a repair pass logs against a run the
+    gate has not closed yet — so per run this takes whichever of the two
+    figures is larger rather than trusting either alone.
+    """
+    try:
+        con = _connect()
+        rows = con.execute(
+            """SELECT COALESCE(r.total_cost_usd, 0.0) AS stored,
+                      COALESCE((SELECT SUM(cost_usd) FROM subtask_events
+                                WHERE run_id = r.id), 0.0) AS charged
+               FROM runs r WHERE r.ticket_id = ?""",
+            (ticket_id,),
+        ).fetchall()
+        return float(sum(max(float(r["stored"]), float(r["charged"])) for r in rows))
+    except Exception as e:
+        print(f"[tracker] ticket_spend error: {e}", file=sys.stderr)
+        return 0.0
+
+
+def get_run_ticket_id(run_id: int) -> int | None:
+    """The ticket a run attempts, or None for a run nobody filed a ticket for."""
+    if not run_id:
+        return None
+    con = _connect()
+    row = con.execute("SELECT ticket_id FROM runs WHERE id=?", (run_id,)).fetchone()
+    return int(row["ticket_id"]) if row and row["ticket_id"] is not None else None
 
 
 def get_ticket_events(ticket_id: int) -> list[dict]:

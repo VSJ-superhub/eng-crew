@@ -72,7 +72,7 @@ LEGACY_STATUS = {
 #: that says "this is live for users", and no agent gets to decide that.
 ROBOTS: frozenset[str] = frozenset({
     "queue", "cleanup", "system", "migration", "planner", "manager",
-    "architect", "builder", "reviewer", "qa",
+    "architect", "builder", "reviewer", "qa", "budget",
 })
 
 
@@ -144,6 +144,14 @@ def move(ticket_id: int, to_status: str, actor: str, note: str = "",
         raise TransitionRefused(
             f"ticket {ticket_id} has no acceptance criteria — it cannot be ready"
         )
+
+    if to_status == IN_PROGRESS:
+        # Entering in_progress is a build about to start, which is the first
+        # place a ticket spends money. Spend authority is checked here so every
+        # surface that can launch one — the queue, the dashboard, the CLI —
+        # is bound by it without each having to remember.
+        from . import budget
+        budget.check(ticket_id, "a build", settings=settings)
 
     if to_status == IN_PROGRESS and from_status not in IN_FLIGHT:
         state = wip(ticket.get("project_path") or "", settings)

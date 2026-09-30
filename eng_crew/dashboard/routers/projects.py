@@ -9,7 +9,7 @@ import re
 import json
 from pathlib import Path
 
-from ... import tickets
+from ... import budget, tickets
 
 from ...tracker import (
     add_backlog_item,
@@ -132,6 +132,9 @@ async def api_ticket_get(ticket_id: int):
 
     return JSONResponse({
         "ticket": ticket,
+        # What this ticket may spend and what it has spent, side by side: the
+        # number a person needs when a build was stopped for budget.
+        "budget": budget.status(ticket_id),
         "events": tickets.events(ticket_id),
         # The verdict on the ticket's last review, pulled out of the history so
         # a ticket held back at in_review can show why without reading events.
@@ -155,13 +158,34 @@ async def api_ticket_status(ticket_id: int, payload: TicketStatusIn):
         return JSONResponse({"error": str(exc)}, status_code=409)
     return JSONResponse({"ok": True, "ticket": ticket})
 
+class TicketBudgetIn(BaseModel):
+    """A new spend authority for a ticket, and who authorised it."""
+    budget_usd: float
+    actor: str = "user"
+
+
+@router.put("/tickets/{ticket_id}/budget")
+async def api_ticket_budget(ticket_id: int, payload: TicketBudgetIn):
+    """Change a ticket's budget. Raising it is what releases stopped work.
+
+    This starts nothing: authorising more spend and deciding to build again are
+    separate calls, and the second one is the person's too.
+    """
+    if not get_backlog_item(ticket_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if payload.budget_usd < 0:
+        return JSONResponse({"error": "a budget cannot be negative"}, status_code=400)
+    state = budget.set_budget(ticket_id, payload.budget_usd, payload.actor)
+    return JSONResponse({"ok": True, "budget": state})
+
+
 @router.get("/projects/{project_id}/queue")
 async def api_project_queue(project_id: int):
     """The continuous queue: every ticket, plus WIP accounting."""
     p = get_project(project_id)
     if not p:
         return JSONResponse({"error": "not found"}, status_code=404)
-    all_tickets = list_project_tickets(p["project_path"])
+    all_tickets = [budget.annotate(t) for t in list_project_tickets(p["project_path"])]
     return JSONResponse({
         "project": p,
         "tickets": all_tickets,
@@ -550,12 +574,23 @@ async def api_run_queue(project_id: int):
     if not waiting:
         return JSONResponse({"started": [], "refused": [], "waiting": 0, "wip": state})
 
-    ticket = waiting[0]
+    # A ticket that has spent its budget is waiting on a person, not on the
+    # queue. Pulling it would be refused every time and block everything behind
+    # it, so the queue passes over it and says so.
+    over_budget = [t for t in waiting if (budget.status(t["id"]) or {}).get("exhausted")]
+    pullable = [t for t in waiting if t not in over_budget]
+    held = [{"ticket_id": t["id"], "detail": "over budget — needs a human decision"}
+            for t in over_budget]
+    if not pullable:
+        return JSONResponse({"started": [], "refused": held,
+                             "waiting": len(waiting), "wip": state})
+
+    ticket = pullable[0]
     ok, detail = launch_ticket_run(ticket["id"], actor="queue")
     entry = {"ticket_id": ticket["id"], "detail": detail}
     return JSONResponse({
         "started": [entry] if ok else [],
-        "refused": [] if ok else [entry],
+        "refused": held + ([] if ok else [entry]),
         "waiting": len(waiting) - (1 if ok else 0),
         "wip": tickets.wip(path),
     })

@@ -42,6 +42,16 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   in_review with the reasons attached and starts no new build. `done → shipped`
   is refused for every eng-crew actor (`tickets.ROBOTS`) — shipping is a human
   action.
+- Every ticket carries a spending budget (`eng_crew/budget.py`) — the
+  configured default (`ENG_CREW_TICKET_BUDGET_USD`, $15) unless the ticket
+  overrides it. A ticket's spend is the total of every run charged to it,
+  repair passes and reviews included. Because a model call cannot be
+  interrupted mid-flight, the budget is enforced where a *new* paid step would
+  start: entering `in_progress` (a build), and before a repair pass or a
+  review. The step already running finishes; the next one does not begin. A
+  stopped ticket records why in `ticket_events` and waits — nothing retries it.
+  Raising the budget (`eng-crew budget <id> <amount>`, or the dashboard) is what
+  releases it. A run with no ticket is never budget-checked.
 - Agent prompts live in `.claude/skills/<name>/SKILL.md` (frontmatter + template),
   loaded by `eng_crew/prompts.py` — edit a prompt without touching agent code.
 - Runs execute in their own git worktree and branch (`worktree_isolation`, on by

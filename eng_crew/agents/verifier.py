@@ -13,7 +13,7 @@ import sys
 from dataclasses import replace as dc_replace
 
 from .base import BaseAgent
-from .. import prompts, tickets, tracker, verify as verify_mod
+from .. import budget, prompts, tickets, tracker, verify as verify_mod
 from ..providers import call_llm
 from ..providers.base import LLMResult
 from ..state import TeamState
@@ -54,6 +54,14 @@ class VerifierAgent(BaseAgent):
         attempts = 0
         repair_account = ""
         while not result.passed and attempts < max_fixes:
+            # A repair pass is a new paid step. The build that just overran its
+            # ticket's budget was allowed to finish — this is where the spending
+            # stops, before another agent session starts. A run with no ticket
+            # has no budget and is never held here.
+            if not budget.allows_for_run(run_id, "a repair pass", self.settings):
+                print("[verify] repair skipped — the ticket is over budget",
+                      file=sys.stderr)
+                break
             attempts += 1
             # Each pass may implicate different tests; a file stays editable
             # if any pass was handed a failure naming it.

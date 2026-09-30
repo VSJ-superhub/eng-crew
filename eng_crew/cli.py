@@ -172,6 +172,7 @@ def queue(
 ) -> None:
     """Show a project's ticket queue and how much work is in flight."""
     cfg = load_settings(env_file)
+    from eng_crew import budget as budget_mod
     from eng_crew import tickets, tracker
 
     path = str(project_path)
@@ -192,13 +193,52 @@ def queue(
     table.add_column("Status")
     table.add_column("Title")
     table.add_column("AC", justify="center")
+    table.add_column("Spend")
     for t in rows:
+        spend = budget_mod.annotate(t, cfg)
+        money = f"${spend['spent_usd']:.2f}/${spend['budget_usd']:.2f}"
         table.add_row(
             str(t["id"]), str(t.get("priority", "")), str(t.get("status", "")),
             str(t.get("title", ""))[:60],
             "yes" if (t.get("acceptance_criteria") or "").strip() else "[red]no[/red]",
+            f"[red]{money}[/red]" if spend["budget_exhausted"] else money,
         )
     console.print(table)
+
+
+@app.command()
+def budget(
+    ticket_id: int = typer.Argument(..., help="Ticket ID (see `eng-crew queue`)."),
+    amount: Optional[float] = typer.Argument(
+        None, help="New budget in USD. Omit to just show what the ticket has spent."
+    ),
+    actor: str = typer.Option("user", "--actor", help="Who is authorising the change."),
+    env_file: Optional[Path] = typer.Option(None, "--env", help="Path to .env file."),
+) -> None:
+    """Show or change a ticket's spend authority.
+
+    Raising it is what releases a ticket whose work was stopped for budget; the
+    next build picks up the new figure. This starts no run.
+    """
+    if amount is not None and amount < 0:
+        console.print("[red]a budget cannot be negative[/red]")
+        raise typer.Exit(1)
+    cfg = load_settings(env_file)
+    from eng_crew import budget as budget_mod
+
+    state = (
+        budget_mod.set_budget(ticket_id, amount, actor, settings=cfg)
+        if amount is not None
+        else budget_mod.status(ticket_id, cfg)
+    )
+    if not state:
+        console.print(f"[red]no ticket {ticket_id}[/red]")
+        raise typer.Exit(1)
+    colour = "red" if state["exhausted"] else "green"
+    console.print(
+        f"ticket {ticket_id}: [{colour}]${state['spent_usd']:.2f}[/] spent of "
+        f"${state['budget_usd']:.2f} (${state['remaining_usd']:.2f} left)"
+    )
 
 
 @app.command()

@@ -398,3 +398,30 @@ def test_resume_releases_a_live_paused_run_without_relaunching(client, project, 
     assert resp.json()["unpaused"] is True
     assert tracker.is_pause_requested(run_id) is False
     assert relaunched == [], "resume restarted the task instead of releasing it"
+
+
+def test_a_ticket_over_budget_does_not_block_the_queue(client, project, no_real_launches):
+    """An over-budget ticket at the head of the queue would be refused on every
+    pull. The queue passes over it — reporting it as held — and builds the next."""
+    stuck = ready_ticket(client, project, "spent out", priority=10)
+    client.put(f"/api/tickets/{stuck}/budget", json={"budget_usd": 0, "actor": "tester"})
+    nxt = ready_ticket(client, project, "next in line", priority=20)
+
+    body = client.post(f"/api/projects/{project['id']}/queue/run").json()
+
+    assert [s["ticket_id"] for s in body["started"]] == [nxt]
+    assert [r["ticket_id"] for r in body["refused"]] == [stuck]
+    assert "budget" in body["refused"][0]["detail"]
+    assert _wait_for(lambda: len(no_real_launches) == 1), "the next ticket was never built"
+    assert tracker.get_backlog_item(stuck)["status"] == "ready"
+
+
+def test_a_queue_of_only_over_budget_tickets_starts_nothing(client, project, no_real_launches):
+    stuck = ready_ticket(client, project, "spent out")
+    client.put(f"/api/tickets/{stuck}/budget", json={"budget_usd": 0, "actor": "tester"})
+
+    body = client.post(f"/api/projects/{project['id']}/queue/run").json()
+
+    assert body["started"] == []
+    assert [r["ticket_id"] for r in body["refused"]] == [stuck]
+    assert no_real_launches == []
