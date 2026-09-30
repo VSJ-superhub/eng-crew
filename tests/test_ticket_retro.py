@@ -209,3 +209,38 @@ def test_a_build_with_no_lessons_gets_an_unchanged_prompt(db, monkeypatch):
                "project_context": "", "retro_lessons": ""})
     assert "LESSONS FROM PAST TICKETS" not in prompts_seen[0]
     assert "{lessons_block}" not in prompts_seen[0], "the placeholder must be filled"
+
+
+def _git(*args, cwd):
+    import subprocess
+    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def test_branch_files_still_found_after_the_branch_is_merged(tmp_path):
+    """A ticket ships after its branch is merged, so the retro's file list has
+    to survive the merge — a plain HEAD...branch diff is empty by then."""
+    from eng_crew import git_skill
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    _git("init", "-q", "-b", "main", cwd=root)
+    _git("config", "user.email", "t@example.com", cwd=root)
+    _git("config", "user.name", "Test", cwd=root)
+    (root / "app.py").write_text("v1\n", encoding="utf-8")
+    _git("add", "-A", cwd=root)
+    _git("commit", "-qm", "init", cwd=root)
+    _git("checkout", "-qb", "ai-team/feat", cwd=root)
+    (root / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    _git("add", "-A", cwd=root)
+    _git("commit", "-qm", "feat", cwd=root)
+    _git("checkout", "-q", "main", cwd=root)
+    (root / "other.py").write_text("y = 2\n", encoding="utf-8")
+    _git("add", "-A", cwd=root)
+    _git("commit", "-qm", "unrelated work on main", cwd=root)
+
+    assert git_skill.branch_files(root, "ai-team/feat") == ["feature.py"]
+
+    _git("merge", "-q", "--no-ff", "--no-edit", "ai-team/feat", cwd=root)
+    assert git_skill.branch_files(root, "ai-team/feat") == ["feature.py"]
