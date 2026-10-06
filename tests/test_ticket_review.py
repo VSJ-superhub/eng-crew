@@ -63,7 +63,7 @@ def landed_ticket(*, run_status="completed", criteria="- the button is blue",
 
     launches: list[dict] = []
 
-    def fake_pipeline(*, task, project_path, settings, run_id):
+    def fake_pipeline(*, task, project_path, settings, run_id, base_branch=None):
         launches.append({"task": task, "run_id": run_id})
         tracker.finish_run(run_id, status=run_status)
         return {"git_branch": "ai-team/x", "main_project_path": project_path}

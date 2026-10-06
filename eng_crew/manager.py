@@ -11,6 +11,10 @@ a human moving the ticket to ``ready`` is the approval, and the existing ticket 
 builds it from there. That is why there is no dispatch here any more — a free-text task
 fired straight at the builder skipped both the approval and the definition of done.
 
+A task dispatched with no acceptance criteria goes through the manager too, without
+the conversation: :func:`draft_ticket` writes the definition of done from the task and
+the real code. It still starts nothing — the dispatcher readies the ticket.
+
 Design invariants:
   - The manager is GROUNDED: claude_cli with Read/Grep/Glob and cwd=project, so its
     ideas reflect the real code, not a vacuum. (Contrast the old dashboard intake,
@@ -167,6 +171,69 @@ def chat(
     )
     reply, proposal = _extract_proposal(result.text or "")
     return ManagerReply(reply=reply or "(no response)", proposal=proposal)
+
+
+_DRAFT_SYSTEM = """You are a senior engineering program manager and tech lead. Someone has handed the engineering team a task in free text, with no definition of done. Your job is to turn it into ONE buildable ticket, grounded in the real codebase.
+
+How you work:
+- Read the actual project first with Read, Grep, and Glob. The criteria must be checkable against this code, not against a guess.
+- Do not ask questions and do not converse — there is nobody to answer you. Commit to the most reasonable reading of the task.
+- Do not widen the task. The ticket is the work as asked, with the finish line made explicit.
+- You do NOT write code.
+
+Reply with EXACTLY one fenced block and nothing else:
+
+```ticket
+{"title": "<short imperative title>", "description": "<what the work is, in a sentence or two, self-contained enough to act on>", "acceptance_criteria": ["<observable condition that must hold when this is done>", "..."], "rationale": "<one sentence: how this fits the code you read>"}
+```
+
+acceptance_criteria is mandatory and must be concrete, checkable statements about behaviour — not restatements of the title. A ticket with no acceptance criteria cannot be approved for build, so leaving them out blocks the work."""
+
+
+class DraftFailed(RuntimeError):
+    """The manager did not return a usable ticket for a task."""
+
+
+def draft_ticket(task: str, project_path: str = ".", project_context: str = "") -> dict:
+    """Draft a ticket for a free-text task, grounded in the project's code.
+
+    This is the manager doing its job for a caller that skipped the ideation
+    conversation — `run_task` with no acceptance criteria given. Same grounded,
+    read-only agent, one shot instead of a dialogue: a task dispatched with no
+    definition of done cannot be reviewed against anything, and the lifecycle
+    will not make such a ticket ready.
+
+    Returns a proposal dict in the shape :func:`accept` takes. Raises
+    :class:`DraftFailed` if the manager returned no usable ticket — the caller
+    must then supply acceptance criteria itself rather than get a ticket nobody
+    can judge.
+    """
+    text = str(task or "").strip()
+    if not text:
+        raise DraftFailed("there is no task to draft a ticket from")
+
+    parts = [_DRAFT_SYSTEM]
+    if project_context:
+        parts.append(
+            f"\n=== PROJECT ORIENTATION (for context; verify against the code) ===\n{project_context}"
+        )
+    parts.append(f"\n=== THE TASK AS IT WAS HANDED TO THE TEAM ===\n{text}")
+    result = call_llm(
+        MANAGER_PROVIDER,
+        MANAGER_MODEL,
+        "\n".join(parts),
+        allowed_tools=MANAGER_TOOLS,
+        max_turns=MANAGER_MAX_TURNS,
+        cwd=project_path,
+    )
+    _, proposal = _extract_proposal(result.text or "")
+    if not proposal:
+        raise DraftFailed("the manager returned no ticket for this task")
+    # A drafted ticket with no criteria is the one thing this call exists to
+    # produce, so an empty list is a failure here rather than a warning.
+    if not proposal["acceptance_criteria"]:
+        raise DraftFailed("the manager drafted no acceptance criteria for this task")
+    return proposal
 
 
 def accept(proposal: dict, project_path: str, *, actor: str = "manager",

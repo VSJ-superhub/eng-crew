@@ -249,6 +249,11 @@ def ticket(
     log_path: Optional[Path] = typer.Option(
         None, "--log-path", help="Where this run's output is being captured."
     ),
+    base: Optional[str] = typer.Option(
+        None, "--base",
+        help="Branch (or tag/SHA) to base this ticket's run on, instead of the "
+             "project checkout's current HEAD.",
+    ),
 ) -> None:
     """Build one ticket — the ticket's own text, not a placeholder."""
     cfg = load_settings(env_file)
@@ -261,7 +266,13 @@ def ticket(
     from eng_crew.run import run_ticket
 
     try:
-        run_ticket(ticket_id, actor="cli", log_path=str(log_path) if log_path else None, settings=cfg)
+        run_ticket(
+            ticket_id,
+            actor="cli",
+            log_path=str(log_path) if log_path else None,
+            base_branch=base,
+            settings=cfg,
+        )
     except _tickets.TransitionRefused as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)

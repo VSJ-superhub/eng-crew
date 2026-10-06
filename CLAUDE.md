@@ -61,6 +61,14 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   feeds the relevant past retros (ranked by overlap with the task, this
   project's first) into the builder's prompt, so the lessons are read by the
   agent that could act on them rather than sitting in a table.
+- Dispatching a free-text task (`run_task`, the MCP tool) files a **ticket** and
+  builds that (`eng_crew/dispatch.py`), so the build gets the independent review,
+  the spending cap and the retro a ticket's build gets. Acceptance criteria come
+  from the caller, or the Manager drafts them from the task and the real codebase
+  when none are given — a dispatch with no definition of done files a ticket and
+  starts nothing. Dispatching is the human's approval, so it is what moves the
+  ticket to `ready`. Over the WIP limit the ticket is filed and readied but no
+  build starts, and the caller is told it is queued.
 - Agent prompts live in `.claude/skills/<name>/SKILL.md` (frontmatter + template),
   loaded by `eng_crew/prompts.py` — edit a prompt without touching agent code.
 - Runs execute in their own git worktree and branch (`worktree_isolation`, on by
