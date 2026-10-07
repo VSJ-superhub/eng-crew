@@ -360,6 +360,11 @@ def _init_db():
             print(f"[tracker] MIGRATION WARNING: {e}", file=sys.stderr)
 
 
+#: How long a ticket may sit in in_progress with no run before cleanup treats the
+#: claim as abandoned and returns it to backlog.
+ORPHAN_CLAIM_GRACE_MINUTES = 15
+
+
 def cleanup_stale_backlog_items() -> int:
     """Unstick work whose run is over but whose row still says it is in flight.
 
@@ -412,10 +417,18 @@ def cleanup_stale_backlog_items() -> int:
                     conn, REJECTED, lost, "run failed"
                 )
 
+                # A dispatch claims its ticket before the build process that
+                # creates the run has started — and that process runs this very
+                # cleanup on import. Only a claim that has sat run-less for a
+                # while is an orphan.
                 orphans = conn.execute(
-                    """SELECT id FROM backlog_items
-                       WHERE status=? AND COALESCE(type,'') != 'subtask' AND run_id IS NULL""",
-                    (IN_PROGRESS,),
+                    """SELECT b.id FROM backlog_items b
+                       WHERE b.status=? AND COALESCE(b.type,'') != 'subtask'
+                         AND b.run_id IS NULL
+                         AND COALESCE((SELECT MAX(e.created_at) FROM ticket_events e
+                                       WHERE e.ticket_id = b.id), '')
+                             < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)""",
+                    (IN_PROGRESS, f"-{ORPHAN_CLAIM_GRACE_MINUTES} minutes"),
                 ).fetchall()
                 if orphans:
                     ids = [r[0] for r in orphans]

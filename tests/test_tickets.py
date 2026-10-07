@@ -392,12 +392,33 @@ def test_cleanup_rejects_a_ticket_whose_run_failed(db):
     assert tracker.get_backlog_item(ticket_id)["status"] == tickets.REJECTED
 
 
+def _age_ticket_events(ticket_id: int, minutes: int) -> None:
+    with tracker._connect() as conn:
+        conn.execute(
+            "UPDATE ticket_events SET created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)"
+            " WHERE ticket_id = ?",
+            (f"-{minutes} minutes", ticket_id),
+        )
+
+
 def test_cleanup_returns_a_ticket_with_no_run_to_the_backlog(db):
     ticket_id = ready_ticket()
     tickets.move(ticket_id, tickets.IN_PROGRESS, "tester")
+    _age_ticket_events(ticket_id, tracker.ORPHAN_CLAIM_GRACE_MINUTES + 1)
 
     tracker.cleanup_stale_backlog_items()
     assert tracker.get_backlog_item(ticket_id)["status"] == tickets.BACKLOG
+
+
+def test_cleanup_leaves_a_just_claimed_ticket_for_its_starting_build(db):
+    """A dispatch claims the ticket, then launches a build process that runs this
+    cleanup on import before it has created the run. Resetting that claim made
+    every dispatched build refuse to start."""
+    ticket_id = ready_ticket()
+    tickets.move(ticket_id, tickets.IN_PROGRESS, "tester")
+
+    assert tracker.cleanup_stale_backlog_items() == 0
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.IN_PROGRESS
 
 
 def test_cleanup_leaves_a_ticket_whose_run_is_still_going(db):
