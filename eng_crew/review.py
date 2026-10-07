@@ -76,11 +76,14 @@ _SANDBOX_MODEL = "claude-haiku-4-5-20251001"
 #: The reviewer judges the diff it was handed and nothing else.
 NO_TOOLS = (
     "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "BashOutput",
-    "KillShell", "Glob", "Grep", "Task", "WebFetch", "WebSearch", "TodoWrite",
+    "KillShell", "Glob", "Grep", "Task", "Agent", "Skill", "SlashCommand",
+    "ToolSearch", "WebFetch", "WebSearch", "TodoWrite",
 )
 
-#: What the sandboxed CLI call is given: no tools, and one turn — it answers.
-SANDBOX_KWARGS = {"disallowed_tools": ",".join(NO_TOOLS), "max_turns": 1}
+#: What the sandboxed CLI call is given: no built-in tools, no MCP servers (the
+#: diff is untrusted text, and the user's servers can dispatch, mail or trade),
+#: and one turn — it answers.
+SANDBOX_KWARGS = {"disallowed_tools": ",".join(NO_TOOLS), "no_mcp": True, "max_turns": 1}
 
 #: The key each API provider needs. A provider with no key cannot be reached,
 #: and that is an outage, not a rejection.

@@ -254,6 +254,7 @@ def test_a_cli_only_setup_reviews_through_the_claude_cli_with_no_tools(db, revie
         assert tool in disallowed, f"the reviewing CLI could still use {tool}"
     assert not call["kwargs"].get("allowed_tools"), \
         "the reviewing CLI was handed an allow-list of tools"
+    assert call["kwargs"].get("no_mcp"), "the reviewing CLI could reach MCP servers"
 
 
 def test_the_reviews_cost_is_recorded_against_the_run(db, reviewer):

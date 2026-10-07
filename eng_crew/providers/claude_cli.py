@@ -114,6 +114,10 @@ class ClaudeCLIProvider(Provider):
         disallowed_tools = kwargs.get("disallowed_tools")
         if disallowed_tools:
             cmd.extend(["--disallowedTools", disallowed_tools])
+        # --strict-mcp-config with no --mcp-config loads no MCP servers at all,
+        # so a sandboxed session cannot reach the user's own (dispatch, mail...).
+        if kwargs.get("no_mcp"):
+            cmd.append("--strict-mcp-config")
         resume_session = kwargs.get("resume_session")
         if resume_session:
             cmd.extend(["--resume", str(resume_session)])
