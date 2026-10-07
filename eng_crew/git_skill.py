@@ -25,7 +25,10 @@ def _git(args: list[str], cwd: Path) -> str:
         ["git", *args],
         cwd=cwd,
         capture_output=True,
-        text=True,
+        # Git emits UTF-8; the locale default on Windows is cp1252, which cannot
+        # decode an em-dash and left stdout None — so most diffs read as nothing.
+        encoding="utf-8",
+        errors="replace",
     )
     if result.returncode != 0:
         raise GitError(result.stderr.strip() or result.stdout.strip())

@@ -189,3 +189,14 @@ def test_ensure_branch_honours_a_base(repo):
     )
     assert git_skill.current_branch(repo) == branch
     assert (repo / "based.py").is_file()
+
+
+def test_branch_diff_reads_non_ascii_changes(repo):
+    """Git emits UTF-8. Decoded with the Windows locale (cp1252), a curly quote
+    or em-dash made the diff unreadable, so the ticket reviewer judged nothing."""
+    wt = git_skill.create_worktree(repo, "ai-team/test-utf8")
+    (wt / "app.py").write_text("print(“v2 — done”)\n", encoding="utf-8")
+    _git("commit", "-qam", "utf8 change", cwd=wt)
+
+    diff = git_skill.branch_diff(repo, "ai-team/test-utf8", base="main")
+    assert "“v2 — done”" in diff
