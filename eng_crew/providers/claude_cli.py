@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Callable, Iterator
 
@@ -39,6 +40,18 @@ def _cli_env() -> dict[str, str]:
     """Parent env minus the auth vars that shadow the CLI's own credentials."""
     return {k: v for k, v in os.environ.items() if k not in _AUTH_VARS_TO_STRIP}
 
+
+def _feed(stdin, text: str) -> None:
+    """Write the prompt to the CLI and close stdin so it starts."""
+    try:
+        stdin.write(text)
+    except (BrokenPipeError, OSError, ValueError):
+        pass  # the process died early; its exit code and stderr say why
+    finally:
+        try:
+            stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
 
 
 def summarize_event(evt: dict) -> str:
@@ -97,8 +110,11 @@ class ClaudeCLIProvider(Provider):
     # ------------------------------------------------------------------
 
     def _build_cmd(self, model: str, prompt: str, kwargs: dict) -> list[str]:
+        # The prompt goes on stdin, not argv: Windows caps a command line at
+        # 32767 chars, and a review prompt carrying a 30k diff blew past it
+        # (WinError 206) — every retry failed and the call returned nothing.
         cmd = [
-            "claude", "-p", prompt,
+            "claude", "-p",
             # stream-json requires --verbose when used with --print.
             "--output-format", "stream-json",
             "--verbose",
@@ -123,10 +139,11 @@ class ClaudeCLIProvider(Provider):
             cmd.extend(["--resume", str(resume_session)])
         return cmd
 
-    def _stream(self, cmd: list[str], cwd: str) -> Iterator[dict]:
+    def _stream(self, cmd: list[str], cwd: str, prompt: str = "") -> Iterator[dict]:
         """Yield parsed events as the CLI emits them."""
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -136,6 +153,10 @@ class ClaudeCLIProvider(Provider):
             cwd=cwd,
             env=_cli_env(),
         )
+        # Written from a thread so a large prompt cannot deadlock against a
+        # full stdout pipe.
+        writer = threading.Thread(target=_feed, args=(proc.stdin, prompt), daemon=True)
+        writer.start()
         try:
             for line in proc.stdout:
                 line = line.strip()
@@ -157,7 +178,8 @@ class ClaudeCLIProvider(Provider):
             self._last_returncode = proc.returncode
             self._last_stderr = stderr
 
-    def _attempt(self, cmd: list[str], cwd: str, on_event: Callable | None) -> dict:
+    def _attempt(self, cmd: list[str], cwd: str, on_event: Callable | None,
+                 prompt: str = "") -> dict:
         """One CLI invocation. Returns a dict of what the stream reported."""
         collected = {
             "text": "",
@@ -169,7 +191,7 @@ class ClaudeCLIProvider(Provider):
             "got_result": False,
         }
 
-        for evt in self._stream(cmd, cwd):
+        for evt in self._stream(cmd, cwd, prompt):
             if not collected["session_id"] and evt.get("session_id"):
                 collected["session_id"] = evt["session_id"]
 
@@ -206,7 +228,7 @@ class ClaudeCLIProvider(Provider):
 
         for attempt in range(_MAX_RETRIES):
             try:
-                got = self._attempt(cmd, cwd, on_event)
+                got = self._attempt(cmd, cwd, on_event, prompt)
             except Exception as exc:
                 print(
                     f"[claude_cli] stream error (attempt {attempt + 1}/{_MAX_RETRIES}): {exc}",

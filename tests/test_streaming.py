@@ -176,3 +176,12 @@ def test_update_run_progress_never_raises_on_a_bad_run_id():
 def test_no_mcp_loads_no_mcp_servers():
     assert "--strict-mcp-config" in _cmd(no_mcp=True)
     assert "--strict-mcp-config" not in _cmd()
+
+
+def test_prompt_goes_on_stdin_not_the_command_line():
+    """Windows caps a command line at 32767 chars; a long prompt in argv fails."""
+    long_prompt = "x" * 40000
+    cmd = ClaudeCLIProvider()._build_cmd("claude-opus-5", long_prompt, {})
+    assert long_prompt not in cmd
+    assert sum(len(c) for c in cmd) < 2000
+    assert "-p" in cmd

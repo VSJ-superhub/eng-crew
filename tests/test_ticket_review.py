@@ -44,6 +44,10 @@ def reviewer(monkeypatch):
         )
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    # Settings() reads the developer's real .env; pin the reviewer to the
+    # default API provider so a local ENG_CREW_TICKET_REVIEWER_PROVIDER does not
+    # leak in. Tests that want the CLI path pass it to Settings() explicitly.
+    monkeypatch.setenv("ENG_CREW_TICKET_REVIEWER_PROVIDER", "anthropic")
     monkeypatch.setattr(agent_base, "call_llm", fake_call_llm)
     return {"calls": calls, "box": box}
 
