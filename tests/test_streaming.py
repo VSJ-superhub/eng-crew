@@ -171,3 +171,8 @@ def test_update_run_progress_never_raises_on_a_bad_run_id():
     from eng_crew import tracker
 
     tracker.update_run_progress(999_999_999, -1, "no such run")
+
+
+def test_no_mcp_loads_no_mcp_servers():
+    assert "--strict-mcp-config" in _cmd(no_mcp=True)
+    assert "--strict-mcp-config" not in _cmd()

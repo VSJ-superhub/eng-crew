@@ -15,16 +15,55 @@ def _entropy_engine_available() -> bool:
         return False
 
 
-# Relative paths (the .env file, data_dir) are anchored here, not the process cwd:
-# the MCP server is launched by Claude Code from whatever project it is open in,
-# and resolving against that cwd silently pointed it at a stale tracking.db.
-_ENG_CREW_ROOT = Path(__file__).resolve().parent.parent
+_PKG_DIR = Path(__file__).resolve().parent              # .../eng_crew
+_ENG_CREW_ROOT = _PKG_DIR.parent                        # a checkout root, or site-packages
+
+
+def is_source_checkout(root: Path = _ENG_CREW_ROOT) -> bool:
+    """True when eng_crew is being run out of its own repository.
+
+    Installed from PyPI, ``root`` is ``site-packages``: no place for a database
+    (pip deletes it on upgrade) and a worse place for an API key. A checkout has
+    the project files next to the package, and whatever ``.env`` and
+    ``.eng-crew/`` the developer has already been using — those keep working
+    exactly as they did.
+    """
+    if not (root / "eng_crew").is_dir():
+        return False
+    return (root / "pyproject.toml").exists() or (root / ".git").exists()
+
+
+def user_dir() -> Path:
+    """Where an installed eng-crew keeps its config and data: ``~/.eng-crew``."""
+    override = os.environ.get("ENG_CREW_HOME")
+    return Path(override).expanduser() if override else Path.home() / ".eng-crew"
+
+
+def env_files(root: Path = _ENG_CREW_ROOT, cwd: Path | None = None) -> list[Path]:
+    """The .env files to read, lowest precedence first.
+
+    A checkout reads its own, and only its own — the MCP server is launched by
+    an editor from whatever project is open, so resolving against the process
+    cwd there silently pointed it at a stale tracking.db. An installed eng-crew
+    has no "own" directory, so it reads ``~/.eng-crew/.env`` and lets a ``.env``
+    in the directory you are working in override it.
+    """
+    if is_source_checkout(root):
+        return [root / ".env"]
+    return [user_dir() / ".env", (cwd or Path.cwd()) / ".env"]
+
+
+def default_data_dir(root: Path = _ENG_CREW_ROOT) -> Path:
+    """Where runs, logs and tracking.db live when ENG_CREW_DATA_DIR says nothing."""
+    if is_source_checkout(root):
+        return root / ".eng-crew"
+    return user_dir()
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="ENG_CREW_",
-        env_file=_ENG_CREW_ROOT / ".env",
+        env_file=[str(p) for p in env_files()],
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -148,7 +187,7 @@ class Settings(BaseSettings):
     # --- General ---
     budget_usd: float = 5.0
     max_tokens: int = 8192
-    data_dir: Path = Path(".eng-crew")
+    data_dir: Path = Field(default_factory=default_data_dir)
 
     # --- Rust entropy engine (auto-on when entropy_engine is installed) ---
     entropy_engine_enabled: bool = Field(default_factory=lambda: _entropy_engine_available())
@@ -183,7 +222,11 @@ class Settings(BaseSettings):
     def resolve_data_dir(cls, v: object) -> Path:
         p = Path(str(v)).expanduser()
         if not p.is_absolute():
-            p = _ENG_CREW_ROOT / p
+            # A checkout anchors a relative data_dir to the repo root, as it
+            # always has. An installed package must not: that would put the
+            # database inside site-packages.
+            base = _ENG_CREW_ROOT if is_source_checkout() else Path.cwd()
+            p = base / p
         return p.resolve()
 
     _CLI_ONLY_ROLES: frozenset = frozenset({"executor", "simple_executor", "single_agent"})
@@ -235,7 +278,31 @@ class Settings(BaseSettings):
 def load_settings(env_file: str | Path | None = None) -> Settings:
     if env_file is not None:
         return Settings(_env_file=str(env_file))
-    return Settings()
+    return Settings(_env_file=[str(p) for p in env_files()])
+
+
+def load_env_into_environ(env_file: str | Path | None = None) -> None:
+    """Put the configured .env files into os.environ without overriding it.
+
+    Surfaces that read ``os.environ`` directly — the providers, the dashboard's
+    intake chat, every subprocess a run spawns — need the keys from .env there,
+    and they must find them wherever this install keeps its .env.
+    """
+    paths = [Path(env_file)] if env_file is not None else env_files()
+    # env_files() is lowest precedence first; setdefault means first-wins.
+    for path in reversed(paths):
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip())
 
 
 settings: Settings = load_settings()

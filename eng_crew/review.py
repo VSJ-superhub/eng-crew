@@ -12,15 +12,22 @@ ticket's history.
 Three properties make it a review rather than a rubber stamp:
 
   - **It is not the builder.** A different role (``ticket_reviewer``), a
-    different, cheaper model, and a credited actor of its own. It runs on a
-    plain API provider, never a CLI one: a CLI provider is an agentic session
-    that can edit files, and a reviewer that can edit the code it is judging is
-    not a reviewer. That is refused rather than downgraded silently.
+    different, cheaper model, and a credited actor of its own. A CLI provider is
+    an agentic session that can edit files, and a reviewer that can edit the
+    code it is judging is not a reviewer — so a CLI-only setup reviews through
+    the Claude CLI with every file and shell tool disabled, the one agentic
+    provider that can be run with no tools at all.
   - **It cannot substitute for the gate.** Approval only walks a ticket onward
     when the run also passed the deterministic verification gate. An approved
     ticket whose run came back ``unverified`` stays in review.
   - **It cannot ship.** ``done -> shipped`` is a human move, enforced in
     :mod:`eng_crew.tickets`.
+
+A review that could not run is not a verdict. No API key for the configured
+provider, a provider that errors, an empty reply — none of that is evidence
+about the work, and recording it as ``changes_requested`` blames the build for
+the reviewer's outage. The ticket stays in ``in_review`` with a history event
+saying the review was unavailable and why, and a person decides what to do.
 
 A changes-requested verdict stops there deliberately: it leaves the ticket in
 ``in_review`` with the reasons attached and starts no new build. Deciding to
@@ -30,6 +37,7 @@ an auto-retry loop on an LLM verdict is how a ticket burns a budget overnight.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from . import prompts, tracker
@@ -46,6 +54,8 @@ QA_ACTOR = "qa"
 
 APPROVE = "approve"
 CHANGES_REQUESTED = "changes_requested"
+#: Not a verdict: what the ticket's history records when no review could run.
+UNAVAILABLE = "unavailable"
 
 #: Run statuses that mean the work is on a branch. Only "completed" also means
 #: the verification gate vouched for it; "unverified" is the work without the
@@ -55,6 +65,34 @@ VERIFIED = "completed"
 
 #: Providers that drive an agentic session with file tools.
 _EDITING_PROVIDERS = frozenset({"claude_cli", "gemini_cli"})
+
+#: The Claude CLI can be launched with every tool denied, so it is the provider
+#: a CLI-only setup reviews through — including when the configured CLI is a
+#: different one, which has no equivalent switch.
+_SANDBOX_PROVIDER = "claude_cli"
+_SANDBOX_MODEL = "claude-haiku-4-5-20251001"
+
+#: Every tool that could read or change the tree, or spawn something that can.
+#: The reviewer judges the diff it was handed and nothing else.
+NO_TOOLS = (
+    "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "BashOutput",
+    "KillShell", "Glob", "Grep", "Task", "Agent", "Skill", "SlashCommand",
+    "ToolSearch", "WebFetch", "WebSearch", "TodoWrite",
+)
+
+#: What the sandboxed CLI call is given: no built-in tools, no MCP servers (the
+#: diff is untrusted text, and the user's servers can dispatch, mail or trade),
+#: and one turn — it answers.
+SANDBOX_KWARGS = {"disallowed_tools": ",".join(NO_TOOLS), "no_mcp": True, "max_turns": 1}
+
+#: The key each API provider needs. A provider with no key cannot be reached,
+#: and that is an outage, not a rejection.
+_API_KEYS = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+}
 
 #: The review is one call on a bounded prompt; a huge diff is truncated rather
 #: than sent whole.
@@ -87,16 +125,36 @@ def _settings(settings: Any = None) -> Any:
     return _default
 
 
+def _missing_key(provider: str, settings: Any) -> str | None:
+    """The name of the credential this provider needs and does not have."""
+    var = _API_KEYS.get(provider)
+    if not var:
+        return None          # a CLI session or a local model: nothing to hold
+    if os.environ.get(var):
+        return None
+    return None if getattr(settings, var.lower(), "") else var
+
+
 def reviewer_config(settings: Any = None) -> dict:
-    """The provider/model the review will use. Raises if it could edit files."""
-    cfg = _settings(settings).get_agent_config(REVIEWER_ROLE)
-    if cfg["provider"] in _EDITING_PROVIDERS:
+    """The provider/model the review will use, and whether to sandbox the call.
+
+    A CLI provider is rerouted to the Claude CLI with no tools rather than
+    refused: a user whose only provider is the CLI should still get a review,
+    and a CLI that cannot read or write anything cannot edit what it judges.
+    Raises :class:`ReviewUnavailable` when the provider has no credentials.
+    """
+    cfg = _settings(settings)
+    agent = cfg.get_agent_config(REVIEWER_ROLE)
+    if agent["provider"] in _EDITING_PROVIDERS:
+        model = agent["model"] if agent["provider"] == _SANDBOX_PROVIDER else _SANDBOX_MODEL
+        return {"provider": _SANDBOX_PROVIDER, "model": model, "sandbox": True}
+    missing = _missing_key(agent["provider"], cfg)
+    if missing:
         raise ReviewUnavailable(
-            f"{REVIEWER_ROLE} is configured with {cfg['provider']!r}, an agentic "
-            "provider that can edit files — a reviewer must not be able to change "
-            "the code it is judging"
+            f"{REVIEWER_ROLE} is configured with {agent['provider']!r} but "
+            f"{missing} is not set"
         )
-    return cfg
+    return {**agent, "sandbox": False}
 
 
 def run_diff(state: dict | None, *, max_chars: int = MAX_DIFF_CHARS) -> str:
@@ -142,18 +200,40 @@ def latest_verdict(ticket_id: int) -> dict | None:
 
     for event in reversed(tickets.events(ticket_id)):
         note = event.get("note") or ""
-        if event.get("actor") == REVIEWER_ACTOR and note.startswith(_NOTE_PREFIX):
+        if event.get("actor") != REVIEWER_ACTOR:
+            continue
+        if note.startswith(_UNAVAILABLE_PREFIX):
+            verdict = UNAVAILABLE
+        elif note.startswith(_NOTE_PREFIX):
             verdict = CHANGES_REQUESTED if CHANGES_REQUESTED in note else APPROVE
-            return {
-                "verdict": verdict,
-                "reasons": note.split("—", 1)[-1].strip(),
-                "at": event.get("created_at"),
-                "actor": event.get("actor"),
-            }
+        else:
+            continue
+        return {
+            "verdict": verdict,
+            "reasons": note.split(_UNAVAILABLE_PREFIX)[-1].split("—", 1)[-1].strip(),
+            "at": event.get("created_at"),
+            "actor": event.get("actor"),
+        }
     return None
 
 
 _NOTE_PREFIX = "review:"
+_UNAVAILABLE_PREFIX = "review unavailable:"
+
+
+def _unavailable(ticket_id: int, reason: str) -> ReviewUnavailable:
+    """Record that no review happened, and why; hand back what to raise.
+
+    The ticket stays where it is. Nothing about the build was judged, so there
+    is no verdict to record — only the fact that nobody looked.
+    """
+    from . import tickets
+
+    try:
+        tickets.note(ticket_id, REVIEWER_ACTOR, f"{_UNAVAILABLE_PREFIX} {reason}".strip())
+    except Exception:
+        log.exception("could not record the unavailable review of ticket %s", ticket_id)
+    return ReviewUnavailable(reason)
 
 
 def _note(verdict: str, reasons: str) -> str:
@@ -199,14 +279,19 @@ def review_ticket(
     except budget.BudgetExhausted as exc:
         raise ReviewUnavailable(str(exc)) from exc
 
-    # Resolve (and vet) the reviewer before spending anything.
-    reviewer_config(cfg)
-
     run = tracker.get_run_detail(run_id) if run_id else tracker.get_ticket_run(ticket_id)
     run_status = (run or {}).get("status") or "unknown"
     run_id = run_id or (run or {}).get("id") or 0
 
-    verdict, reasons = _ask(ticket, run, diff, run_id=run_id, settings=cfg)
+    # Resolving a reviewer and reaching it are the two ways a review simply does
+    # not happen. Either way the ticket's history says so, and nothing is judged.
+    try:
+        reviewer = reviewer_config(cfg)
+        verdict, reasons = _ask(
+            ticket, run, diff, run_id=run_id, settings=cfg, reviewer=reviewer,
+        )
+    except ReviewUnavailable as exc:
+        raise _unavailable(ticket_id, str(exc)) from exc
     if run_id:
         tracker.recalculate_run_cost(run_id)
 
@@ -226,8 +311,8 @@ def review_ticket(
 
 
 def _ask(ticket: dict, run: dict | None, diff: str, *, run_id: int,
-         settings: Any) -> tuple[str, str]:
-    """The one model call. A reviewer that cannot be reached does not approve."""
+         settings: Any, reviewer: dict) -> tuple[str, str]:
+    """The one model call. A reviewer that cannot be reached returns no verdict."""
     from .agents.base import BaseAgent
 
     prompt = prompts.render(
@@ -242,10 +327,14 @@ def _ask(ticket: dict, run: dict | None, diff: str, *, run_id: int,
     try:
         result = BaseAgent(settings).call(
             prompt, role=REVIEWER_ROLE, run_id=run_id, subtask_idx=REVIEW_EVENT_IDX,
+            override={"provider": reviewer["provider"], "model": reviewer["model"]},
+            extra=dict(SANDBOX_KWARGS) if reviewer.get("sandbox") else None,
         )
     except Exception as exc:
         log.warning("the reviewer could not be reached: %s", exc)
-        return CHANGES_REQUESTED, f"the reviewer could not be reached: {exc}"
+        raise ReviewUnavailable(f"the reviewer could not be reached: {exc}") from exc
+    if not (result.text or "").strip():
+        raise ReviewUnavailable("the reviewer returned nothing")
     return parse_verdict(result.text)
 
 

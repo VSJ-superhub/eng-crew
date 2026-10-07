@@ -163,9 +163,11 @@ def dispatch_task(
             ticket_id=ticket_id, criteria_source=source, wip=tickets.wip(path, cfg),
         )
 
-    log_file = _ROOT / "logs" / f"run_{int(time.time())}.log"
+    from .config import DATA_DIR
+
+    log_file = DATA_DIR / "logs" / f"run_{int(time.time())}.log"
     try:
-        log_file.parent.mkdir(exist_ok=True)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
             python_exe or _python_exe(), "-u", "-m", "eng_crew", "ticket", str(ticket_id),
             "--no-approval", "--log-path", str(log_file),

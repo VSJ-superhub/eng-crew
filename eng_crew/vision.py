@@ -111,13 +111,10 @@ def remember(project_path: str, history: list[dict], project_name: str = "") -> 
 # ── yourmemory palace sync (best-effort) ────────────────────────────────────────
 
 def _yourmemory_bin() -> str | None:
-    """Resolve the yourmemory CLI: env override -> known build -> PATH."""
+    """Resolve the yourmemory CLI: YOURMEMORY_BIN, else whatever is on PATH."""
     cand = os.environ.get("YOURMEMORY_BIN")
-    if cand and Path(cand).exists():
-        return cand
-    known = Path("C:/Users/alway/Projects/yourmemory/target/debug/yourmemory.exe")
-    if known.exists():
-        return str(known)
+    if cand and Path(cand).expanduser().exists():
+        return str(Path(cand).expanduser())
     return shutil.which("yourmemory")
 
 

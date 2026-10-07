@@ -1,17 +1,9 @@
-import os
-from pathlib import Path
-
 # Load .env so ANTHROPIC_API_KEY etc. are available to the app (intake chat,
-# providers) which read os.environ directly.
-_env = Path(__file__).parent.parent.parent / ".env"
-if _env.exists():
-    for _line in _env.read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            os.environ.setdefault(_k.strip(), _v.strip())
+# providers) which read os.environ directly. Where that .env lives depends on
+# whether this is a checkout or an installed package — config decides.
+from eng_crew.config import load_env_into_environ, load_settings
 
-from eng_crew.config import load_settings
+load_env_into_environ()
 
 import uvicorn
 from .app import app

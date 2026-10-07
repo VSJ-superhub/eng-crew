@@ -32,6 +32,8 @@ import sys
 import time
 from pathlib import Path
 
+from eng_crew import config as _config
+
 # The MCP Python SDK renamed the high-level server in 2.0: mcp.server.fastmcp.FastMCP
 # became mcp.server.mcpserver.MCPServer. The surface this module uses — construction
 # by name, the @tool() decorator, and run() over stdio — is identical on both, so
@@ -44,19 +46,14 @@ except ImportError:  # mcp < 2.0
 # ── Paths ───────────────────────────────────────────────────────────────────────
 _PKG_DIR = Path(__file__).resolve().parent          # .../eng-crew/eng_crew
 _ENG_CREW_ROOT = _PKG_DIR.parent                    # .../eng-crew
-_STATE_FILE = _ENG_CREW_ROOT / ".services_state.json"
+_DATA_DIR = _config.DATA_DIR                        # ~/.eng-crew, or the checkout's
+_STATE_FILE = _DATA_DIR / "services_state.json"
 _VENV_PYTHON = _ENG_CREW_ROOT / ".venv" / "Scripts" / "python.exe"
 _PYTHON = str(_VENV_PYTHON) if _VENV_PYTHON.exists() else sys.executable
 
 # ── Environment: load .env so subprocesses inherit credentials ──────────────────
+_config.load_env_into_environ()
 _base_env = dict(os.environ)
-_env_path = _ENG_CREW_ROOT / ".env"
-if _env_path.exists():
-    for _line in _env_path.read_text(encoding="utf-8").splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            _base_env.setdefault(_k.strip(), _v.strip())
 
 _DEFAULT_DASH_PORT = int(_base_env.get("ENG_CREW_DASHBOARD_PORT", 9000))
 
@@ -75,6 +72,7 @@ def _load_state() -> dict:
 
 def _save_state(state: dict) -> None:
     try:
+        _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         _STATE_FILE.write_text(json.dumps(state, indent=2))
     except Exception:
         pass
@@ -243,8 +241,8 @@ def resume_run(run_id: int) -> str:
         run_id: The run ID shown in the dashboard or returned by run_task().
     """
     env = {**_base_env, "PYTHONIOENCODING": "utf-8", "ENG_CREW_REQUIRE_APPROVAL": "false"}
-    log_file = _ENG_CREW_ROOT / "logs" / f"resume_{run_id}_{int(time.time())}.log"
-    log_file.parent.mkdir(exist_ok=True)
+    log_file = _DATA_DIR / "logs" / f"resume_{run_id}_{int(time.time())}.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     try:
         log = open(log_file, "w")
         proc = subprocess.Popen(

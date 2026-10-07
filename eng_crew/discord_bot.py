@@ -31,14 +31,20 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from dotenv import load_dotenv
+from .config import load_env_into_environ
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+load_env_into_environ()
 
 import discord
 from discord import app_commands
 
-BOT_CONFIG_PATH = Path(__file__).parent / "bot_config.json"
+# Project aliases are one user's own list, so they live with that user's data,
+# never in the package. ENG_CREW_BOT_CONFIG points anywhere else.
+def bot_config_path() -> Path:
+    from .config import DATA_DIR
+
+    override = os.environ.get("ENG_CREW_BOT_CONFIG")
+    return Path(override).expanduser() if override else Path(DATA_DIR) / "bot_config.json"
 
 # ── Per-channel ideation state ──────────────────────────────────────────────────
 # When a channel is in ideation mode, @mention/DM messages are routed to the
@@ -57,9 +63,10 @@ _chat_history: dict[int, list] = {}     # channel_id -> [{"role","content"}]
 def load_projects() -> dict:
     """Merge bot_config.json aliases with DB-registered projects (aliases win)."""
     projects: dict = {}
-    if BOT_CONFIG_PATH.exists():
+    path = bot_config_path()
+    if path.exists():
         try:
-            projects = json.loads(BOT_CONFIG_PATH.read_text())
+            projects = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             projects = {}
 
@@ -427,7 +434,7 @@ bot = EngCrewBot()
 async def cmd_task(interaction: discord.Interaction, project: str, task: str):
     projects = load_projects()
     if project not in projects:
-        keys = ", ".join(f"`{k}`" for k in projects) or "none — edit eng_crew/bot_config.json"
+        keys = ", ".join(f"`{k}`" for k in projects) or f"none — register one on the dashboard, or add it to {bot_config_path()}"
         await interaction.response.send_message(
             f"❓ Unknown project `{project}`. Available: {keys}", ephemeral=True
         )
@@ -472,7 +479,8 @@ async def cmd_projects(interaction: discord.Interaction):
     projects = load_projects()
     if not projects:
         await interaction.response.send_message(
-            "No projects configured. Edit `eng_crew/bot_config.json`.", ephemeral=True
+            "No projects configured. Register one on the dashboard, or add aliases to "
+            f"`{bot_config_path()}`.", ephemeral=True
         )
         return
     lines = [f"`{k}` — {v.get('name', k)}\n    `{v['path']}`" for k, v in projects.items()]
@@ -484,7 +492,7 @@ async def cmd_projects(interaction: discord.Interaction):
 async def cmd_ideate(interaction: discord.Interaction, project: str):
     projects = load_projects()
     if project not in projects:
-        keys = ", ".join(f"`{k}`" for k in projects) or "none — edit eng_crew/bot_config.json"
+        keys = ", ".join(f"`{k}`" for k in projects) or f"none — register one on the dashboard, or add it to {bot_config_path()}"
         await interaction.response.send_message(
             f"❓ Unknown project `{project}`. Available: {keys}", ephemeral=True
         )
