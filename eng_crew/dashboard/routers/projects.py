@@ -212,12 +212,6 @@ async def api_projects_create(item: ProjectIn):
     project_id = add_project(name=item.name, project_path=item.project_path, claude_md_path=resolved_md,
                              repo_url=item.repo_url, default_branch=item.default_branch, tech_stack=item.tech_stack,
                              test_command=item.test_command, description=item.description)
-    def _entroly_init_bg():
-        try:
-            from ...entroly_integration import init_project
-            init_project(item.project_path)
-        except Exception: pass
-    threading.Thread(target=_entroly_init_bg, daemon=True).start()
     return JSONResponse({"id": project_id})
 
 @router.get("/projects/task-summary")

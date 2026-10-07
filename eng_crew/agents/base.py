@@ -21,9 +21,20 @@ class BaseAgent:
         subtask_idx: int = 0,
         run_id: int = 0,
         complexity_tier: str = "medium",
+        override: Optional[Dict[str, str]] = None,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> LLMResult:
+        """One model call, logged against the run.
+
+        ``override`` replaces the provider/model the role would resolve to — for
+        a caller that has already vetted them, like the ticket reviewer, which
+        reroutes a CLI provider onto a sandboxed session. ``extra`` is passed
+        through to the provider (the tool denials for that session, say).
+        """
         role = role or self.agent_type
-        if self.settings is not None:
+        if override:
+            cfg = dict(override)
+        elif self.settings is not None:
             cfg = self.settings.get_agent_config(role)
         else:
             from ..config import settings as _global
@@ -41,7 +52,7 @@ class BaseAgent:
             model = downgraded
 
         try:
-            result = call_llm(provider, model, prompt)
+            result = call_llm(provider, model, prompt, **(extra or {}))
             if run_id:
                 tracker.log_event(run_id, subtask_idx, role, result)
             return result

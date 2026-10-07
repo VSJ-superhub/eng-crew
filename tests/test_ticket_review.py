@@ -43,6 +43,7 @@ def reviewer(monkeypatch):
             cost_usd=0.0013, provider=provider, model=model,
         )
 
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(agent_base, "call_llm", fake_call_llm)
     return {"calls": calls, "box": box}
 
@@ -76,6 +77,17 @@ def landed_ticket(*, run_status="completed", criteria="- the button is blue",
     finally:
         patch.undo()
     return ticket_id, launches
+
+
+def in_review_ticket(criteria="- it works") -> int:
+    """A ticket parked at in_review, with a run, and nothing reviewed yet."""
+    ticket_id = tracker.add_backlog_item("t", "d", "/proj", "",
+                                         acceptance_criteria=criteria)
+    tracker.create_run("t", "/proj", ticket_id=ticket_id)
+    tickets.move(ticket_id, tickets.READY, "tester")
+    tickets.move(ticket_id, tickets.IN_PROGRESS, "queue")
+    tickets.move(ticket_id, tickets.IN_REVIEW, "queue")
+    return ticket_id
 
 
 def notes_of(ticket_id: int) -> str:
@@ -161,7 +173,14 @@ def test_the_ticket_endpoint_shows_the_reviewers_reasons(db, reviewer):
     assert "blue button" in body["review"]["reasons"]
 
 
-def test_a_reviewer_that_cannot_be_reached_does_not_approve(db, reviewer, monkeypatch):
+# --- criterion 1: a review that could not run is not a rejection ---------
+
+
+def test_a_reviewer_that_cannot_be_reached_is_not_recorded_as_a_rejection(
+    db, reviewer, monkeypatch
+):
+    """A provider that is down says nothing about the work. Recording that as
+    changes_requested blames the build for the reviewer's outage."""
     def boom(*a, **kw):
         raise RuntimeError("the provider died")
 
@@ -169,7 +188,34 @@ def test_a_reviewer_that_cannot_be_reached_does_not_approve(db, reviewer, monkey
     ticket_id, _ = landed_ticket()
 
     assert tracker.get_backlog_item(ticket_id)["status"] == tickets.IN_REVIEW
-    assert "changes_requested" in notes_of(ticket_id)
+    notes = notes_of(ticket_id)
+    assert review.CHANGES_REQUESTED not in notes, \
+        "an unreachable reviewer was recorded as a rejection"
+    assert "review unavailable" in notes.lower(), \
+        "the history does not say the review was unavailable"
+    assert "the provider died" in notes, "the history does not say why"
+
+    verdict = review.latest_verdict(ticket_id)
+    assert verdict["verdict"] == review.UNAVAILABLE
+
+
+def test_a_reviewer_with_no_api_key_is_not_recorded_as_a_rejection(db, reviewer, monkeypatch):
+    """The out-of-the-box setup for a new user: a provider and no key for it."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    settings = Settings(ticket_reviewer_provider="anthropic",
+                        ticket_reviewer_model="claude-haiku-4-5-20251001",
+                        anthropic_api_key="")
+    ticket_id = in_review_ticket()
+
+    with pytest.raises(review.ReviewUnavailable, match="ANTHROPIC_API_KEY"):
+        review.review_ticket(ticket_id, diff="x", settings=settings)
+
+    assert reviewer["calls"] == [], "a reviewer with no credentials was called anyway"
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.IN_REVIEW
+    notes = notes_of(ticket_id)
+    assert review.CHANGES_REQUESTED not in notes
+    assert "review unavailable" in notes.lower()
+    assert "ANTHROPIC_API_KEY" in notes, "the history does not name what is missing"
 
 
 # --- criterion 4: one cheap call, no file tools, cost on the run ---------
@@ -187,19 +233,27 @@ def test_the_review_is_one_call_on_a_model_that_cannot_edit_files(db, reviewer):
         "the reviewer is using the builder's model"
 
 
-def test_a_cli_provider_is_refused_because_it_could_edit_files(db, reviewer):
+def test_a_cli_only_setup_reviews_through_the_claude_cli_with_no_tools(db, reviewer):
+    """A CLI provider is an agentic session, so it could edit what it judges —
+    but the Claude CLI can be run with every file and shell tool disabled, and a
+    user whose only provider is the CLI should still get a review."""
     settings = Settings(ticket_reviewer_provider="claude_cli",
-                        ticket_reviewer_model="claude-sonnet-5")
-    ticket_id = tracker.add_backlog_item("t", "d", "/proj", "",
-                                         acceptance_criteria="- it works")
-    run_id = tracker.create_run("t", "/proj", ticket_id=ticket_id)
-    tickets.move(ticket_id, tickets.READY, "tester")
-    tickets.move(ticket_id, tickets.IN_PROGRESS, "queue")
-    tickets.move(ticket_id, tickets.IN_REVIEW, "queue")
+                        ticket_reviewer_model="claude-haiku-4-5-20251001")
+    reviewer["box"]["text"] = "APPROVE" + chr(10) + "The criteria are met."
+    ticket_id = in_review_ticket()
 
-    with pytest.raises(review.ReviewUnavailable):
-        review.review_ticket(ticket_id, run_id, diff="x", settings=settings)
-    assert reviewer["calls"] == [], "a file-editing provider was called anyway"
+    verdict = review.review_ticket(ticket_id, diff=DIFF, settings=settings)
+
+    assert verdict["verdict"] == review.APPROVE
+    assert len(reviewer["calls"]) == 1, "the CLI-only reviewer never ran"
+    call = reviewer["calls"][0]
+    assert call["provider"] == "claude_cli"
+
+    disallowed = call["kwargs"].get("disallowed_tools") or ""
+    for tool in ("Write", "Edit", "Bash", "Read"):
+        assert tool in disallowed, f"the reviewing CLI could still use {tool}"
+    assert not call["kwargs"].get("allowed_tools"), \
+        "the reviewing CLI was handed an allow-list of tools"
 
 
 def test_the_reviews_cost_is_recorded_against_the_run(db, reviewer):

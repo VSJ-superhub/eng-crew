@@ -8,7 +8,11 @@ This is a generalized, pip-installable version of a private internal tool. It mu
 
 ## Key Requirements
 
-- No hardcoded paths — all config via `.env` or `config.yaml`
+- No hardcoded paths — all config via `.env` or `config.yaml`. A source checkout
+  uses the `.env` and `.eng-crew/` at its root; an installed package reads
+  `~/.eng-crew/.env` and a `.env` in the working directory (which wins) and
+  keeps its data under `~/.eng-crew` (`ENG_CREW_HOME`), never in site-packages
+  (`eng_crew/config.py`: `is_source_checkout`, `env_files`, `default_data_dir`).
 - Cross-platform (Windows, macOS, Linux)
 - Clean install: `pip install eng-crew` or `docker compose up`
 - Multi-agent pipeline: architect → critic → HITL approval → specialist coders → reviewer → executor
@@ -34,14 +38,17 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   `ready` is what releases it into the ticket queue to be built.
 - When a ticket's run lands, an independent reviewer (`eng_crew/review.py`)
   checks the run's diff against the ticket's acceptance criteria: one cheap model
-  call on the `ticket_reviewer` role, never a CLI provider (it must not be able
-  to edit the code it judges), with its cost recorded against the run. The
-  verdict and its reasons go into `ticket_events`. An approved ticket whose run
-  also passed the verification gate moves in_review → in_qa → done, credited to
+  call on the `ticket_reviewer` role, with its cost recorded against the run. It
+  must not be able to edit the code it judges, so a CLI-only setup reviews
+  through the Claude CLI with every file and shell tool disabled. The verdict
+  and its reasons go into `ticket_events`. An approved ticket whose run also
+  passed the verification gate moves in_review → in_qa → done, credited to
   `reviewer` and `qa`. A changes-requested verdict leaves the ticket in
-  in_review with the reasons attached and starts no new build. `done → shipped`
-  is refused for every eng-crew actor (`tickets.ROBOTS`) — shipping is a human
-  action.
+  in_review with the reasons attached and starts no new build. A review that
+  could not run at all — no API key, a provider error, an empty reply — is not a
+  verdict: the ticket stays in_review with a "review unavailable" event saying
+  why, never `changes_requested`. `done → shipped` is refused for every eng-crew
+  actor (`tickets.ROBOTS`) — shipping is a human action.
 - Every ticket carries a spending budget (`eng_crew/budget.py`) — the
   configured default (`ENG_CREW_TICKET_BUDGET_USD`, $15) unless the ticket
   overrides it. A ticket's spend is the total of every run charged to it,

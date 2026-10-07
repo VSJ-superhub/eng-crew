@@ -26,6 +26,15 @@ pip install -e ".[dev]"
 cp .env.example .env
 ```
 
+**Where `.env` and the data live.** Running from a clone of this repository,
+eng-crew uses the `.env` and `.eng-crew/` directory beside `eng_crew/` — if you
+already have those, nothing moves. Installed with `pip install eng-crew`, there
+is no such directory to use (it would be `site-packages`), so eng-crew reads
+`~/.eng-crew/.env` and then a `.env` in the directory you run it from, which
+wins; and it keeps its database, logs and run artifacts under `~/.eng-crew`.
+Point that elsewhere with `ENG_CREW_HOME`, or set `ENG_CREW_DATA_DIR` to put
+only the data somewhere specific.
+
 **Free option — Claude CLI (no API key needed):**
 
 ```dotenv
@@ -114,7 +123,10 @@ All settings are environment variables (see `.env.example` for the full list).
 | `ENG_CREW_REQUIRE_APPROVAL` | `true` | Pause for human approval before coding |
 | `ENG_CREW_WIP_LIMIT` | `3` | Max tickets in flight per project at once |
 | `ENG_CREW_CODER_PARALLELISM` | `2` | Number of parallel coder agents (1–8) |
-| `ENG_CREW_DATA_DIR` | `.eng-crew` | Directory for run artifacts and checkpoints |
+| `ENG_CREW_DATA_DIR` | `.eng-crew` in a checkout, else `~/.eng-crew` | Directory for the database, logs, and run artifacts |
+| `ENG_CREW_HOME` | `~/.eng-crew` | Where an installed eng-crew looks for `.env` and keeps data |
+| `ENG_CREW_TICKET_REVIEWER_PROVIDER` | from the stack | Provider for the independent ticket review |
+| `ENG_CREW_TICKET_REVIEW_ENABLED` | `true` | Set `false` to skip the independent ticket review |
 
 ## Tickets
 
@@ -145,12 +157,18 @@ backlog -> ready -> in_progress -> in_review -> in_qa -> done -> shipped
 - **A landed run is reviewed by something that is not the builder.** One cheap
   model call reads the run's diff against the ticket's acceptance criteria and
   records `approve` or `changes_requested` with reasons in the ticket's history;
-  its cost lands on the run. It has no file tools — a CLI provider is refused for
-  this role. An approved ticket whose run also passed the verification gate moves
-  through `in_qa` to `done`, credited to `reviewer` and `qa`. Changes requested
-  leaves the ticket in `in_review` with the reasons and starts no new build —
-  moving it back to `in_progress` is your call
-  (`ENG_CREW_TICKET_REVIEWER_MODEL`, `ENG_CREW_TICKET_REVIEW_ENABLED=false`).
+  its cost lands on the run. It has no file tools: when your only provider is a
+  CLI one, the review runs through the Claude CLI with every file and shell tool
+  disabled, so it cannot edit the code it judges. An approved ticket whose run
+  also passed the verification gate moves through `in_qa` to `done`, credited to
+  `reviewer` and `qa`. Changes requested leaves the ticket in `in_review` with
+  the reasons and starts no new build — moving it back to `in_progress` is your
+  call (`ENG_CREW_TICKET_REVIEWER_MODEL`, `ENG_CREW_TICKET_REVIEW_ENABLED=false`).
+- **A review that could not run is not a rejection.** No API key for the
+  configured reviewer, a provider that errors, an empty reply — none of that is
+  evidence about the work. The ticket stays in `in_review` and its history says
+  the review was **unavailable** and why, rather than recording a verdict
+  nothing actually reached.
 - **`done -> shipped` is a human action.** No eng-crew actor can make that move.
 - **There are no sprints.** Tickets form one continuous queue ordered by
   priority; `ENG_CREW_WIP_LIMIT` bounds how many are in flight at once. Nothing
@@ -185,7 +203,15 @@ Run `pip install -e .` from the project root, or `pip install eng-crew` from PyP
 Check `ENG_CREW_DASHBOARD_PORT` is not in use: `lsof -i :9000` (macOS/Linux) or `netstat -ano | findstr 9000` (Windows).
 
 **API key errors**
-Ensure your `.env` file is in the directory where you run `eng-crew`, or set the key directly in your shell environment.
+Ensure your `.env` is in the directory where you run `eng-crew`, in
+`~/.eng-crew/.env`, or at the root of your checkout — or set the key directly in
+your shell environment.
+
+**A ticket is stuck at `in_review` saying "review unavailable"**
+The independent reviewer could not run — usually no API key for the provider on
+the `ticket_reviewer` role. The ticket's history says which one. Set that key,
+switch the role to a provider you do have (`ENG_CREW_TICKET_REVIEWER_PROVIDER`),
+or turn the step off with `ENG_CREW_TICKET_REVIEW_ENABLED=false`.
 
 **Run stuck waiting for approval**
 Visit http://localhost:9000, find the pending run, and click Approve — or rerun with `--no-approval`.
