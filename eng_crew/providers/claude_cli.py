@@ -35,6 +35,19 @@ _RETRY_DELAYS = [2, 5, 10]
 # provider still needs them.
 _AUTH_VARS_TO_STRIP = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
+# The event type this provider synthesises for a finished tool call. It is not
+# a CLI event: the CLI reports a tool_use and, later, its tool_result, and the
+# thing worth recording — one call, with a duration and an outcome — only
+# exists once the two are paired. Callers that record the trace key off this
+# (see eng_crew.tracing); summarize_event deliberately ignores it, so tracing
+# adds no progress lines of its own.
+TOOL_CALL_EVENT = "tool_call"
+
+#: Outcome of a tool call whose result never arrived — the stream ended first
+#: (turn limit, crash, cancelled run). Recorded rather than dropped: a run cut
+#: off mid-Bash is exactly what someone reading the trace is looking for.
+INCOMPLETE = "incomplete"
+
 
 def _cli_env() -> dict[str, str]:
     """Parent env minus the auth vars that shadow the CLI's own credentials."""
@@ -95,6 +108,89 @@ def summarize_event(evt: dict) -> str:
         return f"finished ({turns} turns)"
 
     return ""
+
+
+def _emit(on_event: Callable | None, evt: dict) -> None:
+    """Hand one event to the caller's callback. A bad callback is its problem."""
+    if on_event is None:
+        return
+    try:
+        on_event(evt)
+    except Exception as exc:  # a bad callback must not kill the run
+        print(f"[claude_cli] on_event error: {exc}", file=sys.stderr)
+
+
+def _blocks(evt: dict) -> list[dict]:
+    """The content blocks of an assistant/user event, or []."""
+    content = (evt.get("message") or {}).get("content")
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+class ToolCallTimeline:
+    """Pairs each tool_use with its tool_result and times the gap.
+
+    The CLI reports the two halves of a tool call as separate events, and calls
+    can interleave, so the pairing is by ``tool_use_id`` rather than by order —
+    matching the wrong result would swap one tool's duration onto another's.
+    A call still open when the stream ends is reported as `incomplete`.
+    """
+
+    def __init__(self) -> None:
+        # tool_use_id -> (tool name, monotonic start, wall-clock start)
+        self._open: dict[str, tuple[str, float, str]] = {}
+
+    def observe(self, evt: dict) -> list[dict]:
+        """Note one stream event. Returns the tool calls it completed."""
+        etype = evt.get("type")
+        if etype == "assistant":
+            for block in _blocks(evt):
+                if block.get("type") == "tool_use" and block.get("id"):
+                    self._open[str(block["id"])] = (
+                        str(block.get("name") or "tool"),
+                        time.monotonic(),
+                        _utcnow(),
+                    )
+            return []
+        if etype != "user":
+            return []
+
+        done = []
+        for block in _blocks(evt):
+            if block.get("type") != "tool_result":
+                continue
+            opened = self._open.pop(str(block.get("tool_use_id") or ""), None)
+            if opened is None:
+                continue  # a result for a call we never saw start
+            name, started, started_at = opened
+            done.append(_tool_call_event(
+                name, started_at, started,
+                "error" if block.get("is_error") else "success",
+            ))
+        return done
+
+    def flush(self) -> list[dict]:
+        """The calls that never got a result. Empties the timeline."""
+        pending, self._open = self._open, {}
+        return [
+            _tool_call_event(name, started_at, started, INCOMPLETE)
+            for name, started, started_at in pending.values()
+        ]
+
+
+def _utcnow() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _tool_call_event(name: str, started_at: str, started: float, outcome: str) -> dict:
+    return {
+        "type": TOOL_CALL_EVENT,
+        "tool_name": name,
+        "started_at": started_at,
+        "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
+        "outcome": outcome,
+    }
 
 
 class ClaudeCLIProvider(Provider):
@@ -190,29 +286,35 @@ class ClaudeCLIProvider(Provider):
             "truncated": False,
             "got_result": False,
         }
+        timeline = ToolCallTimeline()
 
-        for evt in self._stream(cmd, cwd, prompt):
-            if not collected["session_id"] and evt.get("session_id"):
-                collected["session_id"] = evt["session_id"]
+        try:
+            for evt in self._stream(cmd, cwd, prompt):
+                if not collected["session_id"] and evt.get("session_id"):
+                    collected["session_id"] = evt["session_id"]
 
-            if on_event is not None:
-                try:
-                    on_event(evt)
-                except Exception as exc:  # a bad callback must not kill the run
-                    print(f"[claude_cli] on_event error: {exc}", file=sys.stderr)
+                _emit(on_event, evt)
+                for call in timeline.observe(evt):
+                    _emit(on_event, call)
 
-            if evt.get("type") != "result":
-                continue
+                if evt.get("type") != "result":
+                    continue
 
-            collected["got_result"] = True
-            collected["text"] = evt.get("result") or ""
-            usage = evt.get("usage") or {}
-            collected["input_tokens"] = int(usage.get("input_tokens", 0) or 0)
-            collected["output_tokens"] = int(usage.get("output_tokens", 0) or 0)
-            cost = evt.get("total_cost_usd")
-            collected["cost_usd"] = float(cost) if cost is not None else 0.0
-            if evt.get("subtype") == "error_max_turns":
-                collected["truncated"] = True
+                collected["got_result"] = True
+                collected["text"] = evt.get("result") or ""
+                usage = evt.get("usage") or {}
+                collected["input_tokens"] = int(usage.get("input_tokens", 0) or 0)
+                collected["output_tokens"] = int(usage.get("output_tokens", 0) or 0)
+                cost = evt.get("total_cost_usd")
+                collected["cost_usd"] = float(cost) if cost is not None else 0.0
+                if evt.get("subtype") == "error_max_turns":
+                    collected["truncated"] = True
+        finally:
+            # A stream that ended mid-tool — turn limit, crash, cancellation —
+            # still has calls worth recording, and the retry loop above needs
+            # the exception, so this runs on the way out either way.
+            for call in timeline.flush():
+                _emit(on_event, call)
 
         return collected
 

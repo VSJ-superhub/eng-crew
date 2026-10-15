@@ -142,6 +142,23 @@ def _init_db():
                 timestamp       TEXT    NOT NULL
             );
 
+            -- One row per tool the agent used during a run: what it was, when
+            -- it started, how long it took, how it ended. Deliberately apart
+            -- from subtask_events, which is the cost/token ledger a ticket's
+            -- spend is computed from — a tool call costs nothing and must not
+            -- show up there.
+            CREATE TABLE IF NOT EXISTS tool_call_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id      INTEGER NOT NULL REFERENCES runs(id),
+                subtask_idx INTEGER NOT NULL DEFAULT -1,
+                tool_name   TEXT    NOT NULL,
+                started_at  TEXT    NOT NULL,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                outcome     TEXT    NOT NULL DEFAULT 'success'
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_call_events_run
+                ON tool_call_events(run_id, id);
+
             -- A ticket is a backlog_item that is not a subtask: the unit of work.
             -- `status` runs the lifecycle in eng_crew/tickets.py; subtask rows
             -- keep their own pending/running/done/failed states.
@@ -709,6 +726,46 @@ def log_subtask_event(
         print(f"[tracker] log_subtask_event error: {e}", file=sys.stderr)
 
 
+def log_tool_call_event(run_id: int, subtask_idx: int, tool_name: str,
+                        started_at: str, duration_ms: int, outcome: str) -> None:
+    """Record one finished tool call against a run.
+
+    Never raises: tracing is an observation of a run, and a run that fails
+    because its trace could not be written is worse than an incomplete trace.
+    """
+    if not run_id:
+        return
+    try:
+        with _lock:
+            with _connect() as conn:
+                conn.execute(
+                    """INSERT INTO tool_call_events
+                       (run_id, subtask_idx, tool_name, started_at, duration_ms, outcome)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (run_id, subtask_idx, (tool_name or "tool")[:120],
+                     started_at or _now(), max(0, int(duration_ms or 0)),
+                     outcome or "unknown"),
+                )
+    except Exception as e:
+        print(f"[tracker] log_tool_call_event error: {e}", file=sys.stderr)
+
+
+def get_run_tool_calls(run_id: int) -> list[dict]:
+    """A run's tool calls in the order they completed."""
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """SELECT id, run_id, subtask_idx, tool_name, started_at,
+                          duration_ms, outcome
+                   FROM tool_call_events WHERE run_id=? ORDER BY id ASC""",
+                (run_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[tracker] get_run_tool_calls error: {e}", file=sys.stderr)
+        return []
+
+
 def record_preprocessor_event(
     run_id: int, subtask_idx: int, gate: str, before_chars: int, after_chars: int
 ) -> None:
@@ -933,6 +990,195 @@ def get_project_stats(project_path: str) -> dict:
     except Exception as e:
         print(f"[tracker] get_project_stats error: {e}", file=sys.stderr)
         return {}
+
+
+# ── Health: how eng-crew itself is doing ─────────────────────────────────────
+#
+# Every number below is read back off records the pipeline already keeps, so a
+# metric cannot drift from what happened. None of them calls a model.
+
+#: Run statuses that are an outcome. A running or paused run has not yet said
+#: anything about success, so it is not in the denominator.
+_FINISHED_RUN_STATUSES = ("completed", "unverified", "failed")
+
+_REVIEW_NOTE_PREFIX = "review:"
+#: The reviewer writes "approve" as a note and "approved" as the reason for the
+#: in_review -> in_qa move (see eng_crew.retro, which reads the same history).
+_VERDICT_WORDS = {"approve": "approve", "approved": "approve",
+                  "changes_requested": "changes_requested"}
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    """Parse a stored timestamp, or None if it is missing or unreadable."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _elapsed_secs(started: str | None, finished: str | None) -> float:
+    start, end = _parse_ts(started), _parse_ts(finished)
+    if start is None or end is None:
+        return 0.0
+    return max(0.0, (end - start).total_seconds())
+
+
+def get_run_success_rate() -> dict:
+    """How often a run lands: completed against failed and unverified.
+
+    "unverified" counts against the rate on purpose — it is the work without
+    the evidence that it works, which is not a success.
+    """
+    try:
+        with _connect() as conn:
+            row = conn.execute("""
+                SELECT
+                    SUM(CASE WHEN status='completed'  THEN 1 ELSE 0 END) AS completed,
+                    SUM(CASE WHEN status='unverified' THEN 1 ELSE 0 END) AS unverified,
+                    SUM(CASE WHEN status='failed'     THEN 1 ELSE 0 END) AS failed
+                FROM runs WHERE status IN (?, ?, ?)
+            """, _FINISHED_RUN_STATUSES).fetchone()
+        counts = {k: int(row[k] or 0) for k in ("completed", "unverified", "failed")}
+        finished = sum(counts.values())
+        return {**counts, "finished": finished,
+                "rate": (counts["completed"] / finished) if finished else 0.0}
+    except Exception as e:
+        print(f"[tracker] get_run_success_rate error: {e}", file=sys.stderr)
+        return {"completed": 0, "unverified": 0, "failed": 0, "finished": 0, "rate": 0.0}
+
+
+def get_review_approval_rate() -> dict:
+    """How often the independent reviewer approves what a run built.
+
+    Only the verdict note counts. An approval is recorded twice — once as a
+    note, once as the reason for the in_review -> in_qa move — and the move has
+    a status change on it, so matching ``from_status = to_status`` keeps one.
+    A "review unavailable" event is an outage, not a verdict, and is ignored.
+    """
+    counts = {"approve": 0, "changes_requested": 0}
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """SELECT note FROM ticket_events
+                   WHERE actor='reviewer' AND from_status = to_status
+                     AND note LIKE 'review:%' ORDER BY id ASC"""
+            ).fetchall()
+        for (note,) in rows:
+            body = str(note or "")[len(_REVIEW_NOTE_PREFIX):].strip()
+            word = body.partition("—")[0].strip().lower()
+            verdict = _VERDICT_WORDS.get(word)
+            if verdict:
+                counts[verdict] += 1
+    except Exception as e:
+        print(f"[tracker] get_review_approval_rate error: {e}", file=sys.stderr)
+    total = counts["approve"] + counts["changes_requested"]
+    return {**counts, "reviewed": total,
+            "rate": (counts["approve"] / total) if total else 0.0}
+
+
+def _built_ticket_ids() -> list[int]:
+    """Tickets that at least one run attempted, oldest first."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT ticket_id, MIN(id) AS first_run FROM runs
+               WHERE ticket_id IS NOT NULL
+               GROUP BY ticket_id ORDER BY first_run ASC"""
+        ).fetchall()
+    return [int(r["ticket_id"]) for r in rows]
+
+
+def get_avg_builds_per_ticket() -> dict:
+    """How many runs a ticket takes, averaged over the tickets that were built.
+
+    Counted through get_ticket_runs so the answer is the same history the
+    retro writes from. A run with no ticket is not a build of one.
+    """
+    try:
+        ticket_ids = _built_ticket_ids()
+        builds = sum(len(get_ticket_runs(tid)) for tid in ticket_ids)
+        return {"tickets": len(ticket_ids), "builds": builds,
+                "average": (builds / len(ticket_ids)) if ticket_ids else 0.0}
+    except Exception as e:
+        print(f"[tracker] get_avg_builds_per_ticket error: {e}", file=sys.stderr)
+        return {"tickets": 0, "builds": 0, "average": 0.0}
+
+
+def get_ticket_cost_duration_series(limit: int = 200) -> list[dict]:
+    """Cost and wall-clock time per ticket, oldest ticket first.
+
+    One point per built ticket, totalled over every run charged to it — repair
+    passes and reviews included, which is what the ticket actually cost.
+    """
+    try:
+        series = []
+        for ticket_id in _built_ticket_ids()[-limit:]:
+            runs = get_ticket_runs(ticket_id)
+            if not runs:
+                continue
+            ticket = get_backlog_item(ticket_id) or {}
+            cost = sum(float(r.get("total_cost_usd") or 0.0) for r in runs)
+            if not cost:
+                cost = sum(get_run_cost(int(r["id"])) for r in runs)
+            series.append({
+                "ticket_id": ticket_id,
+                "title": ticket.get("title") or f"ticket {ticket_id}",
+                "status": ticket.get("status") or "",
+                "started_at": runs[0].get("started_at") or "",
+                "finished_at": runs[-1].get("finished_at") or "",
+                "cost_usd": cost,
+                "duration_secs": sum(
+                    _elapsed_secs(r.get("started_at"), r.get("finished_at"))
+                    for r in runs
+                ),
+                "builds": len(runs),
+            })
+        series.sort(key=lambda p: p["started_at"])
+        return series
+    except Exception as e:
+        print(f"[tracker] get_ticket_cost_duration_series error: {e}", file=sys.stderr)
+        return []
+
+
+def get_tool_call_stats(limit: int = 12) -> dict:
+    """What the traced tool calls add up to across every run."""
+    try:
+        with _connect() as conn:
+            rows = conn.execute(f"""
+                SELECT tool_name,
+                       COUNT(*) AS calls,
+                       SUM(CASE WHEN outcome='error' THEN 1 ELSE 0 END) AS errors,
+                       AVG(duration_ms) AS avg_duration_ms
+                FROM tool_call_events
+                GROUP BY tool_name ORDER BY calls DESC, tool_name ASC LIMIT {int(limit)}
+            """).fetchall()
+            by_tool = [
+                {"tool_name": r["tool_name"], "calls": int(r["calls"]),
+                 "errors": int(r["errors"] or 0),
+                 "avg_duration_ms": float(r["avg_duration_ms"] or 0.0)}
+                for r in rows
+            ]
+            total = conn.execute(
+                "SELECT COUNT(*) AS n, SUM(CASE WHEN outcome='error' THEN 1 ELSE 0 END)"
+                " AS errors FROM tool_call_events"
+            ).fetchone()
+        return {"total": int(total["n"] or 0), "errors": int(total["errors"] or 0),
+                "by_tool": by_tool}
+    except Exception as e:
+        print(f"[tracker] get_tool_call_stats error: {e}", file=sys.stderr)
+        return {"total": 0, "errors": 0, "by_tool": []}
+
+
+def get_health_metrics() -> dict:
+    """Everything the health view shows, in one read."""
+    return {
+        "run_success": get_run_success_rate(),
+        "review_approval": get_review_approval_rate(),
+        "builds_per_ticket": get_avg_builds_per_ticket(),
+        "ticket_series": get_ticket_cost_duration_series(),
+        "tool_calls": get_tool_call_stats(),
+    }
 
 
 def get_claude_usage_stats() -> dict:

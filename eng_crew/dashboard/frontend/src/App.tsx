@@ -10,6 +10,7 @@ import Intake from './pages/Intake'
 import Ideate from './pages/Ideate'
 import Stacks from './pages/Stacks'
 import Review from './pages/Review'
+import Health from './pages/Health'
 
 interface ErrorBoundaryState {
   hasError: boolean
@@ -66,6 +67,7 @@ export default function App() {
             <Route path='ideate' element={<Ideate />} />
             <Route path='stacks' element={<Stacks />} />
             <Route path='review' element={<Review />} />
+            <Route path='health' element={<Health />} />
           </Route>
         </Routes>
       </BrowserRouter>

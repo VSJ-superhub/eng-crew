@@ -21,6 +21,9 @@ export interface Clarification {
   options?: string[]
 }
 
+/** One tool the agent used during a run, as traced from the CLI stream. */
+export interface ToolCallEvent { id: number; subtask_idx: number; tool_name: string; started_at: string; duration_ms: number; outcome: string }
+
 export interface RunDetailResponse {
   run: RunDetail
   events: RunEvent[]
@@ -28,6 +31,21 @@ export interface RunDetailResponse {
   cost_by_agent: Record<string, CostByAgentEntry>
   plan_summary: string
   clarification?: Clarification
+  tool_calls?: ToolCallEvent[]
+}
+
+/** eng-crew's own health, across every run and ticket. */
+export interface RunSuccess { completed: number; unverified: number; failed: number; finished: number; rate: number }
+export interface ReviewApproval { approve: number; changes_requested: number; reviewed: number; rate: number }
+export interface BuildsPerTicket { tickets: number; builds: number; average: number }
+export interface TicketPoint { ticket_id: number; title: string; status: string; started_at: string; finished_at: string; cost_usd: number; duration_secs: number; builds: number }
+export interface ToolCallStats { total: number; errors: number; by_tool: { tool_name: string; calls: number; errors: number; avg_duration_ms: number }[] }
+export interface HealthMetrics {
+  run_success: RunSuccess
+  review_approval: ReviewApproval
+  builds_per_ticket: BuildsPerTicket
+  ticket_series: TicketPoint[]
+  tool_calls: ToolCallStats
 }
 export type TicketStatus = 'backlog' | 'ready' | 'in_progress' | 'in_review' | 'in_qa' | 'done' | 'rejected' | 'shipped'
 export const TICKET_STATUSES: TicketStatus[] = ['backlog', 'ready', 'in_progress', 'in_review', 'in_qa', 'done', 'rejected', 'shipped']
@@ -69,6 +87,7 @@ export function getStacks(): Promise<StacksResponse> { return api('/api/stacks')
 export function setStack(stack: string): Promise<{ ok: boolean; stack: string }> { return post('/api/session/stack', { stack }) }
 export function setAgentOverrides(overrides: Record<string, { provider: string; model: string }>): Promise<{ ok: boolean }> { return post('/api/session/agent-overrides', { overrides }) }
 export function getRunDetail(id: number): Promise<RunDetailResponse> { return api('/api/run/' + id) }
+export function getHealthMetrics(): Promise<HealthMetrics> { return api('/api/health/metrics') }
 export function getAwaitingApproval(): Promise<number[]> { return api('/api/runs/awaiting-approval') }
 export function approveRun(id: number, p: { approved: boolean; feedback?: string; selected_task_ids?: string[]; task_comments?: Record<string,string> }): Promise<{ ok: boolean }> { return post('/api/runs/' + id + '/approve', p) }
 export interface SubtaskReview { id: number; run_id: number; subtask_id: string; description: string; agent_type: string; target_files: string; exec_summary: string; tests_passed: number; status: string; created_at: string }
