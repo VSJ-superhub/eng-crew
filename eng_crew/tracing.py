@@ -26,7 +26,11 @@ def run_event_handler(run_id: int, label: str = "", subtask_idx: int = -1) -> Ca
     pass none for a call that should be traced but not narrated — the ticket
     reviewer, whose activity is not the run's progress.
     """
-    from .providers.claude_cli import TOOL_CALL_EVENT, summarize_event
+    from .providers.claude_cli import (
+        TOOL_CALL_EVENT,
+        narration_text,
+        summarize_event,
+    )
 
     def report(evt: dict) -> None:
         try:
@@ -37,9 +41,17 @@ def run_event_handler(run_id: int, label: str = "", subtask_idx: int = -1) -> Ca
                     evt.get("started_at") or "",
                     int(evt.get("duration_ms") or 0),
                     evt.get("outcome") or "unknown",
+                    evt.get("target") or "",
                 )
                 return
             if label:
+                # What the agent said, kept as its own row. The progress line
+                # holds only the latest one; the story needs all of them. Tied
+                # to `label` for the same reason the progress line is: a
+                # reviewer's commentary is not the run's own narration.
+                said = narration_text(evt)
+                if said:
+                    tracker.log_run_narration(run_id, subtask_idx, said)
                 line = summarize_event(evt)
                 if line:
                     tracker.update_run_progress(run_id, subtask_idx, f"{label}: {line}")

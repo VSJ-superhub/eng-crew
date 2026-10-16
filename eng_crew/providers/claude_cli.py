@@ -67,6 +67,43 @@ def _feed(stdin, text: str) -> None:
             pass
 
 
+def tool_target(block: dict) -> str:
+    """What one tool_use block acted on: the file, the command, the pattern.
+
+    The single place this is derived, so a progress line, a traced row and the
+    run page all name the same thing. '' when the tool took nothing worth
+    naming.
+    """
+    inp = block.get("input") or {}
+    if not isinstance(inp, dict):
+        return ""
+    target = (
+        inp.get("file_path")
+        or inp.get("pattern")
+        or inp.get("command")
+        or inp.get("description")
+        or ""
+    )
+    return str(target).replace("\n", " ")[:60].strip()
+
+
+def narration_text(evt: dict) -> str:
+    """The agent's own words in one assistant event, '' if it only used tools.
+
+    Longer than a progress line is allowed: this is kept as its own row rather
+    than squeezed into the runs table, and a sentence cut at 80 characters
+    stops being a sentence.
+    """
+    if evt.get("type") != "assistant":
+        return ""
+    said = [
+        (b.get("text") or "").strip()
+        for b in _blocks(evt)
+        if b.get("type") == "text"
+    ]
+    return "\n".join(t for t in said if t)[:2000]
+
+
 def summarize_event(evt: dict) -> str:
     """One human-readable progress line for a stream event, '' if uninteresting.
 
@@ -83,16 +120,7 @@ def summarize_event(evt: dict) -> str:
         for block in blocks:
             if block.get("type") == "tool_use":
                 name = block.get("name", "tool")
-                inp = block.get("input") or {}
-                target = (
-                    inp.get("file_path")
-                    or inp.get("pattern")
-                    or inp.get("command")
-                    or inp.get("description")
-                    or ""
-                )
-                target = str(target).replace("\n", " ")[:60]
-                return f"{name}: {target}".strip().rstrip(":")
+                return f"{name}: {tool_target(block)}".strip().rstrip(":")
         for block in blocks:
             if block.get("type") == "text":
                 text = (block.get("text") or "").strip().replace("\n", " ")
@@ -136,8 +164,9 @@ class ToolCallTimeline:
     """
 
     def __init__(self) -> None:
-        # tool_use_id -> (tool name, monotonic start, wall-clock start)
-        self._open: dict[str, tuple[str, float, str]] = {}
+        # tool_use_id -> (tool name, what it acted on, monotonic start,
+        # wall-clock start)
+        self._open: dict[str, tuple[str, str, float, str]] = {}
 
     def observe(self, evt: dict) -> list[dict]:
         """Note one stream event. Returns the tool calls it completed."""
@@ -147,6 +176,7 @@ class ToolCallTimeline:
                 if block.get("type") == "tool_use" and block.get("id"):
                     self._open[str(block["id"])] = (
                         str(block.get("name") or "tool"),
+                        tool_target(block),
                         time.monotonic(),
                         _utcnow(),
                     )
@@ -161,9 +191,9 @@ class ToolCallTimeline:
             opened = self._open.pop(str(block.get("tool_use_id") or ""), None)
             if opened is None:
                 continue  # a result for a call we never saw start
-            name, started, started_at = opened
+            name, target, started, started_at = opened
             done.append(_tool_call_event(
-                name, started_at, started,
+                name, target, started_at, started,
                 "error" if block.get("is_error") else "success",
             ))
         return done
@@ -172,8 +202,8 @@ class ToolCallTimeline:
         """The calls that never got a result. Empties the timeline."""
         pending, self._open = self._open, {}
         return [
-            _tool_call_event(name, started_at, started, INCOMPLETE)
-            for name, started, started_at in pending.values()
+            _tool_call_event(name, target, started_at, started, INCOMPLETE)
+            for name, target, started, started_at in pending.values()
         ]
 
 
@@ -183,10 +213,14 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _tool_call_event(name: str, started_at: str, started: float, outcome: str) -> dict:
+def _tool_call_event(name: str, target: str, started_at: str, started: float,
+                     outcome: str) -> dict:
     return {
         "type": TOOL_CALL_EVENT,
         "tool_name": name,
+        # The file edited, the command run, the pattern searched — what makes
+        # the traced line readable rather than just "Bash 3.2s".
+        "target": target,
         "started_at": started_at,
         "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
         "outcome": outcome,

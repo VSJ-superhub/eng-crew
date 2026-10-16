@@ -152,12 +152,30 @@ def _init_db():
                 run_id      INTEGER NOT NULL REFERENCES runs(id),
                 subtask_idx INTEGER NOT NULL DEFAULT -1,
                 tool_name   TEXT    NOT NULL,
+                -- What the call acted on: the file read or edited, the command
+                -- run, the pattern searched. A tool name alone cannot be read
+                -- as a sentence; this is what makes the trace a story.
+                target      TEXT    NOT NULL DEFAULT '',
                 started_at  TEXT    NOT NULL,
                 duration_ms INTEGER NOT NULL DEFAULT 0,
                 outcome     TEXT    NOT NULL DEFAULT 'success'
             );
             CREATE INDEX IF NOT EXISTS idx_tool_call_events_run
                 ON tool_call_events(run_id, id);
+
+            -- The agent's own narration, one row per thing it said, in order.
+            -- Kept apart from runs.current_subtask_desc, which is a single
+            -- field the next line overwrites: a run's reasoning is a sequence
+            -- and the last line of it is not the story.
+            CREATE TABLE IF NOT EXISTS run_narration_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id      INTEGER NOT NULL REFERENCES runs(id),
+                subtask_idx INTEGER NOT NULL DEFAULT -1,
+                text        TEXT    NOT NULL,
+                created_at  TEXT    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_run_narration_events_run
+                ON run_narration_events(run_id, id);
 
             -- A ticket is a backlog_item that is not a subtask: the unit of work.
             -- `status` runs the lifecycle in eng_crew/tickets.py; subtask rows
@@ -342,6 +360,9 @@ def _init_db():
                 _alter(_mig, "ALTER TABLE subtask_reviews ADD COLUMN clarification_response TEXT")
             if "clarification_options" not in sr_cols:
                 _alter(_mig, "ALTER TABLE subtask_reviews ADD COLUMN clarification_options TEXT")
+            tce_cols = [r[1] for r in _mig.execute("PRAGMA table_info(tool_call_events)").fetchall()]
+            if tce_cols and "target" not in tce_cols:
+                _alter(_mig, "ALTER TABLE tool_call_events ADD COLUMN target TEXT NOT NULL DEFAULT ''")
             if "log_path" not in run_cols:
                 _alter(_mig, "ALTER TABLE runs ADD COLUMN log_path TEXT")
             # Tickets: acceptance criteria, the run that attempted the ticket,
@@ -727,8 +748,9 @@ def log_subtask_event(
 
 
 def log_tool_call_event(run_id: int, subtask_idx: int, tool_name: str,
-                        started_at: str, duration_ms: int, outcome: str) -> None:
-    """Record one finished tool call against a run.
+                        started_at: str, duration_ms: int, outcome: str,
+                        target: str = "") -> None:
+    """Record one finished tool call against a run, and what it acted on.
 
     Never raises: tracing is an observation of a run, and a run that fails
     because its trace could not be written is worse than an incomplete trace.
@@ -740,11 +762,12 @@ def log_tool_call_event(run_id: int, subtask_idx: int, tool_name: str,
             with _connect() as conn:
                 conn.execute(
                     """INSERT INTO tool_call_events
-                       (run_id, subtask_idx, tool_name, started_at, duration_ms, outcome)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
+                       (run_id, subtask_idx, tool_name, target, started_at,
+                        duration_ms, outcome)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (run_id, subtask_idx, (tool_name or "tool")[:120],
-                     started_at or _now(), max(0, int(duration_ms or 0)),
-                     outcome or "unknown"),
+                     (target or "")[:300], started_at or _now(),
+                     max(0, int(duration_ms or 0)), outcome or "unknown"),
                 )
     except Exception as e:
         print(f"[tracker] log_tool_call_event error: {e}", file=sys.stderr)
@@ -755,7 +778,8 @@ def get_run_tool_calls(run_id: int) -> list[dict]:
     try:
         with _connect() as conn:
             rows = conn.execute(
-                """SELECT id, run_id, subtask_idx, tool_name, started_at,
+                """SELECT id, run_id, subtask_idx, tool_name,
+                          COALESCE(target, '') AS target, started_at,
                           duration_ms, outcome
                    FROM tool_call_events WHERE run_id=? ORDER BY id ASC""",
                 (run_id,),
@@ -763,6 +787,42 @@ def get_run_tool_calls(run_id: int) -> list[dict]:
             return [dict(r) for r in rows]
     except Exception as e:
         print(f"[tracker] get_run_tool_calls error: {e}", file=sys.stderr)
+        return []
+
+
+def log_run_narration(run_id: int, subtask_idx: int, text: str) -> None:
+    """Append one line the agent said to the run's narration.
+
+    Never raises, for the same reason the tool trace never does: narrating a
+    run is an observation of it, not a step in it.
+    """
+    if not run_id or not (text or "").strip():
+        return
+    try:
+        with _lock:
+            with _connect() as conn:
+                conn.execute(
+                    """INSERT INTO run_narration_events
+                       (run_id, subtask_idx, text, created_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (run_id, subtask_idx, text.strip()[:2000], _now()),
+                )
+    except Exception as e:
+        print(f"[tracker] log_run_narration error: {e}", file=sys.stderr)
+
+
+def get_run_narration(run_id: int) -> list[dict]:
+    """Everything the agent said during a run, oldest first."""
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """SELECT id, run_id, subtask_idx, text, created_at
+                   FROM run_narration_events WHERE run_id=? ORDER BY id ASC""",
+                (run_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[tracker] get_run_narration error: {e}", file=sys.stderr)
         return []
 
 
