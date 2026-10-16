@@ -120,7 +120,10 @@ def _review_ticket(ticket_id: int, run_id: int, state, settings) -> None:
 
     try:
         verdict = review.review_ticket(
-            ticket_id, run_id, diff=review.run_diff(state), settings=settings
+            ticket_id, run_id,
+            diff=review.run_diff(state),
+            files=review.changed_files(state),
+            settings=settings,
         )
     except review.ReviewUnavailable as exc:
         log.warning("ticket %s was not reviewed: %s", ticket_id, exc)

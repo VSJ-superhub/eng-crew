@@ -511,6 +511,11 @@ def prune_spent_worktrees(
     )
 
 
+#: What branch_diff appends when it cuts a diff short. Readers that need to
+#: know whether they were handed the whole change look for this.
+TRUNCATION_NOTE = "\n... [diff truncated]"
+
+
 def branch_diff(
     project_path: str | Path,
     branch: str,
@@ -527,7 +532,7 @@ def branch_diff(
     root = repo_root(project_path)
     text = _git(["diff", f"{base}...{branch}"], cwd=root)
     if max_chars and len(text) > max_chars:
-        return text[:max_chars] + "\n... [diff truncated]"
+        return text[:max_chars] + TRUNCATION_NOTE
     return text
 
 

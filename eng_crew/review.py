@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
 from . import prompts, tracing, tracker
@@ -97,6 +98,16 @@ _API_KEYS = {
 #: The review is one call on a bounded prompt; a huge diff is truncated rather
 #: than sent whole.
 MAX_DIFF_CHARS = 30000
+
+#: Headings for the note that says what the truncated diff left out. The
+#: reviewer is told the whole shape of the change even when it cannot be shown
+#: the whole change — otherwise code past the cut reads as code never written.
+FILES_CHANGED_HEADING = "## Files changed on this branch"
+NOT_SHOWN_HEADING = "## Files not shown to you"
+
+#: ``diff --git a/<old> b/<new>``. The destination path is the one that matches
+#: what ``git_skill.branch_files`` lists.
+_DIFF_HEADER = re.compile(r"^diff --git a/(?P<old>.+?) b/(?P<new>.+)$", re.MULTILINE)
 
 #: Reviews are logged against the run at this subtask index. Negative, so the
 #: dashboard's "subtasks done" count (which counts idx >= 0) is unaffected.
@@ -176,6 +187,74 @@ def run_diff(state: dict | None, *, max_chars: int = MAX_DIFF_CHARS) -> str:
         return ""
 
 
+def changed_files(state: dict | None) -> list[str]:
+    """Every file the run's branch changed — the untruncated companion to the
+    diff. Best effort, for the same reasons :func:`run_diff` is."""
+    from . import git_skill
+
+    branch = (state or {}).get("git_branch")
+    project = (state or {}).get("main_project_path") or (state or {}).get("project_path")
+    if not branch or not project:
+        return []
+    try:
+        return git_skill.branch_files(project, branch)
+    except Exception as exc:
+        log.warning("could not list the files changed on branch %s: %s", branch, exc)
+        return []
+
+
+def _shown_files(diff: str) -> set[str]:
+    """The files whose changes the diff text carries in full.
+
+    Truncation cuts mid-file, so the last file a truncated diff mentions has
+    been shown only partly — it counts as not shown. A file the cut removed
+    entirely never gets a header at all.
+    """
+    from . import git_skill
+
+    headers = list(_DIFF_HEADER.finditer(diff or ""))
+    if git_skill.TRUNCATION_NOTE.strip() in (diff or "") and headers:
+        headers = headers[:-1]
+    shown = set()
+    for match in headers:
+        shown.add(match.group("new"))
+        shown.add(match.group("old"))
+    return shown
+
+
+def files_not_shown(diff: str, files: list[str] | None) -> list[str]:
+    """Which of the branch's changed files the diff text does not fully carry.
+
+    Empty when nothing was truncated: a complete diff shows everything, and a
+    notice saying otherwise would be a lie the reviewer has to reason around.
+    """
+    from . import git_skill
+
+    if not files or git_skill.TRUNCATION_NOTE.strip() not in (diff or ""):
+        return []
+    shown = _shown_files(diff)
+    return [path for path in files if path not in shown]
+
+
+def _file_context(diff: str, files: list[str] | None) -> str:
+    """The 'here is what you were not shown' section of the review prompt."""
+    missing = files_not_shown(diff, files)
+    if not missing:
+        return ""
+    listed = "\n".join(f"- {path}" for path in (files or []))
+    unshown = "\n".join(f"- {path}" for path in missing)
+    return (
+        f"\n{FILES_CHANGED_HEADING}\n"
+        "The diff above was truncated to fit. These are all the files the "
+        "branch changed:\n\n"
+        f"{listed}\n"
+        f"\n{NOT_SHOWN_HEADING}\n"
+        "The diff text above does not contain the changes to these files, or "
+        "cuts off partway through them:\n\n"
+        f"{unshown}\n"
+    )
+
+
 def parse_verdict(text: str) -> tuple[str, str]:
     """(verdict, reasons) from the reviewer's reply.
 
@@ -245,6 +324,7 @@ def review_ticket(
     run_id: int | None = None,
     *,
     diff: str = "",
+    files: list[str] | None = None,
     settings: Any = None,
 ) -> dict | None:
     """Review a ticket's landed run and move the ticket accordingly.
@@ -289,6 +369,7 @@ def review_ticket(
         reviewer = reviewer_config(cfg)
         verdict, reasons = _ask(
             ticket, run, diff, run_id=run_id, settings=cfg, reviewer=reviewer,
+            files=files if files is not None else changed_files(run),
         )
     except ReviewUnavailable as exc:
         raise _unavailable(ticket_id, str(exc)) from exc
@@ -311,7 +392,8 @@ def review_ticket(
 
 
 def _ask(ticket: dict, run: dict | None, diff: str, *, run_id: int,
-         settings: Any, reviewer: dict) -> tuple[str, str]:
+         settings: Any, reviewer: dict,
+         files: list[str] | None = None) -> tuple[str, str]:
     """The one model call. A reviewer that cannot be reached returns no verdict."""
     from .agents.base import BaseAgent
 
@@ -323,6 +405,7 @@ def _ask(ticket: dict, run: dict | None, diff: str, *, run_id: int,
         or "(none recorded — say so and request changes)",
         verification=_verification_note(run),
         diff=(diff or "").strip() or "(the diff could not be read)",
+        file_context=_file_context(diff, files),
     )
     # The review is a CLI call like any other, so its tool calls are traced
     # against the run it judges — a sandboxed reviewer that somehow reached a
