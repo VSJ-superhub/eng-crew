@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { getRunDetail, retrySubtask, retryRun, cancelRun, pauseRun, resumeRun, respondClarification } from '../api/client'
-import type { RunDetail, RunEvent, SubtaskPlan, CostByAgentEntry, RunDetailResponse, ToolCallEvent } from '../api/client'
+import type { RunDetail, RunEvent, SubtaskPlan, CostByAgentEntry, RunDetailResponse, ToolCallEvent, NarrationEvent, StageEvent } from '../api/client'
 import OutputViewer from '../components/OutputViewer'
 
 // A run is over when it reaches one of these. "unverified" belongs here or the
@@ -207,7 +207,8 @@ function ToolTrace({ calls }: { calls: ToolCallEvent[] }) {
         {calls.map((c, i) => (
           <div key={c.id ?? i} className='flex items-center gap-3 py-1.5 border-b border-white/5 last:border-0'>
             <span className='w-8 text-right text-[10px] font-mono text-gray-600'>{i + 1}</span>
-            <span className='w-36 truncate text-xs font-medium text-gray-200'>{c.tool_name}</span>
+            <span className='w-28 truncate text-xs font-medium text-gray-200'>{c.tool_name}</span>
+            <span className='w-48 truncate text-[11px] font-mono text-gray-500' title={c.target || ''}>{c.target || '—'}</span>
             <span className={'text-[10px] px-1.5 py-0.5 rounded border ' + (OUTCOME_COLORS[c.outcome] || OUTCOME_COLORS.incomplete)}>
               {c.outcome}
             </span>
@@ -224,6 +225,149 @@ function ToolTrace({ calls }: { calls: ToolCallEvent[] }) {
           </div>
         ))}
       </div>
+    </div>
+  )
+}
+
+
+// ── The narrative feed ──────────────────────────────────────────────────────
+// What a run is doing, in the order it happened and in words: the ticket's
+// stage changes, the agent's own narration, and one line per tool call saying
+// what it touched and whether it passed. The raw tool-name/duration panels are
+// still there (Engineering, Raw Logs) — they are the detail behind this, not
+// the way in.
+
+type FeedEntry = {
+  key: string
+  at: string
+  kind: 'stage' | 'narration' | 'tool'
+  text: string
+  detail?: string
+  outcome?: string
+}
+
+/** One tool call as a sentence: what it did, to what. */
+export function describeToolCall(c: ToolCallEvent): string {
+  const target = (c.target || '').trim()
+  switch (c.tool_name) {
+    case 'Read': return target ? `Read ${target}` : 'Read a file'
+    case 'Edit':
+    case 'MultiEdit': return target ? `Edited ${target}` : 'Edited a file'
+    case 'Write': return target ? `Wrote ${target}` : 'Wrote a file'
+    case 'NotebookEdit': return target ? `Edited notebook ${target}` : 'Edited a notebook'
+    case 'Bash': return target ? `Ran ${target}` : 'Ran a command'
+    case 'Grep': return target ? `Searched for ${target}` : 'Searched the code'
+    case 'Glob': return target ? `Looked for files matching ${target}` : 'Looked for files'
+    case 'TodoWrite': return 'Updated its task list'
+    default: return target ? `${c.tool_name}: ${target}` : `Used ${c.tool_name}`
+  }
+}
+
+/** A tool call's result in words. */
+function describeOutcome(outcome: string): string {
+  if (outcome === 'error') return 'failed'
+  if (outcome === 'incomplete') return 'never finished'
+  return 'passed'
+}
+
+function stageSentence(e: StageEvent): string {
+  const to = (e.to_status || '').replace(/_/g, ' ')
+  const from = (e.from_status || '').replace(/_/g, ' ')
+  const who = e.actor ? ` (${e.actor})` : ''
+  return from ? `Ticket moved from ${from} to ${to}${who}` : `Ticket entered ${to}${who}`
+}
+
+const KIND_STYLES: Record<FeedEntry['kind'], string> = {
+  stage: 'border-cyan-500/40 bg-cyan-500/5',
+  narration: 'border-violet-500/30 bg-violet-500/5',
+  tool: 'border-white/10 bg-[#0f1117]',
+}
+
+const KIND_LABELS: Record<FeedEntry['kind'], string> = {
+  stage: 'stage',
+  narration: 'said',
+  tool: 'did',
+}
+
+/** Merge the three sequences into one chronological story. */
+export function buildFeed(
+  stages: StageEvent[], narration: NarrationEvent[], calls: ToolCallEvent[],
+): FeedEntry[] {
+  const entries: FeedEntry[] = [
+    ...stages.map(e => ({
+      key: `s${e.id}`, at: e.created_at || '', kind: 'stage' as const,
+      text: stageSentence(e), detail: e.note || undefined,
+    })),
+    ...narration.map(n => ({
+      key: `n${n.id}`, at: n.created_at || '', kind: 'narration' as const,
+      text: n.text,
+    })),
+    ...calls.map(c => ({
+      key: `t${c.id}`, at: c.started_at || '', kind: 'tool' as const,
+      text: describeToolCall(c),
+      detail: `${describeOutcome(c.outcome)} · ${formatDuration(c.duration_ms || 0)}`,
+      outcome: c.outcome,
+    })),
+  ]
+  // Stable within a timestamp: the database stores whole seconds, so several
+  // entries routinely share one and insertion order is the real order.
+  return entries
+    .map((e, i) => ({ e, i }))
+    .sort((a, b) => (a.e.at === b.e.at ? a.i - b.i : a.e.at < b.e.at ? -1 : 1))
+    .map(({ e }) => e)
+}
+
+function NarrativeFeed({ stages, narration, calls, live }: {
+  stages: StageEvent[]
+  narration: NarrationEvent[]
+  calls: ToolCallEvent[]
+  live: boolean
+}) {
+  const feed = buildFeed(stages, narration, calls)
+
+  return (
+    <div className='bg-[#161927] rounded-xl p-6 border border-white/5'>
+      <div className='flex items-baseline justify-between mb-4'>
+        <h2 className='text-base font-bold text-white flex items-center gap-2'>
+          <span className='w-1.5 h-4 bg-violet-500 rounded-full' />
+          What Happened
+        </h2>
+        <p className='text-[11px] text-gray-500'>
+          {live ? 'updating live · ' : ''}{feed.length} steps
+        </p>
+      </div>
+
+      {feed.length === 0 ? (
+        <p className='text-xs text-gray-500'>
+          Nothing recorded yet{live ? ' — the agent has not reported a step so far.' : '.'}
+        </p>
+      ) : (
+        <ol className='space-y-2'>
+          {feed.map(e => (
+            <li
+              key={e.key}
+              className={'flex items-start gap-3 rounded-lg border px-3 py-2 ' + KIND_STYLES[e.kind]}
+            >
+              <span className='w-16 shrink-0 text-[10px] font-mono text-gray-600 pt-0.5'>
+                {e.at ? new Date(e.at).toLocaleTimeString() : ''}
+              </span>
+              <span className='w-10 shrink-0 text-[9px] uppercase font-bold tracking-wider text-gray-600 pt-0.5'>
+                {KIND_LABELS[e.kind]}
+              </span>
+              <div className='flex-1 min-w-0'>
+                <p className={'text-sm whitespace-pre-wrap break-words ' + (e.kind === 'tool' ? 'text-gray-300 font-mono text-[12px]' : 'text-gray-200')}>
+                  {e.text}
+                </p>
+                {e.detail && (
+                  <p className={'text-[10px] mt-0.5 ' + (e.outcome === 'error' ? 'text-red-400' : e.outcome === 'incomplete' ? 'text-amber-400' : 'text-gray-500')}>
+                    {e.detail}
+                  </p>
+                )}
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
     </div>
   )
 }
@@ -282,7 +426,17 @@ export default function RunDetail() {
       es.onmessage = (e) => {
         try {
           const data = JSON.parse(e.data)
-          if (data.run) {
+          if (data.narration) {
+            // The feed grows while the run is still going, so the page never
+            // has to be reloaded to see the latest step.
+            setDetail(prev => prev && !(prev.narration || []).some(n => n.id === data.narration.id)
+              ? { ...prev, narration: [...(prev.narration || []), data.narration] }
+              : prev)
+          } else if (data.tool_call) {
+            setDetail(prev => prev && !(prev.tool_calls || []).some(c => c.id === data.tool_call.id)
+              ? { ...prev, tool_calls: [...(prev.tool_calls || []), data.tool_call] }
+              : prev)
+          } else if (data.run) {
             setDetail(prev => prev ? { ...prev, run: { ...prev.run, ...data.run } } : null)
           } else if (data.done) {
             setConnected(false)
@@ -391,7 +545,7 @@ export default function RunDetail() {
   if (loading) return <div className='flex items-center justify-center h-64 text-gray-400'>Loading...</div>
   if (!detail) return <div className='flex items-center justify-center h-64 text-gray-400'>Run not found.</div>
 
-  const { run, events = [], plan = [], cost_by_agent = {}, tool_calls = [] } = detail
+  const { run, events = [], plan = [], cost_by_agent = {}, tool_calls = [], narration = [], stage_events = [] } = detail
   const durationSec = run.duration_secs ? Math.round(run.duration_secs) : null
   const isTerminal = TERMINAL_STATUSES.includes(run.status)
 
@@ -555,6 +709,13 @@ export default function RunDetail() {
               </div>
             </div>
           )}
+
+          <NarrativeFeed
+            stages={stage_events}
+            narration={narration}
+            calls={tool_calls}
+            live={!isTerminal}
+          />
 
           {run.final_summary && (
             <div className='bg-[#161927] rounded-xl p-6 border border-white/5'>

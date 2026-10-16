@@ -16,6 +16,7 @@ from ...tracker import (
     get_run_events,
     get_run_detail,
     get_run_tool_calls,
+    get_run_narration,
     get_cost_by_model,
     get_sprint_plan,
     get_backlog_item,
@@ -142,7 +143,28 @@ async def api_run_detail(run_id: int):
         "clarification": clarification,
         # The run's tool-call trace, in the order the calls completed.
         "tool_calls": get_run_tool_calls(run_id),
+        # The two other ingredients of the page's narrative feed: what the
+        # agent said, and the ticket stage changes around the run.
+        "narration": get_run_narration(run_id),
+        "stage_events": _stage_events(run),
     })
+
+
+def _stage_events(run: dict) -> list[dict]:
+    """The ticket lifecycle changes for this run's ticket, oldest first.
+
+    A run on its own has no stage, so a run with no ticket gets an empty list
+    rather than a missing key — the feed merges three sequences and one of
+    them being absent is not an error.
+    """
+    ticket_id = run.get("ticket_id")
+    if not ticket_id:
+        return []
+    try:
+        from ...tracker import get_ticket_events
+        return get_ticket_events(int(ticket_id))
+    except Exception:
+        return []
 
 @router.post("/run/{run_id}/clarify")
 async def api_run_clarify(run_id: int, payload: ClarifyPayload):
@@ -392,33 +414,59 @@ async def api_run_logs(run_id: int):
 
     return StreamingResponse(log_generator(), media_type="text/plain")
 
+# Both paths, because the run page has always asked for the `/runs/` one while
+# only the bare one existed — the stream 404'd and the page fell back to
+# polling, which is not a live feed.
+@router.get("/runs/{run_id}/events/stream")
 @router.get("/{run_id}/events/stream")
 async def api_run_events_stream(run_id: int):
-    async def _gen():
-        last_id, terminal = 0, {"completed", "failed", "aborted"}
+    return StreamingResponse(run_event_stream(run_id), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+async def run_event_stream(run_id: int, poll_secs: float = 1.0):
+    """One SSE frame per thing that happened, until the run reaches a terminal state.
+
+    Module-level and parameterised on the poll interval so the stream can be
+    driven directly: an endless streaming response cannot be read back through
+    a test client.
+
+    As well as the cost/token events it always carried, this now pushes the two
+    sequences the run page's narrative feed is built from — the agent's
+    narration and its tool calls — so the feed fills in while the run is still
+    going rather than only on reload. Both tables are append-only, so a
+    high-water mark per sequence is enough to send each row once.
+    """
+    last_id, terminal = 0, {"completed", "failed", "aborted"}
+    last_narration_id = last_tool_id = 0
+    try:
+        existing = get_run_events(run_id) or []
+        for ev in existing:
+            yield f"data: {json.dumps({'event': ev})}\n\n"
+            if ev.get("id", 0) > last_id: last_id = ev["id"]
+    except Exception: pass
+    while True:
+        await asyncio.sleep(poll_secs)
         try:
-            existing = get_run_events(run_id) or []
-            for ev in existing:
-                yield f"data: {json.dumps({'event': ev})}\n\n"
-                if ev.get("id", 0) > last_id: last_id = ev["id"]
-        except Exception: pass
-        while True:
-            await asyncio.sleep(1)
-            try:
-                run = get_run_detail(run_id)
-                if not run: yield "data: {\"done\": true}\n\n"; return
-                from ...tracker import _connect
-                import sqlite3
-                with _connect() as conn:
-                    rows = conn.execute("SELECT * FROM subtask_events WHERE run_id=? AND id > ? ORDER BY id ASC", (run_id, last_id)).fetchall()
-                for r in rows:
-                    ev = dict(r)
-                    yield f"data: {json.dumps({'event': ev, 'run_status': run['status']})}\n\n"
-                    last_id = ev["id"]
-                yield f"data: {json.dumps({'run': {'id': run['id'], 'status': run['status']}})}\n\n"
-                if run["status"] in terminal: yield "data: {\"done\": true}\n\n"; return
-            except Exception as e: yield f"data: {json.dumps({'error': str(e)})}\n\n"
-    return StreamingResponse(_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+            run = get_run_detail(run_id)
+            if not run: yield "data: {\"done\": true}\n\n"; return
+            from ...tracker import _connect
+            with _connect() as conn:
+                rows = conn.execute("SELECT * FROM subtask_events WHERE run_id=? AND id > ? ORDER BY id ASC", (run_id, last_id)).fetchall()
+            for r in rows:
+                ev = dict(r)
+                yield f"data: {json.dumps({'event': ev, 'run_status': run['status']})}\n\n"
+                last_id = ev["id"]
+            for line in get_run_narration(run_id):
+                if line["id"] <= last_narration_id: continue
+                yield f"data: {json.dumps({'narration': line})}\n\n"
+                last_narration_id = line["id"]
+            for call in get_run_tool_calls(run_id):
+                if call["id"] <= last_tool_id: continue
+                yield f"data: {json.dumps({'tool_call': call})}\n\n"
+                last_tool_id = call["id"]
+            yield f"data: {json.dumps({'run': {'id': run['id'], 'status': run['status']}})}\n\n"
+            if run["status"] in terminal: yield "data: {\"done\": true}\n\n"; return
+        except Exception as e: yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
 @router.get("/runs/{run_id}/subtask/{subtask_idx}/files")
 async def api_subtask_files(run_id: int, subtask_idx: int):

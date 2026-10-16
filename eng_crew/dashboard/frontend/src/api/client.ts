@@ -21,8 +21,16 @@ export interface Clarification {
   options?: string[]
 }
 
-/** One tool the agent used during a run, as traced from the CLI stream. */
-export interface ToolCallEvent { id: number; subtask_idx: number; tool_name: string; started_at: string; duration_ms: number; outcome: string }
+/** One tool the agent used during a run, as traced from the CLI stream.
+ *  `target` is what the call acted on: the file read or edited, the command
+ *  run, the pattern searched. */
+export interface ToolCallEvent { id: number; subtask_idx: number; tool_name: string; target: string; started_at: string; duration_ms: number; outcome: string }
+
+/** One thing the agent said, in the order it said it. */
+export interface NarrationEvent { id: number; subtask_idx: number; text: string; created_at: string }
+
+/** One ticket lifecycle change around this run. */
+export interface StageEvent { id: number; from_status: string; to_status: string; actor: string; note: string; created_at: string }
 
 export interface RunDetailResponse {
   run: RunDetail
@@ -32,6 +40,8 @@ export interface RunDetailResponse {
   plan_summary: string
   clarification?: Clarification
   tool_calls?: ToolCallEvent[]
+  narration?: NarrationEvent[]
+  stage_events?: StageEvent[]
 }
 
 /** eng-crew's own health, across every run and ticket. */
