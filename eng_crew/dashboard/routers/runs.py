@@ -15,6 +15,7 @@ from ...tracker import (
     get_recent_runs,
     get_run_events,
     get_run_detail,
+    get_run_tool_calls,
     get_cost_by_model,
     get_sprint_plan,
     get_backlog_item,
@@ -138,7 +139,9 @@ async def api_run_detail(run_id: int):
         "plan": plan, 
         "cost_by_agent": cost_by_agent, 
         "plan_summary": plan_summary,
-        "clarification": clarification
+        "clarification": clarification,
+        # The run's tool-call trace, in the order the calls completed.
+        "tool_calls": get_run_tool_calls(run_id),
     })
 
 @router.post("/run/{run_id}/clarify")

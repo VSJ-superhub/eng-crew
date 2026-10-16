@@ -18,15 +18,10 @@ from .. import tracker
 
 
 def _progress_reporter(run_id: int, label: str):
-    """Map CLI stream events onto tracker progress rows."""
-    from ..providers.claude_cli import summarize_event
+    """Map CLI stream events onto progress rows and the run's tool-call trace."""
+    from ..tracing import run_event_handler
 
-    def report(evt: dict) -> None:
-        line = summarize_event(evt)
-        if line:
-            tracker.update_run_progress(run_id, -1, f"{label}: {line}")
-
-    return report
+    return run_event_handler(run_id, label)
 
 
 class SingleAgentEngineer(BaseAgent):

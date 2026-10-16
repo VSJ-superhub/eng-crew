@@ -2,7 +2,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from ...tracker import get_claude_usage_stats
+from ...tracker import get_claude_usage_stats, get_health_metrics
 from ...config import CLAUDE_WEEKLY_BUDGET
 
 router = APIRouter(prefix="/api", tags=["system"])
@@ -28,6 +28,14 @@ async def api_claude_usage():
         "week_pct": week_pct,
         "week_budget": CLAUDE_WEEKLY_BUDGET,
     })
+
+
+@router.get("/health/metrics")
+async def api_health_metrics():
+    """How eng-crew itself is doing: run success, review approval, builds per
+    ticket, and cost/duration per ticket over time. All read off recorded
+    history — no model call, nothing cached."""
+    return JSONResponse(get_health_metrics())
 
 
 @router.get("/entroly/status")

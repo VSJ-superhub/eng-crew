@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { getRunDetail, retrySubtask, retryRun, cancelRun, pauseRun, resumeRun, respondClarification } from '../api/client'
-import type { RunDetail, RunEvent, SubtaskPlan, CostByAgentEntry, RunDetailResponse } from '../api/client'
+import type { RunDetail, RunEvent, SubtaskPlan, CostByAgentEntry, RunDetailResponse, ToolCallEvent } from '../api/client'
 import OutputViewer from '../components/OutputViewer'
 
 // A run is over when it reaches one of these. "unverified" belongs here or the
@@ -179,6 +179,55 @@ function LogViewer({ runId }: { runId: number }) {
   )
 }
 
+const OUTCOME_COLORS: Record<string, string> = {
+  success: 'bg-green-500/20 text-green-300 border-green-500/30',
+  error: 'bg-red-500/20 text-red-300 border-red-500/30',
+  incomplete: 'bg-amber-500/20 text-amber-300 border-amber-500/30',
+}
+
+function formatDuration(ms: number) {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`
+}
+
+/** Every tool the agent used, in the order the calls finished. */
+function ToolTrace({ calls }: { calls: ToolCallEvent[] }) {
+  const slowest = Math.max(1, ...calls.map(c => c.duration_ms || 0))
+  const errors = calls.filter(c => c.outcome === 'error').length
+  const total = calls.reduce((sum, c) => sum + (c.duration_ms || 0), 0)
+
+  return (
+    <div className='bg-[#161927] rounded-xl p-6 border border-white/5'>
+      <div className='flex items-baseline justify-between mb-4'>
+        <h2 className='text-base font-bold text-white'>Tool Call Trace</h2>
+        <p className='text-[11px] text-gray-500'>
+          {calls.length} calls · {errors} failed · {formatDuration(total)} in tools
+        </p>
+      </div>
+      <div className='space-y-1'>
+        {calls.map((c, i) => (
+          <div key={c.id ?? i} className='flex items-center gap-3 py-1.5 border-b border-white/5 last:border-0'>
+            <span className='w-8 text-right text-[10px] font-mono text-gray-600'>{i + 1}</span>
+            <span className='w-36 truncate text-xs font-medium text-gray-200'>{c.tool_name}</span>
+            <span className={'text-[10px] px-1.5 py-0.5 rounded border ' + (OUTCOME_COLORS[c.outcome] || OUTCOME_COLORS.incomplete)}>
+              {c.outcome}
+            </span>
+            <div className='flex-1 h-1.5 bg-white/5 rounded overflow-hidden'>
+              <div
+                className={c.outcome === 'error' ? 'h-full bg-red-500/50' : 'h-full bg-violet-500/50'}
+                style={{ width: `${Math.max(2, ((c.duration_ms || 0) / slowest) * 100)}%` }}
+              />
+            </div>
+            <span className='w-16 text-right text-[11px] font-mono text-gray-400'>{formatDuration(c.duration_ms || 0)}</span>
+            <span className='hidden sm:block w-20 text-right text-[10px] font-mono text-gray-600'>
+              {c.started_at ? new Date(c.started_at).toLocaleTimeString() : ''}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function RunDetail() {
   const { id } = useParams<{ id: string }>()
   const [detail, setDetail] = useState<RunDetailResponse | null>(null)
@@ -342,7 +391,7 @@ export default function RunDetail() {
   if (loading) return <div className='flex items-center justify-center h-64 text-gray-400'>Loading...</div>
   if (!detail) return <div className='flex items-center justify-center h-64 text-gray-400'>Run not found.</div>
 
-  const { run, events = [], plan = [], cost_by_agent = {} } = detail
+  const { run, events = [], plan = [], cost_by_agent = {}, tool_calls = [] } = detail
   const durationSec = run.duration_secs ? Math.round(run.duration_secs) : null
   const isTerminal = TERMINAL_STATUSES.includes(run.status)
 
@@ -536,6 +585,8 @@ export default function RunDetail() {
             <h2 className='text-base font-bold text-white mb-4'>Agent Event Timeline</h2>
             <OutputViewer events={events} />
           </div>
+
+          {tool_calls.length > 0 && <ToolTrace calls={tool_calls} />}
 
           {Object.keys(cost_by_agent).length > 0 && (
             <div className='bg-[#161927] rounded-xl p-6 border border-white/5'>

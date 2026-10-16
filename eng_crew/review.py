@@ -40,7 +40,7 @@ import logging
 import os
 from typing import Any
 
-from . import prompts, tracker
+from . import prompts, tracing, tracker
 
 log = logging.getLogger(__name__)
 
@@ -324,11 +324,16 @@ def _ask(ticket: dict, run: dict | None, diff: str, *, run_id: int,
         verification=_verification_note(run),
         diff=(diff or "").strip() or "(the diff could not be read)",
     )
+    # The review is a CLI call like any other, so its tool calls are traced
+    # against the run it judges — a sandboxed reviewer that somehow reached a
+    # tool is exactly the thing worth being able to see afterwards.
+    extra = dict(SANDBOX_KWARGS) if reviewer.get("sandbox") else {}
+    extra["on_event"] = tracing.run_event_handler(run_id, subtask_idx=REVIEW_EVENT_IDX)
     try:
         result = BaseAgent(settings).call(
             prompt, role=REVIEWER_ROLE, run_id=run_id, subtask_idx=REVIEW_EVENT_IDX,
             override={"provider": reviewer["provider"], "model": reviewer["model"]},
-            extra=dict(SANDBOX_KWARGS) if reviewer.get("sandbox") else None,
+            extra=extra,
         )
     except Exception as exc:
         log.warning("the reviewer could not be reached: %s", exc)
