@@ -286,3 +286,119 @@ def test_shipping_a_done_ticket_stays_a_human_action(db, reviewer):
     assert tracker.get_backlog_item(ticket_id)["status"] == tickets.DONE
 
     assert tickets.move(ticket_id, tickets.SHIPPED, "alway")["status"] == tickets.SHIPPED
+
+
+# --- criterion 6: a truncated diff says what it left out -----------------
+#
+# Ticket #100646: a complete change was reviewed through a diff cut at
+# MAX_DIFF_CHARS, and the reviewer requested changes because the code for a
+# file past the cut was "missing". It was not missing; it was never shown.
+
+
+def _diff_section(path: str, lines: int) -> str:
+    """One file's worth of unified diff, long enough to push past the cut."""
+    body = "".join(f"+line {i} of {path}\n" for i in range(lines))
+    return (f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+            f"@@ -0,0 +1,{lines} @@\n{body}")
+
+
+def truncated_diff(paths: list[str]) -> str:
+    """A diff over several files, cut the way git_skill.branch_diff cuts it."""
+    from eng_crew import git_skill
+
+    # The first file's changes fit inside the cut; the rest fall past it.
+    text = "".join(_diff_section(p, 1000 if i == 0 else 200)
+                   for i, p in enumerate(paths))
+    assert len(text) > review.MAX_DIFF_CHARS, "this diff is not big enough to truncate"
+    return text[:review.MAX_DIFF_CHARS] + git_skill.TRUNCATION_NOTE
+
+
+def test_a_truncated_diff_still_tells_the_reviewer_every_file_the_branch_changed(
+    db, reviewer
+):
+    files = ["eng_crew/app.py", "eng_crew/tracker.py", "tests/test_app.py"]
+    ticket_id = in_review_ticket()
+
+    review.review_ticket(ticket_id, diff=truncated_diff(files), files=files,
+                         settings=Settings())
+
+    prompt = reviewer["calls"][0]["prompt"]
+    for path in files:
+        assert path in prompt, f"the reviewer was never told {path} was changed"
+
+
+def test_the_prompt_names_the_files_the_truncated_diff_left_out(db, reviewer):
+    files = ["eng_crew/app.py", "eng_crew/tracker.py", "tests/test_app.py"]
+    ticket_id = in_review_ticket()
+
+    review.review_ticket(ticket_id, diff=truncated_diff(files), files=files,
+                         settings=Settings())
+
+    prompt = reviewer["calls"][0]["prompt"]
+    _, _, not_shown = prompt.partition(review.NOT_SHOWN_HEADING)
+    assert not_shown, "the prompt has no 'files not shown' section"
+    assert "eng_crew/tracker.py" in not_shown, "the cut file is not listed as unshown"
+    assert "tests/test_app.py" in not_shown
+    assert "eng_crew/app.py" not in not_shown, \
+        "a file the reviewer was fully shown is listed as not shown"
+
+
+def test_the_skill_forbids_requesting_changes_over_a_file_it_was_not_shown():
+    from eng_crew import prompts
+
+    body = prompts.load("review-ticket", refresh=True).body.lower()
+    assert "not shown" in body, "the template never mentions unshown files"
+    rule = body.split("not shown", 1)[1]
+    assert "changes_requested" in rule, \
+        "the template does not forbid CHANGES_REQUESTED over a file it was not shown"
+
+
+def test_a_file_cut_from_a_real_branch_diff_is_reported_as_unshown(db, reviewer, tmp_path):
+    """The #100646 reproduction, on a real repository: the change is complete,
+    the diff is not, and the reviewer is told which file it is missing."""
+    import subprocess
+
+    from eng_crew import git_skill
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    for args in (("init", "-q", "-b", "main"), ("config", "user.email", "t@e.com"),
+                 ("config", "user.name", "T")):
+        subprocess.run(["git", *args], cwd=root, check=True)
+    (root / "app.py").write_text("print('v1')\n", encoding="utf-8")
+    (root / "tracker.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
+
+    subprocess.run(["git", "checkout", "-q", "-b", "ai-team/big"], cwd=root, check=True)
+    (root / "app.py").write_text("".join(f"line {i}\n" for i in range(4000)),
+                                 encoding="utf-8")
+    (root / "tracker.py").write_text("x = 2  # the change the reviewer wants\n",
+                                     encoding="utf-8")
+    subprocess.run(["git", "commit", "-qam", "big change"], cwd=root, check=True)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=root, check=True)
+
+    state = {"git_branch": "ai-team/big", "main_project_path": str(root)}
+    diff = review.run_diff(state)
+    assert git_skill.TRUNCATION_NOTE in diff, "the diff was not truncated"
+    assert "the change the reviewer wants" not in diff, "tracker.py survived the cut"
+
+    ticket_id = in_review_ticket()
+    review.review_ticket(ticket_id, diff=diff, files=review.changed_files(state),
+                         settings=Settings())
+
+    prompt = reviewer["calls"][0]["prompt"]
+    _, _, not_shown = prompt.partition(review.NOT_SHOWN_HEADING)
+    assert "tracker.py" in not_shown, \
+        "the reviewer could cite tracker.py as missing with nothing to say it was cut"
+
+
+def test_an_untruncated_diff_adds_no_files_not_shown_notice(db, reviewer):
+    ticket_id = in_review_ticket()
+
+    review.review_ticket(ticket_id, diff=DIFF, files=["app.py"], settings=Settings())
+
+    prompt = reviewer["calls"][0]["prompt"]
+    assert review.NOT_SHOWN_HEADING not in prompt, \
+        "a complete diff was given a 'files not shown' notice anyway"
+    assert "button.color" in prompt
