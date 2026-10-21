@@ -2,11 +2,12 @@ import { useEffect, useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import ApprovalBanner from './ApprovalBanner'
 import SubtaskReviewBanner from './SubtaskReviewBanner'
-import { getStacks, getAwaitingApproval, getAwaitingSubtaskReview } from '../api/client'
+import { getStacks, getAwaitingApproval, getAwaitingSubtaskReview, getBacklog } from '../api/client'
 
 const NAV = [
   { to: '/', label: 'Dashboard', exact: true },
   { to: '/ideate', label: 'Ideate', exact: false },
+  { to: '/backlog', label: 'Tickets', exact: false },
   { to: '/projects', label: 'Projects', exact: false },
   { to: '/review', label: 'Review', exact: false },
   { to: '/health', label: 'Health', exact: false },
@@ -25,6 +26,7 @@ export default function Layout() {
   const [activeStack, setActiveStack] = useState('')
   const [ollamaAvailable, setOllamaAvailable] = useState(true)
   const [reviewCount, setReviewCount] = useState(0)
+  const [ticketCount, setTicketCount] = useState(0)
 
   useEffect(() => {
     getStacks().then(d => {
@@ -42,6 +44,22 @@ export default function Layout() {
     const iv = setInterval(load, 5000)
     return () => clearInterval(iv)
   }, [])
+
+  // Tickets waiting on a person: backlog ones need criteria or approval, ready
+  // ones are approved but not building yet.
+  useEffect(() => {
+    const load = () =>
+      getBacklog()
+        .then(items => setTicketCount(
+          items.filter(i => i.status === 'backlog' || i.status === 'ready').length))
+        .catch(() => {})
+    load()
+    const iv = setInterval(load, 10000)
+    return () => clearInterval(iv)
+  }, [])
+
+  const badgeFor = (label: string) =>
+    label === 'Review' ? reviewCount : label === 'Tickets' ? ticketCount : 0
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#0f1117] text-[#e2e8f0]">
@@ -66,9 +84,9 @@ export default function Layout() {
               }
             >
               {label}
-              {label === 'Review' && reviewCount > 0 && (
+              {badgeFor(label) > 0 && (
                 <span className="ml-1.5 bg-amber-500 text-black text-[10px] font-bold px-1.5 py-0.5 rounded-full leading-none">
-                  {reviewCount}
+                  {badgeFor(label)}
                 </span>
               )}
             </NavLink>
@@ -108,9 +126,9 @@ export default function Layout() {
                 ].join(' ')
               }
             >
-              {label === 'Review' && reviewCount > 0 && (
+              {badgeFor(label) > 0 && (
                 <span className="absolute top-1.5 right-1/4 bg-amber-500 text-black text-[9px] font-bold w-4 h-4 flex items-center justify-center rounded-full leading-none">
-                  {reviewCount}
+                  {badgeFor(label)}
                 </span>
               )}
               {label}
