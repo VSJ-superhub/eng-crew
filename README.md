@@ -182,6 +182,35 @@ eng-crew queue  /path/to/project        # see the queue and the WIP count
 eng-crew ticket 42                      # build one ticket
 ```
 
+## Discord
+
+The bot is an optional surface for the same ticket queue, so a plan made at a
+desk can be worked from a phone.
+
+```bash
+pip install 'eng-crew[discord]'         # the bot's one extra dependency
+# put DISCORD_BOT_TOKEN=... in your .env, then:
+eng-crew discord --check                # will it start? says what is missing
+eng-crew discord                        # run it in the foreground
+```
+
+| Command | What it does |
+|---|---|
+| `/projects` | Project aliases — every project eng-crew has registered, plus any in `bot_config.json` |
+| `/queue <project>` | That project's ticket queue: id, priority, status, title, whether it has acceptance criteria, spend against budget, and WIP in flight — the same data `eng-crew queue` prints |
+| `/build <ticket_id>` | Build a ticket that already exists. A `backlog` ticket is approved to `ready` in your name first; nothing new is filed |
+| `/task <project> <task>` | File *new* work as a ticket and build it |
+| `/ideate <project>` | Talk an idea through with the Manager; it ends in a ticket proposal |
+| `/status` | Recent and active runs |
+
+`/build` is bound by exactly what the dashboard and the CLI are bound by: a
+ticket with no acceptance criteria is refused, a ticket that has spent its
+budget is refused with the figure, and a project at its WIP limit leaves the
+ticket `ready` in the queue and starts nothing.
+
+`start_services` keeps the bot's output in `<data dir>/logs/discord_bot.log`, so
+a bot that dies at startup leaves its reason there and in `services_status()`.
+
 ## CLI reference
 
 ```
@@ -192,6 +221,7 @@ eng-crew plans    PATH                                 Show run plans for a proj
 eng-crew resume   RUN_ID                               Resume an interrupted run
 eng-crew status                                         Show recent runs
 eng-crew dashboard                                      Open the dashboard
+eng-crew discord  [--check]                             Run the Discord bot, or say why it will not start
 ```
 
 ## Troubleshooting
@@ -212,6 +242,18 @@ The independent reviewer could not run — usually no API key for the provider o
 the `ticket_reviewer` role. The ticket's history says which one. Set that key,
 switch the role to a provider you do have (`ENG_CREW_TICKET_REVIEWER_PROVIDER`),
 or turn the step off with `ENG_CREW_TICKET_REVIEW_ENABLED=false`.
+
+**The Discord bot will not come online**
+Run `eng-crew discord` and it prints the reason instead of hiding it in a log:
+no `DISCORD_BOT_TOKEN`, the optional extra not installed
+(`pip install 'eng-crew[discord]'`), a token Discord rejects, or the Message
+Content intent not enabled for your app in the Discord Developer Portal
+(your app -> Bot -> Privileged Gateway Intents). Started as a service, the
+bot's output is in `<data dir>/logs/discord_bot.log`.
+
+**The project I planned is not in Discord**
+Planning files tickets, it does not start a build. `/queue <project>` shows
+them and `/build <ticket_id>` builds one; `/projects` lists the aliases.
 
 **Run stuck waiting for approval**
 Visit http://localhost:9000, find the pending run, and click Approve — or rerun with `--no-approval`.
