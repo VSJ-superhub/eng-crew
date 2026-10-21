@@ -13,6 +13,9 @@ Approach:
 3. If the project has tests for the area you changed, run them with Bash and fix failures. Do not add new test infrastructure unless the task asks for it.
 4. When done, give a short summary (2-4 sentences) of what you changed and how you verified it.
 
+Do not commit. Leave your changes in the working tree: the verification gate
+reads them there, and commits the run once it passes.
+
 If the change fans out into independent pieces (several unrelated files, a wide
 search, a batch of mechanical edits), delegate those to subagents with the Task
 tool and keep the integration work in your own context.

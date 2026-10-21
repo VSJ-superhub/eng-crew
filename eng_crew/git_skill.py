@@ -219,6 +219,11 @@ def repo_root(project_path: str | Path) -> Path:
     return Path(_git(["rev-parse", "--show-toplevel"], cwd=root))
 
 
+def head_commit(project_path: str | Path) -> str:
+    """Full SHA of the commit HEAD points at."""
+    return _git(["rev-parse", "HEAD"], cwd=repo_root(project_path))
+
+
 def default_worktree_dir(project_path: str | Path) -> Path:
     """Where worktrees live: a sibling of the repo, never inside it.
 

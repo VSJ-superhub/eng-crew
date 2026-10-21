@@ -27,6 +27,9 @@ class TeamState(TypedDict):
     # Retros from tickets this project already shipped (eng_crew.retro).
     retro_lessons: str
     git_branch: Optional[str]
+    # The commit the run's branch started from. The gate diffs against this,
+    # not HEAD, so a builder that commits its own work cannot hide it.
+    base_commit: Optional[str]
     subtasks: List[Subtask]
     current_subtask_idx: int
     active_subtask_ids: List[str]

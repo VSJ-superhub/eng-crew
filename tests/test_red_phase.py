@@ -71,6 +71,24 @@ def test_new_test_files_keeps_tests_and_conftest_only():
         _cleanup(root)
 
 
+def _commit_all(root: Path) -> None:
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "builder's own commit"], cwd=root, check=True)
+
+
+def test_a_builder_that_commits_its_tests_still_has_them_found_from_the_base():
+    """Diffing against HEAD saw nothing once the builder committed; the base sees all."""
+    root = _repo()
+    try:
+        base = git_skill.head_commit(root)
+        _write(root, "tests/test_new.py", TAUTOLOGY)
+        _commit_all(root)
+        assert new_test_files(root) == []
+        assert new_test_files(root, base) == ["tests/test_new.py"]
+    finally:
+        _cleanup(root)
+
+
 def test_new_test_files_on_a_non_repo_is_empty_not_an_error():
     root = Path(tempfile.mkdtemp(prefix="engcrew_nogit_"))
     try:
@@ -93,6 +111,24 @@ def test_test_that_needs_the_change_is_red():
             "from app import compute\n\n\ndef test_compute():\n    assert compute() == 2\n",
         )
         result = verify_red(root, timeout=120)
+        assert result.status == PASSED, result.output
+    finally:
+        _cleanup(root)
+
+
+def test_committed_work_is_replayed_against_the_run_base():
+    """A builder's commit must not turn the red phase into a skip."""
+    root = _repo()
+    try:
+        base = git_skill.head_commit(root)
+        _write(root, "app.py", "def compute():\n    return 2\n")
+        _write(
+            root,
+            "tests/test_feature.py",
+            "from app import compute\n\n\ndef test_compute():\n    assert compute() == 2\n",
+        )
+        _commit_all(root)
+        result = verify_red(root, base=base, timeout=120)
         assert result.status == PASSED, result.output
     finally:
         _cleanup(root)

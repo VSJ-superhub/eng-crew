@@ -181,6 +181,21 @@ def test_criteria_with_new_tests_passes(green_gate):
     assert _gate(CRITERIA_TASK)["verification_passed"] is True
 
 
+def test_the_gate_looks_for_tests_from_the_run_base_commit(green_gate, monkeypatch):
+    seen = {}
+
+    def new_tests(path, base="HEAD"):
+        seen["base"] = base
+        return ["tests/test_rename.py"]
+
+    monkeypatch.setattr(verify, "new_test_files", new_tests)
+    out = VerifierAgent(Settings()).run(
+        {"raw_task": CRITERIA_TASK, "project_path": ".", "run_id": 0, "base_commit": "abc123"}
+    )
+    assert out["verification_passed"] is True
+    assert seen["base"] == "abc123"
+
+
 def test_a_conftest_alone_does_not_count_as_a_test(green_gate):
     green_gate.append("tests/conftest.py")
     assert _gate(CRITERIA_TASK)["verification_passed"] is False

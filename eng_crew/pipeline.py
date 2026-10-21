@@ -357,6 +357,12 @@ def run_pipeline(
     if run_id and branch:
         tracker.update_run_branch(run_id, branch)
 
+    try:
+        base_commit = git_skill.head_commit(work_path)
+    except Exception as exc:
+        log.warning("could not record the run's base commit: %s", exc)
+        base_commit = None
+
     ctx = load_project_context(work_path)
     project_context = ctx.render()
     claude_md_path = str(Path(work_path).expanduser().resolve() / "CLAUDE.md")
@@ -380,6 +386,7 @@ def run_pipeline(
         "project_context": project_context,
         "retro_lessons": retro_lessons,
         "git_branch": branch,
+        "base_commit": base_commit,
         "subtasks": [],
         "current_subtask_idx": 0,
         "active_subtask_ids": [],

@@ -110,7 +110,9 @@ class VerifierAgent(BaseAgent):
         red_mode = getattr(self.settings, "verification_red_phase", verify_mod.RED_STRICT)
         if red_mode != verify_mod.RED_OFF and result.passed and not lock_failed:
             try:
-                red = verify_mod.verify_red(project_path, timeout=timeout)
+                red = verify_mod.verify_red(
+                    project_path, base=self._base(state), timeout=timeout
+                )
             except Exception as exc:
                 # An unprovable run is not a broken one; never crash the gate.
                 print(f"[verify] red phase errored: {exc}", file=sys.stderr)
@@ -204,11 +206,20 @@ class VerifierAgent(BaseAgent):
         try:
             if not any(c.kind == "test" for c in verify_mod.detect_checks(project_path)):
                 return False
-            changed = verify_mod.new_test_files(project_path)
+            changed = verify_mod.new_test_files(project_path, self._base(state))
         except Exception as exc:  # an unanswerable question never fails the gate
             print(f"[verify] untested-criteria check errored: {exc}", file=sys.stderr)
             return False
         return not [p for p in changed if p.rsplit("/", 1)[-1] != "conftest.py"]
+
+    def _base(self, state: TeamState) -> str:
+        """The commit this run started from; HEAD for runs that never recorded one.
+
+        Diffing against HEAD only works while the builder leaves its output
+        uncommitted. One that commits makes HEAD equal its own work, and every
+        test it wrote looks pre-existing.
+        """
+        return state.get("base_commit") or "HEAD"
 
     def _note(self, run_id: int, name: str, text: str) -> None:
         """Record a gate finding as a zero-cost event on the run's timeline.
