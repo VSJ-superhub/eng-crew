@@ -153,15 +153,41 @@ def dispatch_task(
             ticket_id=ticket_id, criteria_source=source, wip=wip,
         )
 
-    # Claim the ticket here rather than in the subprocess, so a refusal (the WIP
-    # limit, an exhausted budget) comes back to the caller with its reason.
+    started = _claim_and_launch(
+        ticket_id, path, actor,
+        base_branch=base_branch, settings=cfg, env=env, python_exe=python_exe,
+    )
+    started.criteria_source = source
+    if not started.started and started.ok:
+        started.detail = (
+            f"ticket {ticket_id} is ready but its build did not start: {started.detail}"
+        )
+    return started
+
+
+def _claim_and_launch(
+    ticket_id: int,
+    project_path: str,
+    actor: str,
+    *,
+    base_branch: str = "",
+    settings=None,
+    env: dict | None = None,
+    python_exe: str | None = None,
+) -> Dispatch:
+    """Claim a `ready` ticket and run `eng-crew ticket <id>` on it.
+
+    The claim happens here rather than inside the subprocess, so a refusal —
+    the WIP limit, an exhausted budget — comes back to the caller with its
+    reason instead of dying in a log nobody reads.
+    """
+    from . import tickets
+
+    cfg = settings
     try:
         tickets.move(ticket_id, tickets.IN_PROGRESS, actor, "build requested", settings=cfg)
     except tickets.TransitionRefused as exc:
-        return Dispatch(
-            True, f"ticket {ticket_id} is ready but its build did not start: {exc}",
-            ticket_id=ticket_id, criteria_source=source, wip=tickets.wip(path, cfg),
-        )
+        return Dispatch(True, str(exc), ticket_id=ticket_id, wip=tickets.wip(project_path, cfg))
 
     from .config import DATA_DIR
 
@@ -198,12 +224,89 @@ def dispatch_task(
             pass
         return Dispatch(
             False, f"ticket {ticket_id} was filed but its build could not be launched: {exc}",
-            ticket_id=ticket_id, criteria_source=source, wip=tickets.wip(path, cfg),
+            ticket_id=ticket_id, wip=tickets.wip(project_path, cfg),
         )
 
     return Dispatch(
         True, f"building ticket {ticket_id}", ticket_id=ticket_id, started=True,
-        criteria_source=source, wip=tickets.wip(path, cfg), log_path=str(log_file),
+        wip=tickets.wip(project_path, cfg), log_path=str(log_file),
+    )
+
+
+def build_ticket(
+    ticket_id: int,
+    *,
+    actor: str = "user",
+    base_branch: str = "",
+    settings=None,
+    env: dict | None = None,
+    python_exe: str | None = None,
+) -> Dispatch:
+    """Build a ticket that already exists. Creates nothing.
+
+    The counterpart to :func:`dispatch_task` for a surface whose user is looking
+    at a queue — Discord's ``/build``, say — rather than describing new work.
+    Approving a ``backlog`` (or previously ``rejected``) ticket to ``ready`` is
+    the human's move, so it is credited to ``actor``; everything after that is
+    the same path the dashboard and the CLI take, under the same WIP limit and
+    the same budget.
+    """
+    from . import budget, tickets, tracker
+    from .config import load_settings
+
+    cfg = settings or load_settings()
+    ticket = tracker.get_backlog_item(ticket_id)
+    if not ticket:
+        return Dispatch(False, f"no ticket {ticket_id}")
+
+    path = ticket.get("project_path") or ""
+    status = ticket.get("status") or tickets.BACKLOG
+    if status in tickets.IN_FLIGHT or status in (tickets.DONE, tickets.SHIPPED):
+        return Dispatch(
+            False, f"ticket {ticket_id} is {status} — it is not waiting to be built",
+            ticket_id=ticket_id,
+        )
+
+    if status in (tickets.BACKLOG, tickets.REJECTED):
+        # Approving it is the step a person has to take; a ticket with no
+        # definition of done is refused here, by the lifecycle, with its reason.
+        try:
+            tickets.move(ticket_id, tickets.READY, actor, "approved to build", settings=cfg)
+        except tickets.TransitionRefused as exc:
+            return Dispatch(False, str(exc), ticket_id=ticket_id)
+
+    spend = budget.status(ticket_id, cfg)
+    if spend and spend.get("exhausted"):
+        return Dispatch(
+            True,
+            f"ticket {ticket_id} has spent ${spend['spent_usd']:.2f} of its "
+            f"${spend['budget_usd']:.2f} budget — raise it "
+            f"(`eng-crew budget {ticket_id} <amount>`) and build it again; "
+            f"nothing was started",
+            ticket_id=ticket_id, wip=tickets.wip(path, cfg),
+        )
+
+    wip = tickets.wip(path, cfg)
+    if wip["slots"] <= 0:
+        return Dispatch(
+            True,
+            f"WIP limit reached ({wip['in_flight']}/{wip['limit']} in flight) — "
+            f"ticket {ticket_id} is ready and waiting in the queue; nothing was started",
+            ticket_id=ticket_id, wip=wip,
+        )
+
+    # One build per project at a time: runs share the project's checkout.
+    if tracker.get_active_runs_for_project(path):
+        return Dispatch(
+            True,
+            f"a run is already active for this project — ticket {ticket_id} is "
+            f"ready and waiting; nothing was started",
+            ticket_id=ticket_id, wip=wip,
+        )
+
+    return _claim_and_launch(
+        ticket_id, path, actor,
+        base_branch=base_branch, settings=cfg, env=env, python_exe=python_exe,
     )
 
 

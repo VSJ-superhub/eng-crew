@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 
 from eng_crew import config as _config
+from eng_crew import discord_service
 
 # The MCP Python SDK renamed the high-level server in 2.0: mcp.server.fastmcp.FastMCP
 # became mcp.server.mcpserver.MCPServer. The surface this module uses — construction
@@ -316,17 +317,32 @@ def start_services(project_path: str = "") -> str:
 
     # ── Discord bot ────────────────────────────────────────────────────────
     discord_pid = services.get("discord", {}).get("pid")
+    problems = discord_service.preflight(_base_env)
     if discord_pid and _is_running(discord_pid):
         results.append(f"discord    already running (pid {discord_pid})")
-    elif not _base_env.get("DISCORD_BOT_TOKEN"):
-        results.append("discord    skipped (DISCORD_BOT_TOKEN not set)")
+    elif problems:
+        results.append(f"discord    skipped ({problems[0]})")
+        results.extend(f"           {p}" for p in problems[1:])
     elif not (_PKG_DIR / "discord_bot.py").exists():
         results.append("discord    skipped (bot not installed)")
     else:
+        # -u and a real log file: a bot that dies on its first line has to leave
+        # a reason behind, or "discord doesn't work" is unanswerable.
         try:
-            proc = _popen([_PYTHON, "-m", "eng_crew.discord_bot"])
-            services["discord"] = {"pid": proc.pid}
-            results.append(f"discord    started (pid {proc.pid})")
+            log_file = discord_service.log_path()
+            with discord_service.open_log() as log:
+                proc = _popen([_PYTHON, "-u", "-m", "eng_crew.discord_bot"], log=log)
+            # Startup failures (bad token, refused intents) land within seconds.
+            time.sleep(3)
+            if _is_running(proc.pid):
+                services["discord"] = {"pid": proc.pid, "log": str(log_file)}
+                results.append(f"discord    started (pid {proc.pid}) -> log {log_file}")
+            else:
+                services.pop("discord", None)
+                results.append(f"discord    FAILED: exited at startup. Log: {log_file}")
+                results.extend(
+                    f"           {line}" for line in discord_service.log_tail().splitlines()
+                )
         except Exception as e:
             results.append(f"discord    FAILED: {e}")
 
@@ -347,6 +363,9 @@ def services_status() -> str:
         errors.append("ANTHROPIC_API_KEY missing from .env")
     if not (_PKG_DIR / "dashboard" / "static" / "index.html").exists():
         errors.append("dashboard frontend not built")
+    # Only nag about Discord once a token says the user means to use it.
+    if discord_service.token_set(_base_env) and not discord_service.library_installed():
+        errors.append(discord_service.LIBRARY_MISSING)
     if errors:
         lines.append("Setup issues:")
         lines.extend(f"  - {e}" for e in errors)
@@ -364,6 +383,12 @@ def services_status() -> str:
         status = "running" if running else "stopped"
         tail = f" -> http://localhost:{port}" if port and running else ""
         lines.append(f"  {name:<10} {status:<8} pid={pid}{tail}")
+        # A stopped bot is the thing people actually need explained.
+        if name == "discord" and not running:
+            lines.append(f"    log: {discord_service.log_path()}")
+            lines.extend(
+                f"    {line}" for line in discord_service.log_tail(6).splitlines()
+            )
     return "\n".join(lines)
 
 

@@ -13,6 +13,11 @@ Thin, single-agent-first bot:
                                       queue, and every ticket by status
   /ticket id:<n>                      One ticket in full: criteria, spend,
                                       review verdict, runs, history
+  /queue project:<alias>              That project's ticket queue — id, priority,
+                                      status, acceptance criteria, spend, WIP
+  /build ticket_id:<id>               Build a ticket that already exists. A
+                                      backlog ticket is approved to `ready` in
+                                      your name first; nothing new is filed.
   /status                             Recent and active runs
   /projects                           Configured project aliases
   /newtopic                           Forget this channel's conversation
@@ -32,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -90,9 +96,78 @@ def load_projects() -> dict:
                 "claude_md": p.get("claude_md_path") or path + "/CLAUDE.md",
             }
             known.add(path.lower())
-    except Exception:
-        pass
+    except Exception as e:
+        # Aliases still work, but a project registered by planning or a run would
+        # silently go missing from /projects — say so rather than shrug.
+        print(f"[discord_bot] could not read registered projects: {e}", file=sys.stderr)
     return projects
+
+
+def _unknown_project(key: str, projects: dict) -> str:
+    """The one reply every project-taking command gives for a name it has not got."""
+    available = ", ".join(f"`{k}`" for k in projects)
+    return (
+        f"❓ Unknown project `{key}`. Available: "
+        + (available or f"none — register one on the dashboard, or add it to {bot_config_path()}")
+    )
+
+
+# ── The ticket queue, from Discord ──────────────────────────────────────────────
+# A project is planned into tickets, not into a build (see eng_crew/planning.py),
+# so a phone with only /task on it could file new work but never touch the queue
+# that planning produced. These two read and pull from that queue, under the same
+# lifecycle, WIP limit and budget as the dashboard and the CLI.
+
+_QUEUE_ROWS = 20
+
+
+def queue_lines(cfg: dict, settings=None) -> list[str]:
+    """A project's queue as Discord lines — the data `eng-crew queue` prints."""
+    from . import budget as budget_mod
+    from . import tickets, tracker
+
+    path = cfg["path"]
+    state = tickets.wip(path, settings)
+    lines = [
+        f"**{cfg.get('name') or path}** — WIP {state['in_flight']}/{state['limit']} "
+        f"in flight ({state['slots']} slot(s) free)"
+    ]
+    rows = tracker.list_project_tickets(path)
+    if not rows:
+        lines.append("_No tickets for this project yet._")
+        return lines
+
+    for ticket in rows[:_QUEUE_ROWS]:
+        spend = budget_mod.annotate(ticket, settings)
+        money = f"${spend['spent_usd']:.2f}/${spend['budget_usd']:.2f}"
+        if spend["budget_exhausted"]:
+            money += " ⚠️"
+        criteria = "AC ✅" if (ticket.get("acceptance_criteria") or "").strip() else "AC ❌"
+        lines.append(
+            f"`#{ticket['id']}` p{ticket.get('priority', '')} · "
+            f"**{ticket.get('status', '')}** · {str(ticket.get('title', ''))[:60]} · "
+            f"{criteria} · {money}"
+        )
+    if len(rows) > _QUEUE_ROWS:
+        lines.append(f"_…and {len(rows) - _QUEUE_ROWS} more — see the dashboard._")
+    lines.append("Build one with `/build <ticket_id>`.")
+    return lines
+
+
+def build_reply(ticket_id: int, actor: str, settings=None) -> str:
+    """Build an existing ticket and say what happened. Never files a new one."""
+    from . import dispatch
+
+    result = dispatch.build_ticket(ticket_id, actor=actor, settings=settings)
+    if not result.ok:
+        return f"❌ {result.detail}"
+    if not result.started:
+        return f"⏸️ {result.detail}"
+    return (
+        f"🚀 Building ticket **#{ticket_id}** — "
+        f"{result.wip.get('in_flight', '?')}/{result.wip.get('limit', '?')} in flight. "
+        f"Track it on the dashboard; the result lands on an `ai-team/*` branch."
+    )
 
 
 # ── Task execution ──────────────────────────────────────────────────────────────
@@ -565,10 +640,7 @@ bot = EngCrewBot()
 async def cmd_task(interaction: discord.Interaction, project: str, task: str):
     projects = load_projects()
     if project not in projects:
-        keys = ", ".join(f"`{k}`" for k in projects) or f"none — register one on the dashboard, or add it to {bot_config_path()}"
-        await interaction.response.send_message(
-            f"❓ Unknown project `{project}`. Available: {keys}", ephemeral=True
-        )
+        await interaction.response.send_message(_unknown_project(project, projects), ephemeral=True)
         return
     cfg = projects[project]
     embed = discord.Embed(
@@ -590,10 +662,7 @@ async def cmd_backlog(interaction: discord.Interaction, project: str, status: st
 
     projects = load_projects()
     if project not in projects:
-        keys = ", ".join(f"`{k}`" for k in projects) or f"none — register one on the dashboard, or add it to {bot_config_path()}"
-        await interaction.response.send_message(
-            f"❓ Unknown project `{project}`. Available: {keys}", ephemeral=True
-        )
+        await interaction.response.send_message(_unknown_project(project, projects), ephemeral=True)
         return
     if status and status not in tickets_mod.STATUSES:
         await interaction.response.send_message(
@@ -644,6 +713,38 @@ async def cmd_ticket(interaction: discord.Interaction, id: int):
     await interaction.followup.send(embed=discord.Embed(
         title=title[:256], description=body[:4000], color=discord.Color.blurple(),
     ))
+@bot.tree.command(name="queue", description="Show a project's ticket queue")
+@app_commands.describe(project="Project alias (see /projects)")
+async def cmd_queue(interaction: discord.Interaction, project: str):
+    projects = load_projects()
+    if project not in projects:
+        await interaction.response.send_message(_unknown_project(project, projects), ephemeral=True)
+        return
+    loop = asyncio.get_running_loop()
+    await interaction.response.defer()
+    try:
+        lines = await loop.run_in_executor(bot.executor, queue_lines, projects[project])
+    except Exception as e:
+        await interaction.followup.send(f"❌ {e}")
+        return
+    body = "\n".join(lines)
+    await interaction.followup.send(body[:2000])
+    for chunk in [body[i:i + 1900] for i in range(2000, len(body), 1900)]:
+        await interaction.followup.send(chunk)
+
+
+@bot.tree.command(name="build", description="Build a ticket that is already in the queue")
+@app_commands.describe(ticket_id="Ticket ID (see /queue)")
+async def cmd_build(interaction: discord.Interaction, ticket_id: int):
+    loop = asyncio.get_running_loop()
+    await interaction.response.defer()
+    actor = str(getattr(interaction.user, "name", None) or interaction.user)
+    try:
+        message = await loop.run_in_executor(bot.executor, build_reply, ticket_id, actor)
+    except Exception as e:
+        await interaction.followup.send(f"❌ {e}")
+        return
+    await interaction.followup.send(message[:2000])
 
 
 @bot.tree.command(name="status", description="Show recent and active eng-crew runs")
@@ -689,10 +790,7 @@ async def cmd_projects(interaction: discord.Interaction):
 async def cmd_ideate(interaction: discord.Interaction, project: str):
     projects = load_projects()
     if project not in projects:
-        keys = ", ".join(f"`{k}`" for k in projects) or f"none — register one on the dashboard, or add it to {bot_config_path()}"
-        await interaction.response.send_message(
-            f"❓ Unknown project `{project}`. Available: {keys}", ephemeral=True
-        )
+        await interaction.response.send_message(_unknown_project(project, projects), ephemeral=True)
         return
     cfg = projects[project]
     cid = interaction.channel_id
@@ -739,10 +837,20 @@ async def cmd_endideate(interaction: discord.Interaction):
 
 
 def main() -> None:
-    token = os.environ.get("DISCORD_BOT_TOKEN", "")
-    if not token:
-        raise SystemExit("DISCORD_BOT_TOKEN not set in .env")
-    bot.run(token)
+    from . import discord_service
+
+    problems = discord_service.preflight()
+    if problems:
+        raise SystemExit("Cannot start the Discord bot:\n  - " + "\n  - ".join(problems))
+    token = os.environ["DISCORD_BOT_TOKEN"].strip()
+    # Two failures account for nearly every "the bot won't come online": a token
+    # that no longer matches the app, and an intent the app was never granted.
+    try:
+        bot.run(token)
+    except discord.LoginFailure:
+        raise SystemExit(discord_service.BAD_TOKEN) from None
+    except discord.PrivilegedIntentsRequired:
+        raise SystemExit(discord_service.INTENTS_REFUSED) from None
 
 
 if __name__ == "__main__":

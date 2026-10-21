@@ -76,6 +76,23 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   starts nothing. Dispatching is the human's approval, so it is what moves the
   ticket to `ready`. Over the WIP limit the ticket is filed and readied but no
   build starts, and the caller is told it is queued.
+- Building a ticket that already exists is the other way in
+  (`dispatch.build_ticket`), for a surface whose user is looking at a queue
+  rather than describing new work — Discord's `/queue <project>` and `/build
+  <ticket_id>`. It files nothing: approving a `backlog` ticket to `ready` is
+  credited to the person who asked, and everything after that is the path the
+  dashboard and the CLI take, under the same lifecycle, WIP limit and budget.
+- The tracker is readable from Discord as well as the dashboard: `/backlog
+  <project>` renders the WIP count, a tally per status and the tickets grouped
+  in lifecycle order, and `/ticket <id>` renders one ticket in full — criteria,
+  spend, the latest review verdict, its runs and its history. Both are
+  read-only; neither moves a ticket or starts a run.
+- The Discord bot's own dependency and credentials are checked before it is
+  launched, and its output is kept in `<data dir>/logs/discord_bot.log`
+  (`eng_crew/discord_service.py`), so a bot that dies at startup says why
+  instead of being reported as "started" and then, silently, "stopped".
+  `eng-crew discord [--check]` runs it in the foreground with the reason
+  printed at you.
 - Agent prompts live in `.claude/skills/<name>/SKILL.md` (frontmatter + template),
   loaded by `eng_crew/prompts.py` — edit a prompt without touching agent code.
 - Runs execute in their own git worktree and branch (`worktree_isolation`, on by

@@ -104,6 +104,42 @@ def dashboard(
 
 
 @app.command()
+def discord(
+    env_file: Optional[Path] = typer.Option(None, "--env", help="Path to .env file."),
+    check: bool = typer.Option(
+        False, "--check", help="Only report whether the bot could start, then exit."
+    ),
+) -> None:
+    """Run the Discord bot in the foreground, or check why it will not start.
+
+    Started as a background service the bot's output goes to a log; run it here
+    and whatever stops it — a missing extra, a rejected token, an intent the
+    Discord app was never granted — is printed straight at you.
+    """
+    from eng_crew.config import load_env_into_environ
+    from eng_crew import discord_service
+
+    load_env_into_environ(env_file)
+    problems = discord_service.preflight()
+    if problems:
+        for problem in problems:
+            console.print(f"[red]x[/red] {problem}")
+        tail = discord_service.log_tail()
+        if tail:
+            console.print(Panel(tail, title=f"last output — {discord_service.log_path()}"))
+        raise typer.Exit(1)
+    if check:
+        console.print("[green]ok[/green] token set and discord.py installed — "
+                      "run `eng-crew discord` to start the bot.")
+        return
+
+    from eng_crew.discord_bot import main as run_bot
+
+    console.print("[bold]Starting the eng-crew Discord bot[/] (Ctrl-C to stop)")
+    run_bot()
+
+
+@app.command()
 def project(
     project_path: Optional[Path] = typer.Argument(None, help="Project path to inspect or register."),
     list_all: bool = typer.Option(False, "--list", "-l", help="List all registered projects."),
