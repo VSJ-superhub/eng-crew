@@ -9,6 +9,10 @@ Thin, single-agent-first bot:
                                       starts nothing. Approving that ticket to
                                       `ready` is what releases it to the queue.
   /endideate                          Leave ideation mode (and remember the session)
+  /backlog project:<alias>            The project's ticket tracker — WIP, the
+                                      queue, and every ticket by status
+  /ticket id:<n>                      One ticket in full: criteria, spend,
+                                      review verdict, runs, history
   /status                             Recent and active runs
   /projects                           Configured project aliases
   /newtopic                           Forget this channel's conversation
@@ -353,6 +357,133 @@ async def _handle_ideate(message: discord.Message, text: str) -> None:
         await message.channel.send(embed=embed, view=IdeateBuildView(cfg, prop))
 
 
+# ── Tracker views (read-only) ───────────────────────────────────────────────────
+# The tracker was dashboard-only: from a phone you could file a ticket through
+# /ideate and never see where it went. These render the same facts the dashboard
+# and `eng-crew queue` show — status, acceptance criteria, spend against budget,
+# the review verdict — as text. Nothing here moves a ticket or starts a run.
+
+STATUS_ICONS = {
+    "backlog": "📥", "ready": "📋", "in_progress": "🔄", "in_review": "👀",
+    "in_qa": "🧪", "done": "✅", "rejected": "❌", "shipped": "🚢",
+}
+
+
+def _status_icon(status: str) -> str:
+    return STATUS_ICONS.get(status or "", "•")
+
+
+def _money(ticket: dict) -> str:
+    from . import budget as budget_mod
+
+    spend = budget_mod.annotate(ticket)
+    money = f"${spend['spent_usd']:.2f}/${spend['budget_usd']:.2f}"
+    return f"{money} ⛔" if spend["budget_exhausted"] else money
+
+
+def render_backlog(cfg: dict, status: str | None = None, limit: int = 20) -> tuple[str, str]:
+    """(title, body) for a project's tracker. Tickets grouped in lifecycle order."""
+    from . import tickets as tickets_mod
+    from . import tracker
+
+    name = cfg.get("name") or cfg.get("path") or "project"
+    rows = tracker.list_project_tickets(cfg["path"])
+    counts = tickets_mod.summarize(rows)
+    state = tickets_mod.wip(cfg["path"])
+
+    header = [
+        f"**WIP** {state['in_flight']}/{state['limit']} in flight "
+        f"({state['slots']} slot(s) free)",
+    ]
+    tally = " · ".join(f"{_status_icon(s)} {s} {n}" for s, n in counts.items() if n)
+    if tally:
+        header.append(tally)
+
+    if status:
+        rows = [t for t in rows if (t.get("status") or tickets_mod.BACKLOG) == status]
+    if not rows:
+        header.append(
+            f"\n*No {status} tickets.*" if status
+            else "\n*No tickets yet — `/ideate` to write one.*"
+        )
+        return f"🗂️ Backlog — {name}", "\n".join(header)
+
+    shown, overflow = rows[:limit], max(0, len(rows) - limit)
+    body = list(header)
+    group = None
+    for ticket in shown:
+        ticket_status = ticket.get("status") or tickets_mod.BACKLOG
+        if ticket_status != group:
+            group = ticket_status
+            body.append(f"\n**{_status_icon(group)} {group}**")
+        flag = "" if (ticket.get("acceptance_criteria") or "").strip() else " ⚠️ no criteria"
+        body.append(
+            f"`#{ticket['id']}` {str(ticket.get('title') or '')[:70]}"
+            f"\n   p{ticket.get('priority', '?')} · {_money(ticket)}{flag}"
+        )
+    if overflow:
+        body.append(f"\n*+{overflow} more — `/backlog` with a status, or the dashboard.*")
+    return f"🗂️ Backlog — {name}", "\n".join(body)
+
+
+def render_ticket(ticket_id: int) -> tuple[str, str] | None:
+    """(title, body) for one ticket, or None if there is no such ticket."""
+    from . import review as review_mod
+    from . import tickets as tickets_mod
+    from . import tracker
+
+    ticket = tracker.get_backlog_item(ticket_id)
+    if not ticket:
+        return None
+
+    status = ticket.get("status") or tickets_mod.BACKLOG
+    body = [f"{_status_icon(status)} **{status}** · p{ticket.get('priority', '?')} · {_money(ticket)}"]
+
+    description = str(ticket.get("description") or "").strip()
+    if description and description != str(ticket.get("title") or "").strip():
+        body.append(f"\n{description[:900]}")
+
+    criteria = str(ticket.get("acceptance_criteria") or "").strip()
+    body.append(
+        f"\n**Acceptance criteria**\n{criteria[:900]}" if criteria
+        else "\n⚠️ **No acceptance criteria** — the lifecycle will refuse to make "
+             "this ticket `ready`."
+    )
+
+    verdict = review_mod.latest_verdict(ticket_id)
+    if verdict:
+        icon = {review_mod.APPROVE: "✅", review_mod.CHANGES_REQUESTED: "🔁"}.get(
+            verdict["verdict"], "⚠️"
+        )
+        body.append(f"\n**Review** {icon} {verdict['verdict']} — {(verdict['reasons'] or '')[:300]}")
+
+    runs = tracker.get_ticket_runs(ticket_id)
+    if runs:
+        body.append("\n**Runs**")
+        for run in runs[-3:]:
+            branch = run.get("git_branch") or ""
+            body.append(
+                f"  • #{run['id']} {run.get('status', '?')}"
+                + (f" · `{branch}`" if branch else "")
+            )
+
+    history = tickets_mod.events(ticket_id)
+    if history:
+        body.append("\n**History**")
+        for event in history[-5:]:
+            move = (
+                f"{event.get('from_status')} → {event.get('to_status')}"
+                if event.get("from_status") != event.get("to_status") else "note"
+            )
+            note = (event.get("note") or "").strip()
+            body.append(
+                f"  • {move} by {event.get('actor', '?')}"
+                + (f" — {note[:120]}" if note else "")
+            )
+
+    return f"🎫 #{ticket_id} {str(ticket.get('title') or '')[:200]}", "\n".join(body)
+
+
 # ── Bot ─────────────────────────────────────────────────────────────────────────
 class EngCrewBot(discord.Client):
     def __init__(self):
@@ -398,7 +529,7 @@ class EngCrewBot(discord.Client):
                 "Ask me anything, or name a project and describe a task to build, "
                 "e.g. `resolvemind add a logout button`. Projects: "
                 + (", ".join(f"`{k}`" for k in projects) or "none configured")
-                + "\nOr use `/task`."
+                + "\nOr use `/task` to dispatch, `/backlog` to see a project's tickets."
             )
             return
 
@@ -447,6 +578,72 @@ async def cmd_task(interaction: discord.Interaction, project: str, task: str):
     )
     embed.set_footer(text="Runs on an isolated ai-team/* branch. Review the diff after.")
     await interaction.response.send_message(embed=embed, view=ConfirmView(cfg, task))
+
+
+@bot.tree.command(name="backlog", description="Show a project's ticket tracker")
+@app_commands.describe(
+    project="Project alias (see /projects)",
+    status="Only tickets in this status (backlog, ready, in_progress, ...)",
+)
+async def cmd_backlog(interaction: discord.Interaction, project: str, status: str | None = None):
+    from . import tickets as tickets_mod
+
+    projects = load_projects()
+    if project not in projects:
+        keys = ", ".join(f"`{k}`" for k in projects) or f"none — register one on the dashboard, or add it to {bot_config_path()}"
+        await interaction.response.send_message(
+            f"❓ Unknown project `{project}`. Available: {keys}", ephemeral=True
+        )
+        return
+    if status and status not in tickets_mod.STATUSES:
+        await interaction.response.send_message(
+            f"❓ Unknown status `{status}`. One of: "
+            + ", ".join(f"`{s}`" for s in tickets_mod.STATUSES),
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer()
+    loop = asyncio.get_running_loop()
+    try:
+        title, body = await loop.run_in_executor(
+            bot.executor, render_backlog, projects[project], status
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+        return
+    await interaction.followup.send(embed=discord.Embed(
+        title=title[:256], description=body[:4000], color=discord.Color.blurple(),
+    ))
+
+
+@cmd_backlog.autocomplete("status")
+async def _backlog_status_autocomplete(interaction: discord.Interaction, current: str):
+    from . import tickets as tickets_mod
+
+    return [
+        app_commands.Choice(name=s, value=s)
+        for s in tickets_mod.STATUSES if current.lower() in s
+    ][:25]
+
+
+@bot.tree.command(name="ticket", description="Show one ticket in full")
+@app_commands.describe(id="Ticket ID (see /backlog)")
+async def cmd_ticket(interaction: discord.Interaction, id: int):
+    await interaction.response.defer()
+    loop = asyncio.get_running_loop()
+    try:
+        view = await loop.run_in_executor(bot.executor, render_ticket, id)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+        return
+    if not view:
+        await interaction.followup.send(f"❓ No ticket #{id}.")
+        return
+    title, body = view
+    await interaction.followup.send(embed=discord.Embed(
+        title=title[:256], description=body[:4000], color=discord.Color.blurple(),
+    ))
 
 
 @bot.tree.command(name="status", description="Show recent and active eng-crew runs")
