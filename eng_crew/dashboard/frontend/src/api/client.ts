@@ -13,7 +13,7 @@ export interface Run { id: number; task_text: string; status: string; started_at
 export interface RunEvent { id: number; event_type: string; agent: string; message: string; created_at: string; cost_usd?: number; tokens_used?: number; model?: string; preprocessor_details?: Record<string, unknown> }
 export interface CostByAgentEntry { cost_usd: number; input_tokens: number; output_tokens: number; efficiency: number | string }
 export interface SubtaskPlan { id: string; description: string; agent_type: string; target_files: string[]; status?: string; review_passed?: boolean; diff?: string }
-export interface RunDetail { id: number; task_text: string; status: string; started_at: string; ended_at?: string; duration_secs?: number; cost_usd?: number; project_path?: string; git_branch?: string; final_summary?: string }
+export interface RunDetail { id: number; task_text: string; status: string; started_at: string; ended_at?: string; duration_secs?: number; cost_usd?: number; project_path?: string; git_branch?: string; base_branch?: string; base_reason?: string; final_summary?: string }
 
 export interface Clarification {
   subtask_id: string

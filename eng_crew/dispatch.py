@@ -251,7 +251,7 @@ def build_ticket(
     the same path the dashboard and the CLI take, under the same WIP limit and
     the same budget.
     """
-    from . import budget, tickets, tracker
+    from . import basing, budget, tickets, tracker
     from .config import load_settings
 
     cfg = settings or load_settings()
@@ -279,6 +279,14 @@ def build_ticket(
             f"nothing was started",
             ticket_id=ticket_id,
         )
+
+    # The prerequisites are done, but their branches still have to combine for
+    # this build to start from them. Checked here, before the approval, for the
+    # same reason: a ticket that cannot be built stays where it was.
+    try:
+        basing.ensure_buildable(ticket, explicit_base=base_branch)
+    except basing.ConflictingPrerequisites as exc:
+        return Dispatch(False, f"{exc}; nothing was started", ticket_id=ticket_id)
 
     if status in (tickets.BACKLOG, tickets.REJECTED):
         # Approving it is the step a person has to take; a ticket with no

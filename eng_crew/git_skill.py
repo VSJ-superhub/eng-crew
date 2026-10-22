@@ -40,7 +40,9 @@ def is_git_repo(project_path: str | Path) -> bool:
     try:
         _git(["rev-parse", "--git-dir"], cwd=root)
         return True
-    except (GitError, FileNotFoundError):
+    except (GitError, OSError):
+        # OSError covers a path that is not there at all: git never starts, and
+        # "not a repo" is the right answer rather than a traceback.
         return False
 
 
@@ -78,6 +80,69 @@ def branch_exists(project_path: str | Path, ref: str) -> bool:
         return True
     except (GitError, FileNotFoundError):
         return False
+
+
+def is_contained_in(project_path: str | Path, ref: str, container: str = "HEAD") -> bool:
+    """True when every commit on ``ref`` is already reachable from ``container``.
+
+    How "that branch is already merged" is asked: a done ticket whose branch
+    HEAD already contains has nothing left to base a dependent run on.
+    """
+    root = Path(project_path).expanduser().resolve()
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ref, container],
+        cwd=root, capture_output=True, encoding="utf-8", errors="replace",
+    )
+    return result.returncode == 0
+
+
+def merge_branches(
+    project_path: str | Path,
+    branch: str,
+    refs: list[str],
+    *,
+    base: str = "HEAD",
+) -> tuple[str | None, list[str]]:
+    """Create ``branch`` at ``base`` and merge every ref into it, in order.
+
+    The merging happens in a throwaway worktree, so the checkout the developer
+    is sitting in never changes branch and never sees a conflict. Returns
+    ``(failed_ref, merged_refs)``: ``failed_ref`` is None when all of them
+    merged and ``branch`` now exists, and is the first ref that would not merge
+    otherwise — in which case nothing is left behind, neither the branch nor
+    the worktree.
+    """
+    root = repo_root(project_path)
+    wt = create_worktree(root, branch, base=base)
+    merged: list[str] = []
+    try:
+        for ref in refs:
+            result = subprocess.run(
+                ["git", "merge", "--no-edit", ref],
+                cwd=wt, capture_output=True, encoding="utf-8", errors="replace",
+            )
+            if result.returncode != 0:
+                subprocess.run(["git", "merge", "--abort"], cwd=wt, capture_output=True)
+                return ref, merged
+            merged.append(ref)
+        return None, merged
+    finally:
+        # The worktree was only ever the place to do the merging; the branch it
+        # wrote is the output, and it outlives its worktree.
+        try:
+            remove_worktree(root, wt, force=True)
+        except GitError as exc:
+            log.warning("could not remove the merge worktree %s: %s", wt, exc)
+        if merged != list(refs):
+            try:
+                _git(["branch", "-D", branch], cwd=root)
+            except GitError:
+                pass
+
+
+def delete_branch(project_path: str | Path, branch_name: str) -> None:
+    """Delete a branch, merged or not. For a branch eng-crew made for itself."""
+    _git(["branch", "-D", branch_name], cwd=repo_root(project_path))
 
 
 def checkout_branch(project_path: str | Path, branch_name: str) -> None:
