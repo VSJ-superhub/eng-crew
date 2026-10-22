@@ -49,6 +49,21 @@ TOOL_CALL_EVENT = "tool_call"
 INCOMPLETE = "incomplete"
 
 
+def _extra_mcp_servers(cwd: str) -> dict:
+    """MCP servers eng-crew adds for an agent session, by project directory.
+
+    One place decides this, so every agent that runs through the CLI gets the
+    same set. Optional integrations answer with {} when they are off.
+    """
+    from .. import entroly_integration
+
+    try:
+        return entroly_integration.mcp_servers(cwd)
+    except Exception as exc:
+        print(f"[claude_cli] entroly MCP config skipped: {exc}", file=sys.stderr)
+        return {}
+
+
 def _cli_env() -> dict[str, str]:
     """Parent env minus the auth vars that shadow the CLI's own credentials."""
     return {k: v for k, v in os.environ.items() if k not in _AUTH_VARS_TO_STRIP}
@@ -264,6 +279,14 @@ class ClaudeCLIProvider(Provider):
         # so a sandboxed session cannot reach the user's own (dispatch, mail...).
         if kwargs.get("no_mcp"):
             cmd.append("--strict-mcp-config")
+        else:
+            # Extra MCP servers this session should be offered on top of the
+            # user's own — entroly's optimizer when it is enabled and
+            # installed, nothing otherwise. A sandboxed session gets none.
+            servers = _extra_mcp_servers(kwargs.get("cwd") or ".")
+            if servers:
+                cmd.extend(["--mcp-config",
+                            json.dumps({"mcpServers": servers})])
         resume_session = kwargs.get("resume_session")
         if resume_session:
             cmd.extend(["--resume", str(resume_session)])
