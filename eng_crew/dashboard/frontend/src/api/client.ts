@@ -60,7 +60,7 @@ export interface HealthMetrics {
 export type TicketStatus = 'backlog' | 'ready' | 'in_progress' | 'in_review' | 'in_qa' | 'done' | 'rejected' | 'shipped'
 export const TICKET_STATUSES: TicketStatus[] = ['backlog', 'ready', 'in_progress', 'in_review', 'in_qa', 'done', 'rejected', 'shipped']
 /** A ticket. `BacklogItem` is the legacy name for the same row. */
-export interface BacklogItem { id: number; title: string; description?: string; project_path?: string; claude_md_path?: string; priority: number; status: TicketStatus | string; acceptance_criteria?: string; created_at: string; project_id?: number; plan_id?: number; type?: string; run_id?: number; budget_usd?: number; spent_usd?: number; budget_exhausted?: boolean; depends_on?: number[]; prerequisites?: TicketRef[]; unmet_prerequisites?: TicketRef[]; blocked?: boolean }
+export interface BacklogItem { id: number; title: string; description?: string; project_path?: string; claude_md_path?: string; priority: number; status: TicketStatus | string; acceptance_criteria?: string; created_at: string; project_id?: number; plan_id?: number; type?: string; run_id?: number; budget_usd?: number; spent_usd?: number; budget_exhausted?: boolean; depends_on?: number[]; prerequisites?: TicketRef[]; unmet_prerequisites?: TicketRef[]; blocked?: boolean; area?: string }
 
 /** A ticket this one waits on, as the tracker reports it. */
 export interface TicketRef { id: number; title: string; status: string }
@@ -70,6 +70,12 @@ export interface TicketBudget { ticket_id: number; budget_usd: number; spent_usd
 export type Ticket = BacklogItem
 export interface TicketEvent { id: number; ticket_id: number; from_status: string; to_status: string; actor: string; note: string; created_at: string }
 export interface Wip { limit: number; in_flight: number; slots: number; statuses: string[] }
+/** The four things a roadmap card says about a ticket. Computed server-side
+ *  (eng_crew/tickets.py) so this view and Discord's /roadmap agree. */
+export type RoadmapState = 'done' | 'ready_to_start' | 'in_flight' | 'blocked'
+export const ROADMAP_STATES: RoadmapState[] = ['done', 'ready_to_start', 'in_flight', 'blocked']
+export interface RoadmapCard { id: number; title: string; status: TicketStatus | string; priority?: number; area: string; state: RoadmapState; depends_on: number[]; unmet_prerequisites: TicketRef[]; blocked: boolean }
+export interface Roadmap { project: Project; areas: string[]; groups: [string, RoadmapCard[]][]; cards: RoadmapCard[]; counts: Record<RoadmapState, number>; wip: Wip; total: number; overflow: number }
 export interface TicketQueue { project: Project; tickets: Ticket[]; ready: Ticket[]; blocked: Ticket[]; counts: Record<string, number>; wip: Wip }
 export interface ProjectStats { total_runs: number; completed: number; failed: number; running: number; total_cost_usd: number }
 export interface Project { id: number; name: string; project_path: string; claude_md_path: string; repo_url?: string; default_branch?: string; tech_stack?: string[]; test_command?: string; description?: string; active?: number; created_at?: string; stats?: ProjectStats }
@@ -134,6 +140,11 @@ export function setTicketBudget(id: number, budget_usd: number, actor = 'user'):
 }
 export function getTicketEvents(id: number): Promise<{ events: TicketEvent[] }> { return api('/api/tickets/' + id + '/events') }
 export function runTicket(id: number): Promise<{ ok: boolean }> { return post('/api/tickets/' + id + '/run', {}) }
+/** Which part of the product a ticket belongs to. '' clears it. */
+export function setTicketArea(id: number, area: string, actor = 'user'): Promise<{ ok: boolean; area: string }> {
+  return put('/api/tickets/' + id + '/area', { area, actor })
+}
+export function getRoadmap(projectId: number): Promise<Roadmap> { return api('/api/projects/' + projectId + '/roadmap') }
 export function getTicketQueue(projectId: number): Promise<TicketQueue> { return api('/api/projects/' + projectId + '/queue') }
 /** Pull the next ready ticket and build it. One build per project at a time. */
 export function runQueue(projectId: number): Promise<{ started: { ticket_id: number }[]; refused: { ticket_id: number; detail: string }[]; waiting: number; wip: Wip }> {

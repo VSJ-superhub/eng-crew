@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
-  ApiError, createProjectPlan, getProjectPlan, getTicketQueue, getTicketEvents,
-  moveTicket, planFromClaudeMd, runQueue, runTicket, setTicketBudget,
+  ApiError, createProjectPlan, getProjectPlan, getRoadmap, getTicketQueue, getTicketEvents,
+  moveTicket, planFromClaudeMd, runQueue, runTicket, setTicketArea, setTicketBudget,
+  ROADMAP_STATES,
 } from '../api/client';
-import type { Project, Ticket, TicketEvent, TicketStatus, Wip } from '../api/client';
+import type {
+  Project, Roadmap, RoadmapCard, RoadmapState, Ticket, TicketEvent, TicketStatus, Wip,
+} from '../api/client';
 
 const STATUS_BADGE: Record<string, string> = {
   backlog:     'bg-gray-500/20 text-gray-400',
@@ -104,12 +107,13 @@ function money(n: number): string {
   return '$' + n.toFixed(2)
 }
 
-function TicketCard({ ticket, busy, onMove, onRun, onBudget }: {
+function TicketCard({ ticket, busy, onMove, onRun, onBudget, onArea }: {
   ticket: Ticket
   busy: boolean
   onMove: (id: number, status: TicketStatus) => void
   onRun: (id: number) => void
   onBudget: (id: number, amount: number) => void
+  onArea: (id: number, area: string) => void
 }) {
   const [open, setOpen] = useState(false)
   const criteria = (ticket.acceptance_criteria ?? '').trim()
@@ -133,6 +137,7 @@ function TicketCard({ ticket, busy, onMove, onRun, onBudget }: {
               {LANE_LABEL[ticket.status] ?? ticket.status}
             </span>
             <span className='text-[10px] text-gray-600 font-mono'>p{ticket.priority}</span>
+            <span className='text-[10px] text-gray-500'>{ticket.area || 'Unassigned'}</span>
             {!criteria && (
               <span className='text-[10px] text-amber-500' title='A ticket cannot be made ready without acceptance criteria.'>
                 no acceptance criteria
@@ -193,6 +198,19 @@ function TicketCard({ ticket, busy, onMove, onRun, onBudget }: {
             </div>
           )}
 
+          <div>
+            <p className='text-[10px] uppercase text-gray-500 font-bold mb-1'>Area</p>
+            <p className='text-xs text-gray-400'>{ticket.area || 'Unassigned'}</p>
+            <button disabled={busy}
+              onClick={() => {
+                const answer = window.prompt('Area for this ticket (empty to clear):', ticket.area ?? '')
+                if (answer !== null) onArea(ticket.id, answer.trim())
+              }}
+              className='mt-1.5 text-[11px] px-2 py-1 rounded bg-white/5 text-gray-300 hover:bg-white/10 disabled:opacity-40'>
+              Change area
+            </button>
+          </div>
+
           {limit !== undefined && (
             <div>
               <p className='text-[10px] uppercase text-gray-500 font-bold mb-1'>Budget</p>
@@ -242,6 +260,113 @@ function TicketCard({ ticket, busy, onMove, onRun, onBudget }: {
   )
 }
 
+/** The roadmap's four states. Named in eng_crew/tickets.py; the server decides
+ *  which one a ticket is in, so this is only how each one looks. */
+const ROADMAP_LABEL: Record<RoadmapState, string> = {
+  done: 'done', ready_to_start: 'ready to start', in_flight: 'in flight', blocked: 'blocked',
+}
+
+const ROADMAP_BADGE: Record<RoadmapState, string> = {
+  done:           'bg-green-500/20 text-green-300',
+  ready_to_start: 'bg-violet-500/20 text-violet-300',
+  in_flight:      'bg-blue-500/20 text-blue-300',
+  blocked:        'bg-amber-500/20 text-amber-300',
+}
+
+function RoadmapCardView({ card, busy, onArea }: {
+  card: RoadmapCard
+  busy: boolean
+  onArea: (id: number, area: string) => void
+}) {
+  return (
+    <div className='bg-[#161927] rounded-lg border border-white/5 p-3 space-y-1.5'>
+      <div className='flex items-start gap-2'>
+        <span className='text-[10px] font-mono text-gray-600 shrink-0 pt-0.5'>#{card.id}</span>
+        <p className='text-sm text-white flex-1 min-w-0'>{card.title}</p>
+      </div>
+      <div className='flex flex-wrap items-center gap-2'>
+        <span className={'text-[10px] px-1.5 py-0.5 rounded font-bold uppercase ' + ROADMAP_BADGE[card.state]}>
+          {ROADMAP_LABEL[card.state]}
+        </span>
+        <span className='text-[10px] text-gray-500'>{LANE_LABEL[card.status] ?? card.status}</span>
+        <button disabled={busy}
+          onClick={() => {
+            const answer = window.prompt('Area for this ticket (empty to clear):', card.area)
+            if (answer !== null) onArea(card.id, answer.trim())
+          }}
+          title='Move this ticket to another area.'
+          className='text-[10px] text-gray-600 hover:text-violet-300 disabled:opacity-40'>
+          change area
+        </button>
+      </div>
+      {card.state === 'blocked' && (
+        <p className='text-[11px] text-amber-400'>
+          waits on {card.unmet_prerequisites.map(p => '#' + p.id + ' (' + p.status + ')').join(', ')}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/** One column per area, prerequisites above whatever waits on them. The order
+ *  and the states both come from the server — see eng_crew/tickets.py. */
+function RoadmapView({ projectId }: { projectId: number }) {
+  const [board, setBoard] = useState<Roadmap | null>(null)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState<number | null>(null)
+
+  const load = useCallback(async () => {
+    try { setBoard(await getRoadmap(projectId)) }
+    catch (e) { setError(errorText(e)) }
+  }, [projectId])
+
+  useEffect(() => { load() }, [load])
+
+  const handleArea = async (id: number, area: string) => {
+    setBusy(id); setError('')
+    try { await setTicketArea(id, area) }
+    catch (e) { setError(errorText(e)) }
+    finally { setBusy(null); await load() }
+  }
+
+  if (!board) {
+    return <p className='text-sm text-gray-500 animate-pulse'>Loading roadmap…</p>
+  }
+  if (board.cards.length === 0) {
+    return <p className='text-sm text-gray-500'>No tickets yet — plan the project to fill the roadmap.</p>
+  }
+
+  return (
+    <div className='space-y-4'>
+      <div className='flex flex-wrap gap-2'>
+        {ROADMAP_STATES.filter(s => board.counts[s] > 0).map(s => (
+          <span key={s} className={'text-[11px] px-2 py-0.5 rounded ' + ROADMAP_BADGE[s]}>
+            {board.counts[s]} {ROADMAP_LABEL[s]}
+          </span>
+        ))}
+      </div>
+
+      {error && (
+        <div className='p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-sm text-red-300'>{error}</div>
+      )}
+
+      <div className='grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4'>
+        {board.groups.map(([area, cards]) => (
+          <div key={area} className='space-y-2'>
+            <div className='flex items-center justify-between px-1'>
+              <p className='text-[10px] uppercase tracking-wider font-semibold text-gray-500'>{area}</p>
+              <span className='text-[10px] text-gray-600 font-mono'>{cards.length}</span>
+            </div>
+            {cards.map(c => (
+              <RoadmapCardView key={c.id} card={c} busy={busy === c.id} onArea={handleArea} />
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function ProjectTasks() {
   const { id } = useParams<{ id: string }>()
   const projectId = id ? parseInt(id) : NaN
@@ -255,6 +380,9 @@ export default function ProjectTasks() {
   const [planning, setPlanning] = useState(false)
   const [planningFailed, setPlanningFailed] = useState(false)
   const [goal, setGoal] = useState('')
+  // Two views of the same tickets: the queue (by status) and the roadmap (by
+  // area, in dependency order).
+  const [tab, setTab] = useState<'queue' | 'roadmap'>('queue')
 
   const load = useCallback(async () => {
     if (isNaN(projectId)) return
@@ -339,19 +467,35 @@ export default function ProjectTasks() {
 
       <div className='flex flex-wrap items-end justify-between gap-4'>
         <div>
-          <h1 className='text-2xl font-bold text-white'>Ticket queue</h1>
+          <h1 className='text-2xl font-bold text-white'>
+            {tab === 'queue' ? 'Ticket queue' : 'Roadmap'}
+          </h1>
           <p className='text-gray-400 text-sm mt-1'>
-            {project.description || `Continuous queue for ${project.name}.`}
+            {tab === 'queue'
+              ? (project.description || `Continuous queue for ${project.name}.`)
+              : 'Every ticket by area, prerequisites first.'}
           </p>
         </div>
-        <button onClick={handleRunQueue}
+        {tab === 'queue' && <button onClick={handleRunQueue}
           disabled={!wip || wip.slots <= 0
                     || tickets.every(t => t.status !== 'ready')
                     || tickets.some(t => t.status === 'in_progress')}
           title='Builds the highest-priority ready ticket.'
           className='px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm disabled:opacity-40'>
           Run queued work
-        </button>
+        </button>}
+      </div>
+
+      <div className='flex gap-1 border-b border-white/5'>
+        {(['queue', 'roadmap'] as const).map(name => (
+          <button key={name} onClick={() => setTab(name)}
+            className={'px-3 py-2 text-sm -mb-px border-b-2 transition-colors ' + (
+              tab === name
+                ? 'border-violet-500 text-white'
+                : 'border-transparent text-gray-500 hover:text-gray-300')}>
+            {name === 'queue' ? 'Queue' : 'Roadmap'}
+          </button>
+        ))}
       </div>
 
       {wip && <WipBar wip={wip} />}
@@ -362,7 +506,9 @@ export default function ProjectTasks() {
         </div>
       )}
 
-      {tickets.length === 0 && (
+      {tab === 'roadmap' && <RoadmapView projectId={projectId} />}
+
+      {tab === 'queue' && tickets.length === 0 && (
         <div className='p-8 bg-[#161927] rounded-2xl border border-dashed border-white/10 space-y-4'>
           {planning ? (
             <div className='text-center'>
@@ -395,7 +541,7 @@ export default function ProjectTasks() {
         </div>
       )}
 
-      {tickets.length > 0 && (
+      {tab === 'queue' && tickets.length > 0 && (
         <div className='grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4'>
           {[...lanes, ...extras].map(lane => (
             <div key={lane.status} className='space-y-2'>
@@ -411,7 +557,8 @@ export default function ProjectTasks() {
                     <TicketCard key={t.id} ticket={t} busy={busy === t.id}
                       onMove={(tid, status) => act(tid, () => moveTicket(tid, status))}
                       onRun={tid => act(tid, () => runTicket(tid))}
-                      onBudget={(tid, amount) => act(tid, () => setTicketBudget(tid, amount))} />
+                      onBudget={(tid, amount) => act(tid, () => setTicketBudget(tid, amount))}
+                      onArea={(tid, area) => act(tid, () => setTicketArea(tid, area))} />
                   ))}
             </div>
           ))}

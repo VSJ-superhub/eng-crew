@@ -34,8 +34,15 @@ def _extract_json(text: str) -> dict:
         raise PlanningFailed(f"the planner returned malformed JSON: {exc}") from exc
 
 
-def _clean(raw: Any, index: int) -> dict | None:
-    """Normalise one planner ticket. Returns None if it is not usable."""
+def _clean(raw: Any, index: int, areas: list[str] | None = None) -> dict | None:
+    """Normalise one planner ticket. Returns None if it is not usable.
+
+    ``areas`` is the set of area names seen so far in this plan, in the
+    spelling they were first written. A ticket's own area is folded onto one of
+    them when it is the same name in different casing, and a ticket that named
+    none falls back to the plan's first area rather than inventing a label —
+    the point of an area is that a project has a few, not one per ticket.
+    """
     if not isinstance(raw, dict):
         return None
     title = str(raw.get("title") or "").strip()
@@ -52,7 +59,11 @@ def _clean(raw: Any, index: int) -> dict | None:
         priority = int(raw.get("priority"))
     except (TypeError, ValueError):
         priority = (index + 1) * 10
+    area = tickets.canonical_area(raw.get("area"), areas or [])
+    if not area and areas:
+        area = areas[0]
     return {
+        "area": area,
         "title": title[:200],
         "description": str(raw.get("description") or title).strip(),
         "acceptance_criteria": criteria,
@@ -111,15 +122,25 @@ def plan_tickets(
     if not isinstance(raw_tickets, list) or not raw_tickets:
         raise PlanningFailed("the planner produced no tickets")
 
+    # The areas the planner declared up front, if it did, so a ticket that
+    # spells one differently is folded onto the name already in play.
+    areas: list[str] = []
+    for name in (data.get("areas") if isinstance(data.get("areas"), list) else []):
+        folded = tickets.canonical_area(name, areas)
+        if folded and folded not in areas:
+            areas.append(folded)
+
     created: list[dict] = []
     # position in the plan -> the ticket id it became, so the dependencies the
     # planner wrote between *positions* can be resolved once every ticket exists.
     ids_by_position: dict[int, int] = {}
     wanted: list[tuple[int, list[int]]] = []
     for index, raw in enumerate(raw_tickets[:_MAX_TICKETS]):
-        cleaned = _clean(raw, index)
+        cleaned = _clean(raw, index, areas)
         if cleaned is None:
             continue
+        if cleaned["area"] and cleaned["area"] not in areas:
+            areas.append(cleaned["area"])
         ticket_id = tracker.add_backlog_item(
             title=cleaned["title"],
             description=cleaned["description"],
@@ -131,6 +152,7 @@ def plan_tickets(
             acceptance_criteria=cleaned["acceptance_criteria"],
             created_by=actor,
             plan_id=plan_id,
+            area=cleaned["area"],
         )
         ids_by_position[index + 1] = ticket_id
         if cleaned["depends_on"]:

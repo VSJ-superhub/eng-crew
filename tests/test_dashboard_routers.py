@@ -415,3 +415,56 @@ def test_ollama_availability_is_a_fast_bool_when_absent(monkeypatch):
     start = time.time()
     assert ollama.is_available() is False
     assert time.time() - start < 2
+
+
+# --- roadmap ------------------------------------------------------------
+#
+# The roadmap is the project page's other view of the same tickets: grouped by
+# area rather than by status, and ordered so a prerequisite is above whatever
+# waits on it. Its states are computed server-side so Discord and the dashboard
+# cannot disagree about what "blocked" means.
+
+
+def test_the_roadmap_groups_a_project_s_tickets_by_area(client, project):
+    from eng_crew import tickets
+
+    engine = tracker.add_backlog_item(
+        "Schema", "tables", project["path"], "", acceptance_criteria="- ok",
+        area="Engine")
+    waiting = tracker.add_backlog_item(
+        "API", "endpoints", project["path"], "", acceptance_criteria="- ok",
+        area="Engine", depends_on=[engine])
+    stray = tracker.add_backlog_item(
+        "Docs", "words", project["path"], "", acceptance_criteria="- ok")
+
+    body = client.get(f"/api/projects/{project['id']}/roadmap").json()
+    groups = {area: cards for area, cards in body["groups"]}
+    assert [c["id"] for c in groups["Engine"]] == [engine, waiting]
+    assert [c["id"] for c in groups[tickets.UNASSIGNED]] == [stray]
+    assert groups["Engine"][1]["state"] == tickets.ROADMAP_BLOCKED
+    assert body["counts"][tickets.ROADMAP_BLOCKED] == 1
+
+
+def test_the_roadmap_of_an_unknown_project_is_a_404(client):
+    assert client.get("/api/projects/999999/roadmap").status_code == 404
+
+
+def test_a_ticket_s_area_can_be_set_through_the_api_and_is_recorded(client, project):
+    from eng_crew import tickets
+
+    ticket_id = tracker.add_backlog_item(
+        "Schema", "tables", project["path"], "", acceptance_criteria="- ok",
+        area="Engine")
+
+    resp = client.put(f"/api/tickets/{ticket_id}/area",
+                      json={"area": "Website", "actor": "dana"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["area"] == "Website"
+    assert tracker.get_backlog_item(ticket_id)["area"] == "Website"
+    history = tickets.events(ticket_id)
+    assert history[-1]["actor"] == "dana"
+    assert "Website" in history[-1]["note"]
+
+
+def test_setting_the_area_of_an_unknown_ticket_is_a_404(client):
+    assert client.put("/api/tickets/999999/area", json={"area": "Engine"}).status_code == 404

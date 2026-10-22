@@ -34,6 +34,22 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   one naming what is unfinished and leaves the ticket where it was. A
   dependency that would close a cycle is refused rather than stored. A ticket
   with no dependencies behaves exactly as it always did.
+- A ticket carries an **area** (`eng_crew/tickets.py`): a short per-project
+  label — Engine, Website, Admin — saying which part of the product the work
+  belongs to. The planner decides a small set of them for the project and gives
+  every ticket one of those names, reusing the spelling already in play rather
+  than inventing a label per ticket. A ticket with no area keeps working and
+  shows under "Unassigned". Changing one is recorded in `ticket_events` with the
+  actor, like a status change, and can be done from the dashboard, Discord
+  (`/area`) or the CLI (`eng-crew area <id> <name>`).
+- The **Roadmap** (`tickets.roadmap`) is what areas are for: the same tickets
+  grouped by area instead of status, ordered so a prerequisite is always above
+  whatever waits on it, each one marked done, ready to start, in flight, or
+  blocked with the unfinished prerequisites named. One function serves all three
+  surfaces — the dashboard project page's Roadmap tab, Discord's `/roadmap
+  <project>` (bounded in length like `/backlog`) and `eng-crew roadmap` — so
+  they cannot disagree about what is blocked. The discussion agent reads the
+  tracker grouped by area too, when areas are set.
 - Planning a project creates tickets (`eng_crew/planning.py`); it does not launch
   a build of the goal text. Running queued work builds the actual tickets — the
   task handed to the pipeline is the ticket's title, description, and acceptance
