@@ -428,6 +428,16 @@ def _init_db():
 ORPHAN_CLAIM_GRACE_MINUTES = 15
 
 
+# A ticket's run_id is its latest run, and a rebuilt ticket keeps pointing at
+# the previous attempt until the new build process creates its run. Only a run
+# that started at or after the ticket's latest claim (its move to in_progress)
+# speaks for the attempt in flight; judging the new claim by the old run's
+# result rejected every rebuild a second after it was requested.
+_RUN_IS_CURRENT = """(SELECT r.started_at FROM runs r WHERE r.id = b.run_id)
+      >= COALESCE((SELECT MAX(e.created_at) FROM ticket_events e
+                   WHERE e.ticket_id = b.id AND e.to_status = 'in_progress'), '')"""
+
+
 def cleanup_stale_backlog_items() -> int:
     """Unstick work whose run is over but whose row still says it is in flight.
 
@@ -448,9 +458,10 @@ def cleanup_stale_backlog_items() -> int:
     def _resolve_tickets(conn, to_status: str, run_statuses: tuple[str, ...], note: str) -> int:
         placeholders = ",".join("?" * len(run_statuses))
         rows = conn.execute(
-            f"""SELECT id FROM backlog_items
-                WHERE status=? AND COALESCE(type,'') != 'subtask' AND run_id IS NOT NULL
-                  AND run_id IN (SELECT id FROM runs WHERE status IN ({placeholders}))""",
+            f"""SELECT b.id FROM backlog_items b
+                WHERE b.status=? AND COALESCE(b.type,'') != 'subtask' AND b.run_id IS NOT NULL
+                  AND b.run_id IN (SELECT id FROM runs WHERE status IN ({placeholders}))
+                  AND {_RUN_IS_CURRENT}""",
             (IN_PROGRESS, *run_statuses),
         ).fetchall()
         if not rows:
@@ -485,9 +496,9 @@ def cleanup_stale_backlog_items() -> int:
                 # cleanup on import. Only a claim that has sat run-less for a
                 # while is an orphan.
                 orphans = conn.execute(
-                    """SELECT b.id FROM backlog_items b
+                    f"""SELECT b.id FROM backlog_items b
                        WHERE b.status=? AND COALESCE(b.type,'') != 'subtask'
-                         AND b.run_id IS NULL
+                         AND (b.run_id IS NULL OR NOT {_RUN_IS_CURRENT})
                          AND COALESCE((SELECT MAX(e.created_at) FROM ticket_events e
                                        WHERE e.ticket_id = b.id), '')
                              < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)""",
