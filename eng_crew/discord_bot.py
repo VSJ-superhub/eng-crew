@@ -203,8 +203,7 @@ def task_reply(cfg: dict, task: str, actor: str, settings=None) -> str:
                      f"{result.ticket_id}` shows them.")
     if result.warning:
         lines.append(f"⚠️ {result.warning}")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 # ── Confirm card ────────────────────────────────────────────────────────────────
