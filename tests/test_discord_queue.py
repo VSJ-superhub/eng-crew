@@ -185,3 +185,64 @@ def test_build_refuses_a_ticket_that_is_already_building(db, cfg, project, launc
     reply = discord_bot.build_reply(ticket_id, "alway", cfg)
     assert reply.startswith("❌") and "in_progress" in reply
     assert not launched
+
+
+# ── Run it (free-text task from a message) ──────────────────────────────────────
+#
+# The confirm card used to call the pipeline directly, so a Discord task built
+# with no ticket: no criteria, no review, no budget. It now files one.
+
+@pytest.fixture
+def drafted(monkeypatch):
+    """The Manager's draft, without a model call."""
+    from eng_crew import manager
+
+    monkeypatch.setattr(manager, "draft_ticket", lambda task, path, orientation="": {
+        "title": "Add a logout button",
+        "description": task,
+        "acceptance_criteria": "- a signed-in user can log out",
+    })
+
+
+def test_run_it_files_a_ticket_credited_to_the_clicker_and_builds_it(
+    db, cfg, project, launched, drafted
+):
+    reply = discord_bot.task_reply({"name": "demo", "path": project},
+                                   "add a logout button", "alway", cfg)
+
+    rows = tracker.list_project_tickets(project)
+    assert len(rows) == 1, "Run it files exactly one ticket"
+    ticket = rows[0]
+    assert (ticket["acceptance_criteria"] or "").strip()
+    assert f"#{ticket['id']}" in reply and reply.startswith("🚀")
+    assert "Manager drafted" in reply
+    ready = [e for e in tickets.events(ticket["id"]) if e["to_status"] == tickets.READY]
+    assert ready and ready[0]["actor"] == "alway"
+    assert launched, "the ticket's build was started"
+
+
+def test_run_it_with_no_definition_of_done_files_nothing(db, cfg, project, launched, monkeypatch):
+    from eng_crew import manager
+
+    def refuse(*a, **kw):
+        raise manager.DraftFailed("the manager could not draft criteria")
+
+    monkeypatch.setattr(manager, "draft_ticket", refuse)
+    reply = discord_bot.task_reply({"name": "demo", "path": project}, "do stuff", "alway", cfg)
+
+    assert reply.startswith("❌")
+    assert tracker.list_project_tickets(project) == []
+    assert launched == []
+
+
+def test_run_it_at_the_wip_limit_queues_the_ticket_without_building(
+    db, project, launched, drafted
+):
+    cfg = Settings(wip_limit=1, ticket_budget_usd=15.0)
+    _ticket(project, "already building", status=tickets.IN_PROGRESS)
+
+    reply = discord_bot.task_reply({"name": "demo", "path": project},
+                                   "add a logout button", "alway", cfg)
+
+    assert reply.startswith("⏸️") and "WIP limit" in reply
+    assert launched == []
