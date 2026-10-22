@@ -402,3 +402,49 @@ def test_an_untruncated_diff_adds_no_files_not_shown_notice(db, reviewer):
     assert review.NOT_SHOWN_HEADING not in prompt, \
         "a complete diff was given a 'files not shown' notice anyway"
     assert "button.color" in prompt
+
+
+# --- reading the verdict ------------------------------------------------
+#
+# A reviewer wrote "APPROVE — every acceptance criterion is met by this diff"
+# and eng-crew filed it as changes requested, because only a first line that
+# was the verdict word alone could be read.
+
+
+@pytest.mark.parametrize("reply, verdict", [
+    ("APPROVE", review.APPROVE),
+    ("APPROVE — every acceptance criterion is met by this diff", review.APPROVE),
+    ("**Approved**: the criteria are met", review.APPROVE),
+    ("CHANGES_REQUESTED\n- the button is red", review.CHANGES_REQUESTED),
+    ("Changes requested — the button is red", review.CHANGES_REQUESTED),
+])
+def test_a_verdict_is_read_from_the_start_of_the_first_line(reply, verdict):
+    assert review.parse_verdict(reply)[0] == verdict
+
+
+def test_reasons_on_the_verdict_line_are_kept():
+    _, reasons = review.parse_verdict("APPROVE — every criterion is met")
+    assert reasons == "every criterion is met"
+
+
+def test_a_reply_with_no_verdict_is_still_not_an_approval():
+    verdict, reasons = review.parse_verdict("Looks mostly fine to me")
+    assert verdict == review.CHANGES_REQUESTED
+    assert "unreadable" in reasons
+
+
+def test_a_usage_limit_reply_is_review_unavailable_not_a_rejection(db, reviewer, monkeypatch):
+    """The CLI's error result is raised, so nobody mistakes it for a verdict."""
+    from eng_crew.providers.claude_cli import CLIErrorResult
+
+    def limit(*a, **kw):
+        raise CLIErrorResult("You've hit your session limit · resets 12:50pm")
+
+    monkeypatch.setattr(agent_base.BaseAgent, "call", limit)
+    ticket_id = in_review_ticket()
+
+    with pytest.raises(review.ReviewUnavailable):
+        review.review_ticket(ticket_id)
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.IN_REVIEW
+    assert review.latest_verdict(ticket_id)["verdict"] == review.UNAVAILABLE
+    assert "changes_requested" not in notes_of(ticket_id)

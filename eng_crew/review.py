@@ -265,9 +265,18 @@ def parse_verdict(text: str) -> tuple[str, str]:
     if not body:
         return CHANGES_REQUESTED, "the reviewer returned nothing"
     head, _, rest = body.partition("\n")
-    token = head.strip().strip("*#:.-").replace(" ", "_").upper()
-    verdict = _FIRST_WORD.get(token)
-    reasons = rest.strip() or head.strip()
+    # The verdict is the first word or two of the first line, however the line
+    # goes on: "APPROVE", "**Changes requested**", "APPROVE — every criterion…".
+    words = re.findall(r"[A-Za-z]+", head)
+    verdict = None
+    for count in (2, 1):
+        if len(words) >= count:
+            verdict = _FIRST_WORD.get("_".join(words[:count]).upper())
+            if verdict is not None:
+                break
+    trailing = re.split(r"\s[—–:-]\s|:\s", head.strip(), maxsplit=1)
+    inline = trailing[1].strip() if len(trailing) > 1 else ""
+    reasons = "\n".join(p for p in (inline, rest.strip()) if p) or head.strip()
     if verdict is None:
         return CHANGES_REQUESTED, f"the reviewer's verdict was unreadable: {body[:400]}"
     return verdict, reasons or "(no reasons given)"
