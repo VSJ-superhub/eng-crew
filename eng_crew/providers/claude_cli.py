@@ -27,6 +27,17 @@ TRUNCATION_PREFIX = (
 _MAX_RETRIES = 3
 _RETRY_DELAYS = [2, 5, 10]
 
+
+class CLIErrorResult(RuntimeError):
+    """The CLI finished with an error result rather than the model's answer.
+
+    A usage limit ("You've hit your session limit · resets …") arrives this way:
+    a normal `result` event whose text is the error and whose `is_error` is set.
+    Returned as text it reads as the model's reply — a builder "summary", a
+    reviewer "verdict" — so it is raised instead, and each caller treats it as
+    the step not having happened.
+    """
+
 # The CLI prefers a static API key over the claude.ai subscription OAuth it is
 # actually meant to use here, so an ANTHROPIC_API_KEY inherited from .env (see
 # eng_crew.mcp_server, which loads .env into every subprocess env) silently
@@ -319,6 +330,7 @@ class ClaudeCLIProvider(Provider):
             "cost_usd": 0.0,
             "truncated": False,
             "got_result": False,
+            "is_error": False,
         }
         timeline = ToolCallTimeline()
 
@@ -343,6 +355,8 @@ class ClaudeCLIProvider(Provider):
                 collected["cost_usd"] = float(cost) if cost is not None else 0.0
                 if evt.get("subtype") == "error_max_turns":
                     collected["truncated"] = True
+                elif evt.get("is_error"):
+                    collected["is_error"] = True
         finally:
             # A stream that ended mid-tool — turn limit, crash, cancellation —
             # still has calls worth recording, and the retry loop above needs
@@ -379,6 +393,10 @@ class ClaudeCLIProvider(Provider):
             output_tokens = got["output_tokens"]
             cost_usd = got["cost_usd"] or calculate_cost(model, input_tokens, output_tokens)
             text = got["text"]
+
+            if got["is_error"]:
+                # Not retried: a usage limit will still be there in ten seconds.
+                raise CLIErrorResult(text.strip() or "the Claude CLI reported an error")
 
             if got["truncated"]:
                 # Partial work is still useful, but must never read as complete.
