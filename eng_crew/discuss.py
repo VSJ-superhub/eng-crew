@@ -29,6 +29,11 @@ DISCUSS_MODEL = "claude-sonnet-5"
 DISCUSS_TOOLS = "Read,Grep,Glob,WebSearch,WebFetch"
 DISCUSS_MAX_TURNS = 12
 
+# The tracker is an aside, not the message: a project with hundreds of tickets
+# must not push the question itself out of the agent's attention.
+MAX_TRACKER_TICKETS = 15
+MAX_TRACKER_CHARS = 2000
+
 # Turns kept when the caller does not trim. Long enough for a real thread,
 # short enough that the prompt does not grow without bound.
 MAX_HISTORY_TURNS = 20
@@ -89,6 +94,70 @@ def is_question(text: str) -> bool:
     return first in _ASKING or lowered.startswith(("help me understand", "any idea", "tell me"))
 
 
+def _ticket_line(ticket: dict) -> str:
+    money = f"${ticket['spent_usd']:.2f}/${ticket['budget_usd']:.2f}"
+    if ticket.get("budget_exhausted"):
+        money += " (budget spent)"
+    line = (
+        f"  #{ticket['id']} p{ticket.get('priority', '?')} "
+        f"{str(ticket.get('title') or '')[:70]} — {money}"
+    )
+    verdict = ticket.get("review")
+    if verdict:
+        reasons = (verdict.get("reasons") or "")[:120]
+        line += f" — review: {verdict['verdict']}" + (f" ({reasons})" if reasons else "")
+    return line
+
+
+def tracker_section(project_path: str, project_name: str = "") -> str:
+    """The project's tracker as prompt text, or "" when there is nothing to say.
+
+    "What is next on <project>?" is a tracker question, and the files cannot
+    answer it. This reads the same board ``/backlog`` renders — one source, so
+    the two surfaces cannot drift — and bounds what it puts in the prompt,
+    because the question matters more than the hundredth ticket.
+    """
+    if not project_path:
+        return ""
+    from . import tickets
+
+    try:
+        board = tickets.board(project_path, limit=MAX_TRACKER_TICKETS)
+    except Exception as exc:  # an unreadable tracker is not worth failing a chat over
+        print(f"[discuss] tracker unavailable: {exc}", file=sys.stderr)
+        return ""
+    if not board["total"]:
+        return ""
+
+    state = board["wip"]
+    head = [
+        f"\n=== TICKET TRACKER — {project_name or project_path} ===",
+        f"WIP {state['in_flight']}/{state['limit']} in flight "
+        f"({state['slots']} slot(s) free).",
+        "This is what the tracker says right now, as read-only context. You "
+        "cannot move a ticket or start a run — say what you would do and let "
+        "the user take it to the engineering team.",
+    ]
+    lines: list[str] = []
+    for status, items in board["groups"]:
+        lines.append(f"[{status}]")
+        lines.extend(_ticket_line(ticket) for ticket in items)
+
+    # Drop tickets off the end until the whole section fits, and say how many
+    # went: a truncation nobody can see is a lie about the queue's length.
+    hidden = board["overflow"]
+    budget = MAX_TRACKER_CHARS - len("\n".join(head)) - 80
+    while lines and len("\n".join(lines)) > budget:
+        if not lines[-1].startswith("["):
+            hidden += 1
+        lines.pop()
+    footer = (
+        [f"… +{hidden} more ticket(s) not shown — the dashboard has the rest."]
+        if hidden else []
+    )
+    return "\n".join(head + lines + footer)
+
+
 @dataclass
 class DiscussReply:
     reply: str
@@ -106,6 +175,7 @@ def _build_prompt(
     message: str,
     project_name: str = "",
     project_context: str = "",
+    project_path: str = "",
 ) -> str:
     parts = [_SYSTEM]
 
@@ -117,6 +187,10 @@ def _build_prompt(
         )
     if project_context:
         parts.append(f"\n=== PROJECT ORIENTATION ===\n{project_context}")
+
+    tracker = tracker_section(project_path, project_name)
+    if tracker:
+        parts.append(tracker)
 
     if history:
         parts.append("\n=== CONVERSATION SO FAR ===")
@@ -142,7 +216,8 @@ def discuss(
     is used in that case so the tools have somewhere harmless to point.
     """
     prompt = _build_prompt(
-        trim_history(history or []), message, project_name, project_context
+        trim_history(history or []), message, project_name, project_context,
+        project_path,
     )
     cwd = project_path or tempfile.gettempdir()
 

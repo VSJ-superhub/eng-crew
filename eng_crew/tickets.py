@@ -244,3 +244,51 @@ def summarize(tickets: Iterable[dict]) -> dict[str, int]:
         status = ticket.get("status") or BACKLOG
         counts[status] = counts.get(status, 0) + 1
     return counts
+
+
+def _lifecycle_key(ticket: dict) -> tuple:
+    status = ticket.get("status") or BACKLOG
+    order = STATUSES.index(status) if status in STATUSES else len(STATUSES)
+    return (order, ticket.get("priority") or 0, ticket.get("id") or 0)
+
+
+def board(project_path: str, status: str | None = None, limit: int = 20) -> dict:
+    """One read of a project's tracker, for any surface that shows it.
+
+    Discord's `/backlog` and the discussion agent's prompt both answer "what is
+    going on with this project?", and they must answer it the same way: this is
+    the single place that reads it. Tickets come back grouped in lifecycle
+    order, each annotated with its spend against budget, and the ones in review
+    with their latest verdict.
+    """
+    from . import budget as budget_mod
+    from . import review as review_mod
+
+    rows = _tracker().list_project_tickets(project_path)
+    counts = summarize(rows)
+    state = wip(project_path)
+
+    if status:
+        rows = [t for t in rows if (t.get("status") or BACKLOG) == status]
+    rows.sort(key=_lifecycle_key)
+    shown = [budget_mod.annotate(t) for t in rows[:limit]]
+    for ticket in shown:
+        if (ticket.get("status") or BACKLOG) == IN_REVIEW:
+            ticket["review"] = review_mod.latest_verdict(ticket["id"])
+
+    groups: list[tuple[str, list[dict]]] = []
+    for ticket in shown:
+        ticket_status = ticket.get("status") or BACKLOG
+        if not groups or groups[-1][0] != ticket_status:
+            groups.append((ticket_status, []))
+        groups[-1][1].append(ticket)
+
+    return {
+        "project_path": project_path,
+        "wip": state,
+        "counts": counts,
+        "tickets": shown,
+        "groups": groups,
+        "total": len(rows),
+        "overflow": max(0, len(rows) - len(shown)),
+    }

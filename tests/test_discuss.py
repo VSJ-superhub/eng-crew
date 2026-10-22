@@ -174,3 +174,122 @@ def test_the_bot_routes_questions_to_discussion():
     # The old dead end must be gone: an unrecognised message is now a conversation.
     assert "I couldn't tell which project" not in src
     assert re.search(r"_handle_discuss\(message, content", src)
+
+
+# --- the ticket tracker in the prompt ------------------------------------
+#
+# "what is next on <project>?" is a tracker question. Answered from the files
+# alone it is a guess, so a discussion that names a registered project gets
+# that project's board alongside its code.
+
+
+@pytest.fixture
+def db(tmp_path, monkeypatch):
+    from eng_crew import tracker
+
+    monkeypatch.setattr(tracker, "DB_PATH", tmp_path / "tickets.db")
+    tracker.close_connection()
+    tracker._init_db()
+    yield tmp_path
+    tracker.close_connection()
+
+
+def _ticket(title, *, project="/proj", criteria="- it works", priority=50):
+    from eng_crew import tracker
+
+    return tracker.add_backlog_item(
+        title, "the details", project, "", priority=priority,
+        acceptance_criteria=criteria,
+    )
+
+
+def test_a_project_puts_its_tracker_in_the_prompt(fake_llm, db):
+    from eng_crew import review as review_mod
+    from eng_crew import tickets
+
+    waiting = _ticket("add pagination", priority=10)
+    flying = _ticket("fix the footer", priority=20)
+    tickets.move(flying, tickets.READY, "tester")
+    tickets.move(flying, tickets.IN_PROGRESS, "tester")
+    tickets.move(flying, tickets.IN_REVIEW, "builder")
+    tickets.note(
+        flying, review_mod.REVIEWER_ACTOR,
+        f"review: {review_mod.CHANGES_REQUESTED} — the gate never ran",
+    )
+
+    discuss.discuss("what is next here?", project_path="/proj",
+                    project_name="Demo")
+    prompt = fake_llm.prompt
+
+    assert "TICKET TRACKER" in prompt
+    # WIP in flight against the limit.
+    assert "1/3 in flight" in prompt
+    # Grouped in lifecycle order, with id, priority and title.
+    section = prompt.split("=== TICKET TRACKER")[1]
+    assert section.index("[backlog]") < section.index("[in_review]"), (
+        "statuses are not in lifecycle order"
+    )
+    assert f"#{waiting}" in prompt and "add pagination" in prompt
+    assert f"#{flying}" in prompt and "fix the footer" in prompt
+    assert "p10" in prompt and "p20" in prompt
+    # The latest review verdict for a ticket in review.
+    assert review_mod.CHANGES_REQUESTED in prompt
+    # Spend against budget.
+    assert "$0.00/$15.00" in prompt
+
+
+def test_the_tracker_summary_comes_from_the_backlog_view(fake_llm, db, monkeypatch):
+    """Same data source as /backlog — not a second query path."""
+    from eng_crew import discord_bot, tickets
+
+    _ticket("add pagination")
+    calls = []
+    real_board = tickets.board
+
+    def spy(project_path, **kwargs):
+        calls.append(project_path)
+        return real_board(project_path, **kwargs)
+
+    monkeypatch.setattr(tickets, "board", spy)
+
+    discuss.discuss("what is next?", project_path="/proj", project_name="Demo")
+    discord_bot.render_backlog({"name": "Demo", "path": "/proj"})
+    assert calls == ["/proj", "/proj"], (
+        "the discussion prompt and /backlog do not read the tracker the same way"
+    )
+
+
+def test_no_project_means_no_tracker_section(fake_llm, db):
+    _ticket("add pagination")
+    discuss.discuss("what is a monad")
+    assert "TICKET TRACKER" not in fake_llm.prompt
+
+
+def test_an_unregistered_project_path_adds_nothing(fake_llm, db):
+    _ticket("add pagination")
+    discuss.discuss("what is next?", project_path="/elsewhere",
+                    project_name="Elsewhere")
+    assert "TICKET TRACKER" not in fake_llm.prompt
+
+
+def test_the_tracker_section_is_bounded(fake_llm, db):
+    """A project with a long queue must not crowd out the question."""
+    for i in range(200):
+        _ticket(f"ticket {i} " + "x" * 200, priority=i)
+
+    discuss.discuss("what is next?", project_path="/proj", project_name="Demo")
+    prompt = fake_llm.prompt
+    section = prompt.split("=== TICKET TRACKER")[1].split("=== NEW MESSAGE")[0]
+
+    assert len(section) <= discuss.MAX_TRACKER_CHARS
+    assert "more" in section, "the truncation is silent"
+    assert "what is next?" in prompt, "the question was crowded out"
+
+
+def test_the_tracker_does_not_give_the_agent_a_way_to_move_tickets(fake_llm, db):
+    _ticket("add pagination")
+    discuss.discuss("close that ticket", project_path="/proj", project_name="Demo")
+
+    tools = set(fake_llm.kwargs["allowed_tools"].split(","))
+    assert tools == {"Read", "Grep", "Glob", "WebSearch", "WebFetch"}
+    assert "read-only" in fake_llm.prompt.lower()
