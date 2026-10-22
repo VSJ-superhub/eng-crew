@@ -146,7 +146,7 @@ def tracker_section(project_path: str, project_name: str = "") -> str:
     lines: list[str] = []
     if areas - {tickets.UNASSIGNED}:
         head.append("Tickets are grouped by area — the part of the product they belong to.")
-        for area in tickets.sort_areas(areas):
+        for area in tickets.sort_areas(board["tickets"]):
             lines.append(f"[{area}]")
             lines.extend(
                 _ticket_line(t) + f" — {t.get('status') or tickets.BACKLOG}"

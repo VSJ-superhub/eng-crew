@@ -160,6 +160,22 @@ def test_the_roadmap_groups_by_area_with_unassigned_last(db):
     assert [c["title"] for c in board["groups"][2][1]] == ["stray bit"]
 
 
+def test_areas_follow_build_order_not_the_alphabet(db):
+    # Alphabetically Admin < Engine < Foundation; built, it is the reverse.
+    base = make_ticket(title="scaffold", area="Foundation", priority=10)
+    engine = make_ticket(title="rules", area="Engine", priority=20,
+                         depends_on=[base])
+    make_ticket(title="console", area="Admin", priority=5, depends_on=[engine])
+    make_ticket(title="stray bit", priority=1)
+
+    expected = ["Foundation", "Engine", "Admin", tickets.UNASSIGNED]
+    board = tickets.roadmap("/proj")
+    assert board["areas"] == expected
+    assert [area for area, _ in board["groups"]] == expected
+    rows = tracker.list_project_tickets("/proj")
+    assert tickets.sort_areas(rows) == expected
+
+
 def test_inside_an_area_a_prerequisite_comes_before_what_waits_on_it(db):
     # Filed, and prioritised, in the wrong order on purpose.
     last = make_ticket(title="UI", area="Engine", priority=10)

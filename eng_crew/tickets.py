@@ -641,15 +641,29 @@ def roadmap_card(ticket: dict) -> dict:
     }
 
 
-def _area_key(area: str) -> tuple:
-    """Areas in alphabetical order, with Unassigned last: it is a leftovers
-    pile, not a part of the product, and it should not head the roadmap."""
-    return (1 if area == UNASSIGNED else 0, area.casefold())
+def _in_build_order(rows: list[dict]) -> list[dict]:
+    """Tickets with every prerequisite ahead of what waits on it, then by
+    priority — the order the work would actually be built in."""
+    depth = _dependency_depth({int(t["id"]): t for t in rows})
+    return sorted(rows, key=lambda t: (
+        depth.get(int(t["id"]), 0), t.get("priority") or 0, t.get("id") or 0,
+    ))
 
 
-def sort_areas(areas: Iterable[str]) -> list[str]:
-    """Area names in the order every surface shows them."""
-    return sorted(set(areas), key=_area_key)
+def sort_areas(rows: Iterable[dict]) -> list[str]:
+    """The areas these tickets fall in, in the order every surface shows them.
+
+    Build order, not alphabetical: an area sits where its earliest ticket would
+    be built, so a roadmap reads Foundation → Engine → … → Admin rather than
+    starting at whatever sorts first. Unassigned goes last — it is a leftovers
+    pile, not a part of the product, and it should not head the roadmap.
+    """
+    order: list[str] = []
+    for ticket in _in_build_order(list(rows)):
+        area = area_of(ticket)
+        if area not in order:
+            order.append(area)
+    return sorted(order, key=lambda a: (a == UNASSIGNED, order.index(a)))
 
 
 def roadmap(project_path: str, limit: int | None = None) -> dict:
@@ -660,15 +674,9 @@ def roadmap(project_path: str, limit: int | None = None) -> dict:
     left out, since a truncation nobody can see is a lie about the roadmap.
     """
     rows = _tracker().list_project_tickets(project_path)
-    by_id = {int(t["id"]): t for t in rows}
-    depth = _dependency_depth(by_id)
+    cards = [roadmap_card(t) for t in _in_build_order(rows)]
 
-    cards = [roadmap_card(t) for t in rows]
-    cards.sort(key=lambda c: (
-        depth.get(int(c["id"]), 0), c["priority"] or 0, c["id"] or 0,
-    ))
-
-    areas = sorted({c["area"] for c in cards}, key=_area_key)
+    areas = sort_areas(rows)
     shown = cards
     if limit is not None:
         # Trim from the back of the roadmap — the deepest, lowest-priority work
@@ -678,7 +686,7 @@ def roadmap(project_path: str, limit: int | None = None) -> dict:
 
     groups = [
         (area, [c for c in shown if c["area"] == area])
-        for area in sorted({c["area"] for c in shown}, key=_area_key)
+        for area in areas if area in {c["area"] for c in shown}
     ]
     counts = {state: 0 for state in ROADMAP_STATES}
     for card in cards:
