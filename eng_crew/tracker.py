@@ -197,6 +197,11 @@ def _init_db():
                 -- '[]') means nothing to wait for, which is what every ticket
                 -- written before dependencies existed says.
                 depends_on          TEXT DEFAULT '',
+                -- Which part of the product this ticket belongs to: a short
+                -- per-project label ("Engine", "Website") the planner assigns
+                -- and the roadmap groups by. '' means nobody has said, and the
+                -- roadmap shows those together as "Unassigned".
+                area                TEXT DEFAULT '',
                 plan_id             INTEGER REFERENCES project_plans(id),
                 created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );
@@ -386,6 +391,10 @@ def _init_db():
             # keep behaving exactly as they did: nothing to wait for.
             if "depends_on" not in bl_cols:
                 _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN depends_on TEXT DEFAULT ''")
+            # Which part of the product a ticket belongs to. Empty for every
+            # existing ticket, which the roadmap reads as "Unassigned".
+            if "area" not in bl_cols:
+                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN area TEXT DEFAULT ''")
             # The branch a run produced. The retro reads a shipped ticket's
             # history back and wants to know which files its runs touched;
             # without the branch there is nothing to diff against.
@@ -1408,7 +1417,7 @@ def add_backlog_item(title: str, description: str, project_path: str,
                      project_id: int = None, item_type: str = 'feature',
                      acceptance_criteria: str = "", created_by: str = "user",
                      plan_id: int = None, budget_usd: float | None = None,
-                     depends_on=None) -> int:
+                     depends_on=None, area: str = "") -> int:
     """Create a ticket. It starts in `backlog`; use tickets.move to advance it.
 
     ``budget_usd`` overrides the configured default spend authority for this one
@@ -1417,18 +1426,18 @@ def add_backlog_item(title: str, description: str, project_path: str,
     normalised here; :func:`eng_crew.tickets.set_dependencies` is the checked
     way to change them later.
     """
-    from .tickets import BACKLOG, encode_dependencies
+    from .tickets import BACKLOG, encode_dependencies, normalize_area
 
     with _lock:
         with _connect() as con:
             cur = con.execute(
                 "INSERT INTO backlog_items (title, description, project_path, claude_md_path,"
                 " priority, project_id, type, status, acceptance_criteria, plan_id, budget_usd,"
-                " depends_on)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " depends_on, area)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (title, description, project_path, claude_md_path, priority, project_id,
                  item_type, BACKLOG, acceptance_criteria, plan_id, budget_usd,
-                 encode_dependencies(depends_on)),
+                 encode_dependencies(depends_on), normalize_area(area)),
             )
             ticket_id = cur.lastrowid
             con.execute(
@@ -1473,6 +1482,23 @@ def set_ticket_dependencies(ticket_id: int, depends_on) -> bool:
             cur = con.execute(
                 "UPDATE backlog_items SET depends_on=? WHERE id=?",
                 (encode_dependencies(depends_on), ticket_id),
+            )
+            return cur.rowcount > 0
+
+
+def set_ticket_area(ticket_id: int, area: str) -> bool:
+    """Store which part of the product a ticket belongs to.
+
+    The label is normalised and the event recorded by
+    :func:`eng_crew.tickets.set_area`; this is only the write.
+    """
+    from .tickets import normalize_area
+
+    with _lock:
+        with _connect() as con:
+            cur = con.execute(
+                "UPDATE backlog_items SET area=? WHERE id=?",
+                (normalize_area(area), ticket_id),
             )
             return cur.rowcount > 0
 

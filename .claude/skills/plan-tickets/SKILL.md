@@ -26,16 +26,23 @@ Rules:
   own — a ticket is only held back by a real prerequisite, and a dependency
   that is not needed stalls the queue. Dependencies must not form a cycle.
 - `type` is one of: feature, bug, chore.
+- Decide up front on a small set of **areas** — the parts of this product work
+  belongs to, three to six of them, named from the project context (e.g.
+  "Engine", "Website", "Admin", "Infra"). List them in `areas`, and give every
+  ticket an `area` from that list, spelled exactly as it appears there. Areas
+  are the roadmap's columns: a new name per ticket makes the roadmap useless.
 - Write the description as the instruction the engineer will actually read.
 
 Respond with ONLY valid JSON in this exact format — no prose, no markdown fences:
 {
+  "areas": ["Engine", "Website"],
   "tickets": [
     {
       "title": "Short imperative summary",
       "description": "What to build and where, in a couple of sentences.",
       "acceptance_criteria": "- the first checkable statement\n- the second",
       "type": "feature",
+      "area": "Engine",
       "priority": 10,
       "depends_on": []
     }

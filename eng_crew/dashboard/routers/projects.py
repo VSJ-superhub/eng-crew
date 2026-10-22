@@ -48,6 +48,9 @@ class BacklogItemIn(BaseModel):
     project_id: Optional[int] = None
     item_type: str = "feature"
     acceptance_criteria: str = ""
+    # The roadmap column this ticket belongs to. Changing it later goes through
+    # PUT /tickets/{id}/area, which records who did it.
+    area: str = ""
 
 class BacklogItemUpdate(BaseModel):
     title: Optional[str] = None
@@ -107,7 +110,8 @@ async def api_backlog_create(item: BacklogItemIn):
         if p: project_id = p["id"]
     item_id = add_backlog_item(item.title, desc, item.project_path, item.claude_md_path,
                                item.priority, project_id, item_type=item.item_type,
-                               acceptance_criteria=item.acceptance_criteria)
+                               acceptance_criteria=item.acceptance_criteria,
+                               area=item.area)
     return JSONResponse({"id": item_id})
 
 @router.put("/backlog/{item_id}")
@@ -189,6 +193,45 @@ async def api_ticket_budget(ticket_id: int, payload: TicketBudgetIn):
         return JSONResponse({"error": "a budget cannot be negative"}, status_code=400)
     state = budget.set_budget(ticket_id, payload.budget_usd, payload.actor)
     return JSONResponse({"ok": True, "budget": state})
+
+
+class TicketAreaIn(BaseModel):
+    """Which part of the product a ticket belongs to, and who decided."""
+    area: str = ""
+    actor: str = "user"
+
+
+@router.put("/tickets/{ticket_id}/area")
+async def api_ticket_area(ticket_id: int, payload: TicketAreaIn):
+    """Put a ticket in an area, or (with an empty one) take it out of one.
+
+    Recorded in the ticket's history with the actor, like a status change: the
+    roadmap is read as a statement about the product, so who moved a ticket
+    from Engine to Website is worth keeping.
+    """
+    if not get_backlog_item(ticket_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        area = tickets.set_area(ticket_id, payload.area, payload.actor)
+    except tickets.TransitionRefused as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    return JSONResponse({"ok": True, "area": area})
+
+
+@router.get("/projects/{project_id}/roadmap")
+async def api_project_roadmap(project_id: int):
+    """The project's tickets grouped by area, in dependency order.
+
+    The queue endpoint above answers "what is in flight?"; this answers "what
+    is the shape of this product, and what can be started next?". The states
+    are computed in :mod:`eng_crew.tickets` rather than in the frontend, so the
+    Roadmap tab and Discord's `/roadmap` cannot disagree.
+    """
+    p = get_project(project_id)
+    if not p:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    board = tickets.roadmap(p["project_path"])
+    return JSONResponse({"project": p, **board})
 
 
 @router.get("/projects/{project_id}/queue")

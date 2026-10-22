@@ -138,10 +138,24 @@ def tracker_section(project_path: str, project_name: str = "") -> str:
         "cannot move a ticket or start a run — say what you would do and let "
         "the user take it to the engineering team.",
     ]
+    # Grouped the way the project itself is organised when it says so: an area
+    # tells the agent what part of the product a ticket belongs to, which is
+    # what "what is next on the website?" turns on. With no areas set there is
+    # nothing to group by, so the lifecycle grouping stands.
+    areas = {tickets.area_of(t) for t in board["tickets"]}
     lines: list[str] = []
-    for status, items in board["groups"]:
-        lines.append(f"[{status}]")
-        lines.extend(_ticket_line(ticket) for ticket in items)
+    if areas - {tickets.UNASSIGNED}:
+        head.append("Tickets are grouped by area — the part of the product they belong to.")
+        for area in tickets.sort_areas(areas):
+            lines.append(f"[{area}]")
+            lines.extend(
+                _ticket_line(t) + f" — {t.get('status') or tickets.BACKLOG}"
+                for t in board["tickets"] if tickets.area_of(t) == area
+            )
+    else:
+        for status, items in board["groups"]:
+            lines.append(f"[{status}]")
+            lines.extend(_ticket_line(ticket) for ticket in items)
 
     # Drop tickets off the end until the whole section fits, and say how many
     # went: a truncation nobody can see is a lie about the queue's length.

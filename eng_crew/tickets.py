@@ -80,6 +80,35 @@ ROBOTS: frozenset[str] = frozenset({
 })
 
 
+#: The group a ticket with no area of its own appears under. A label nobody has
+#: set is not a reason to drop a ticket off the roadmap.
+UNASSIGNED = "Unassigned"
+
+#: How long an area label may be. It is a column heading, not a description.
+AREA_MAX_CHARS = 40
+
+#: What a roadmap card says about a ticket, which is all four things worth
+#: knowing at a glance: it is finished, it can be picked up now, somebody (or
+#: some run) is holding it, or it waits on work that is unfinished.
+ROADMAP_DONE = "done"
+ROADMAP_READY = "ready_to_start"
+ROADMAP_IN_FLIGHT = "in_flight"
+ROADMAP_BLOCKED = "blocked"
+
+ROADMAP_STATES: tuple[str, ...] = (
+    ROADMAP_DONE, ROADMAP_READY, ROADMAP_IN_FLIGHT, ROADMAP_BLOCKED,
+)
+
+#: How each state reads in a sentence — the tally in Discord's `/roadmap` and
+#: the dashboard's column headings both want the same words.
+ROADMAP_LABELS: dict[str, str] = {
+    ROADMAP_DONE: "done",
+    ROADMAP_READY: "ready to start",
+    ROADMAP_IN_FLIGHT: "in flight",
+    ROADMAP_BLOCKED: "blocked",
+}
+
+
 class TransitionRefused(ValueError):
     """A status change the lifecycle does not allow."""
 
@@ -197,6 +226,58 @@ def with_dependencies(ticket: dict) -> dict:
         "unmet_prerequisites": unmet,
         "blocked": bool(unmet),
     }
+
+
+def normalize_area(raw: Any) -> str:
+    """How an area label is stored: whitespace collapsed, bounded, "" for none.
+
+    Areas are matched by name, so "  engine " and "Engine" must not become two
+    columns on the roadmap. Casing is the author's: the planner is asked for a
+    small consistent set and :func:`canonical_area` folds what it returns.
+    """
+    return " ".join(str(raw or "").split())[:AREA_MAX_CHARS]
+
+
+def canonical_area(raw: Any, known: Iterable[str] = ()) -> str:
+    """``raw``, spelled the way ``known`` already spells it if it is in there.
+
+    The planner writes the labels itself, one ticket at a time, and "Engine"
+    and "engine" are the same part of the product. Reusing the spelling
+    already in play is what keeps a project's set of areas small.
+    """
+    area = normalize_area(raw)
+    if not area:
+        return ""
+    for name in known:
+        if normalize_area(name).casefold() == area.casefold():
+            return normalize_area(name)
+    return area
+
+
+def area_of(ticket: dict | int) -> str:
+    """Which part of the product a ticket belongs to, or ``UNASSIGNED``."""
+    if isinstance(ticket, int):
+        ticket = _tracker().get_backlog_item(ticket) or {}
+    return normalize_area((ticket or {}).get("area")) or UNASSIGNED
+
+
+def set_area(ticket_id: int, area: Any, actor: str = "user") -> str:
+    """Put a ticket in an area (or, with ""), take it out of one.
+
+    Recorded in ``ticket_events`` with the actor, like every other change to a
+    ticket: "why is this on the Website column?" is a question with an answer.
+    Returns the stored label.
+    """
+    tracker = _tracker()
+    ticket = tracker.get_backlog_item(ticket_id)
+    if not ticket:
+        raise TransitionRefused(f"no ticket {ticket_id}")
+
+    was = area_of(ticket)
+    now = normalize_area(area)
+    tracker.set_ticket_area(ticket_id, now)
+    note(ticket_id, actor, f"area: {was} → {now or UNASSIGNED}")
+    return now
 
 
 def set_dependencies(ticket_id: int, depends_on: Any, actor: str = "user") -> list[int]:
@@ -486,4 +567,131 @@ def board(project_path: str, status: str | None = None, limit: int = 20) -> dict
         "groups": groups,
         "total": len(rows),
         "overflow": max(0, len(rows) - len(shown)),
+    }
+
+
+# ── The roadmap ───────────────────────────────────────────────────────────────
+#
+# The board above answers "what is in flight?" — the lifecycle, status by
+# status. The roadmap answers the other question a queue cannot: "what is the
+# shape of this product, and what can be worked on next?" Same tickets, grouped
+# by area and ordered by dependency rather than by status and priority.
+#
+# Both the dashboard tab and Discord's /roadmap read this one function, so the
+# two surfaces cannot drift on what "blocked" means.
+
+
+def roadmap_state(ticket: dict) -> str:
+    """Which of the four roadmap states a ticket is in."""
+    status = ticket.get("status") or BACKLOG
+    if status in MET:
+        return ROADMAP_DONE
+    if status in IN_FLIGHT:
+        return ROADMAP_IN_FLIGHT
+    if unmet_prerequisites(ticket):
+        return ROADMAP_BLOCKED
+    return ROADMAP_READY
+
+
+def _dependency_depth(tickets_by_id: dict[int, dict]) -> dict[int, int]:
+    """How many prerequisites deep each ticket is, as a topological rank.
+
+    A ticket's depth is one past the deepest thing it waits on, so sorting by
+    it puts every prerequisite above the tickets that wait on it. Edges that
+    point outside this project are ignored (they cannot be ordered against
+    tickets that are not on this roadmap), and the ``visiting`` guard means a
+    cycle that got into the data some other way orders arbitrarily rather than
+    recursing forever.
+    """
+    depth: dict[int, int] = {}
+    visiting: set[int] = set()
+
+    def walk(ticket_id: int) -> int:
+        if ticket_id in depth:
+            return depth[ticket_id]
+        if ticket_id in visiting:
+            return 0
+        visiting.add(ticket_id)
+        parents = [
+            i for i in dependencies(tickets_by_id[ticket_id])
+            if i in tickets_by_id
+        ]
+        depth[ticket_id] = 1 + max((walk(i) for i in parents), default=-1)
+        visiting.discard(ticket_id)
+        return depth[ticket_id]
+
+    for ticket_id in tickets_by_id:
+        walk(ticket_id)
+    return depth
+
+
+def roadmap_card(ticket: dict) -> dict:
+    """One roadmap card: what it is, where it is, and whether it can start."""
+    unmet = unmet_prerequisites(ticket)
+    return {
+        "id": ticket.get("id"),
+        "title": str(ticket.get("title") or ""),
+        "status": ticket.get("status") or BACKLOG,
+        "priority": ticket.get("priority"),
+        "area": area_of(ticket),
+        "state": roadmap_state(ticket),
+        "depends_on": dependencies(ticket),
+        "unmet_prerequisites": unmet,
+        "blocked": bool(unmet),
+    }
+
+
+def _area_key(area: str) -> tuple:
+    """Areas in alphabetical order, with Unassigned last: it is a leftovers
+    pile, not a part of the product, and it should not head the roadmap."""
+    return (1 if area == UNASSIGNED else 0, area.casefold())
+
+
+def sort_areas(areas: Iterable[str]) -> list[str]:
+    """Area names in the order every surface shows them."""
+    return sorted(set(areas), key=_area_key)
+
+
+def roadmap(project_path: str, limit: int | None = None) -> dict:
+    """A project's tickets grouped by area, in dependency order.
+
+    ``limit`` bounds the total number of cards for a surface that has to fit in
+    a message (Discord's /roadmap does); the overflow count says how many were
+    left out, since a truncation nobody can see is a lie about the roadmap.
+    """
+    rows = _tracker().list_project_tickets(project_path)
+    by_id = {int(t["id"]): t for t in rows}
+    depth = _dependency_depth(by_id)
+
+    cards = [roadmap_card(t) for t in rows]
+    cards.sort(key=lambda c: (
+        depth.get(int(c["id"]), 0), c["priority"] or 0, c["id"] or 0,
+    ))
+
+    areas = sorted({c["area"] for c in cards}, key=_area_key)
+    shown = cards
+    if limit is not None:
+        # Trim from the back of the roadmap — the deepest, lowest-priority work
+        # — so what is left is what someone would act on first.
+        shown = cards[:limit]
+    kept = {c["id"] for c in shown}
+
+    groups = [
+        (area, [c for c in shown if c["area"] == area])
+        for area in sorted({c["area"] for c in shown}, key=_area_key)
+    ]
+    counts = {state: 0 for state in ROADMAP_STATES}
+    for card in cards:
+        counts[card["state"]] = counts.get(card["state"], 0) + 1
+
+    return {
+        "project_path": project_path,
+        "areas": areas,
+        "groups": groups,
+        "cards": shown,
+        "counts": counts,
+        "statuses": summarize(rows),
+        "wip": wip(project_path),
+        "total": len(cards),
+        "overflow": len([c for c in cards if c["id"] not in kept]),
     }

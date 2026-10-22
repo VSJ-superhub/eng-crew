@@ -227,6 +227,7 @@ def queue(
     table.add_column("ID", style="bold cyan")
     table.add_column("Pri")
     table.add_column("Status")
+    table.add_column("Area")
     table.add_column("Title")
     table.add_column("AC", justify="center")
     table.add_column("Spend")
@@ -241,12 +242,78 @@ def queue(
             deps = f"[red]blocked by {tickets.describe_prerequisites(unmet)}[/red]"
         table.add_row(
             str(t["id"]), str(t.get("priority", "")), str(t.get("status", "")),
-            str(t.get("title", ""))[:60],
+            tickets.area_of(t), str(t.get("title", ""))[:60],
             "yes" if (t.get("acceptance_criteria") or "").strip() else "[red]no[/red]",
             f"[red]{money}[/red]" if spend["budget_exhausted"] else money,
             deps,
         )
     console.print(table)
+
+
+@app.command()
+def roadmap(
+    project_path: Path = typer.Argument(
+        ..., help="Path to the project root.", exists=True, file_okay=False, resolve_path=True
+    ),
+    env_file: Optional[Path] = typer.Option(None, "--env", help="Path to .env file."),
+) -> None:
+    """Show a project's tickets by area, prerequisites first.
+
+    `queue` answers "what is in flight?"; this answers "what is the shape of
+    this product, and what can be started next?". Same facts as the dashboard's
+    Roadmap tab and Discord's `/roadmap` — all three read `tickets.roadmap`.
+    """
+    load_settings(env_file)
+    from eng_crew import tickets
+
+    board = tickets.roadmap(str(project_path))
+    if not board["cards"]:
+        console.print("[dim]No tickets for this project.[/dim]")
+        return
+
+    tally = " · ".join(
+        f"{tickets.ROADMAP_LABELS[state]} {board['counts'][state]}"
+        for state in tickets.ROADMAP_STATES if board["counts"][state]
+    )
+    console.print(f"[bold]Roadmap[/] {project_path.name} — {tally}")
+    colours = {
+        tickets.ROADMAP_DONE: "green", tickets.ROADMAP_READY: "cyan",
+        tickets.ROADMAP_IN_FLIGHT: "blue", tickets.ROADMAP_BLOCKED: "red",
+    }
+    for area, cards in board["groups"]:
+        console.print(f"\n[bold]{area}[/]")
+        for card in cards:
+            state = tickets.ROADMAP_LABELS[card["state"]]
+            if card["state"] == tickets.ROADMAP_BLOCKED:
+                state += " by " + tickets.describe_prerequisites(
+                    card["unmet_prerequisites"]
+                )
+            console.print(
+                f"  #{card['id']} {card['title'][:60]} "
+                f"[dim]{card['status']}[/dim] "
+                f"[{colours[card['state']]}]{state}[/]"
+            )
+
+
+@app.command()
+def area(
+    ticket_id: int = typer.Argument(..., help="Ticket ID (see `eng-crew queue`)."),
+    name: str = typer.Argument("", help="Area name. Pass \"\" to clear it."),
+    actor: str = typer.Option("user", "--actor", help="Who is making the change."),
+    env_file: Optional[Path] = typer.Option(None, "--env", help="Path to .env file."),
+) -> None:
+    """Put a ticket in an area — which roadmap column it belongs to."""
+    load_settings(env_file)
+    from eng_crew import tickets
+
+    try:
+        stored = tickets.set_area(ticket_id, name, actor)
+    except tickets.TransitionRefused as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    console.print(
+        f"ticket {ticket_id}: area [cyan]{stored or tickets.UNASSIGNED}[/]"
+    )
 
 
 @app.command()

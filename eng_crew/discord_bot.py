@@ -13,6 +13,11 @@ Thin, single-agent-first bot:
                                       queue, and every ticket by status
   /ticket id:<n>                      One ticket in full: criteria, spend,
                                       review verdict, runs, history
+  /roadmap project:<alias>            The same tickets grouped by area, in
+                                      dependency order, each one done, ready to
+                                      start, in flight, or blocked by what is
+                                      unfinished
+  /area ticket_id:<id> area:<name>    Put a ticket in an area, or clear it
   /queue project:<alias>              That project's ticket queue — id, priority,
                                       status, acceptance criteria, spend, WIP
   /build ticket_id:<id>               Build a ticket that already exists. A
@@ -514,6 +519,91 @@ def render_backlog(cfg: dict, status: str | None = None, limit: int = 20) -> tup
     return f"🗂️ Backlog — {name}", "\n".join(body)
 
 
+ROADMAP_ICONS = {
+    "done": "✅", "ready_to_start": "▶️", "in_flight": "🔄", "blocked": "⛔",
+}
+
+#: Past this, a Discord embed description is rejected (the hard limit is 4096).
+#: `limit` bounds the number of cards; this bounds what long titles can do with
+#: them, so the message is always sendable.
+ROADMAP_MAX_CHARS = 3900
+
+
+def _roadmap_state(card: dict) -> str:
+    """How a card's state reads on a phone, with what blocks it named."""
+    from . import tickets as tickets_mod
+
+    state = card["state"]
+    text = (ROADMAP_ICONS.get(state, "•") + " "
+            + tickets_mod.ROADMAP_LABELS.get(state, state))
+    if state == tickets_mod.ROADMAP_BLOCKED:
+        text += " by " + tickets_mod.describe_prerequisites(
+            card["unmet_prerequisites"]
+        )
+    return text
+
+
+def render_roadmap(cfg: dict, limit: int = 30) -> tuple[str, str]:
+    """(title, body) for a project's roadmap — one section per area.
+
+    The same grouping, order and states the dashboard's Roadmap tab draws:
+    both read ``tickets.roadmap``, so the two surfaces cannot disagree about
+    what is blocked. Bounded like ``/backlog``, because an embed has a size
+    whatever the backlog's length.
+    """
+    from . import tickets as tickets_mod
+
+    name = cfg.get("name") or cfg.get("path") or "project"
+    board = tickets_mod.roadmap(cfg["path"], limit=limit)
+    title = f"🗺️ Roadmap — {name}"
+
+    tally = " · ".join(
+        f"{ROADMAP_ICONS.get(state, '•')} "
+        f"{tickets_mod.ROADMAP_LABELS[state]} {board['counts'][state]}"
+        for state in tickets_mod.ROADMAP_STATES if board["counts"][state]
+    )
+    header = [tally] if tally else []
+
+    if not board["cards"]:
+        return title, "\n".join(
+            header + ["\n*No tickets yet — `/ideate` to write one.*"]
+        )
+
+    body = list(header)
+    for area, cards in board["groups"]:
+        body.append(f"\n**📁 {area}**")
+        for card in cards:
+            body.append(
+                f"`#{card['id']}` {card['title'][:60]}"
+                f"\n   {card['status']} · {_roadmap_state(card)}"
+            )
+    if board["overflow"]:
+        body.append(
+            f"\n*+{board['overflow']} more ticket(s) — the dashboard's Roadmap "
+            f"tab has the rest.*"
+        )
+    text = "\n".join(body)
+    if len(text) > ROADMAP_MAX_CHARS:
+        text = (text[:ROADMAP_MAX_CHARS].rsplit("\n", 1)[0]
+                + "\n*… truncated — more on the dashboard.*")
+    return title, text
+
+
+def area_reply(ticket_id: int, area: str, actor: str) -> str:
+    """Put a ticket in an area from Discord. Returns what to tell the channel."""
+    from . import tickets as tickets_mod
+
+    try:
+        stored = tickets_mod.set_area(ticket_id, area, actor=actor)
+    except tickets_mod.TransitionRefused as exc:
+        return f"❌ {exc}"
+    return (
+        f"📁 `#{ticket_id}` is now in **{stored}**." if stored
+        else f"📁 `#{ticket_id}` has no area — it shows under "
+             f"**{tickets_mod.UNASSIGNED}** on the roadmap."
+    )
+
+
 def render_ticket(ticket_id: int) -> tuple[str, str] | None:
     """(title, body) for one ticket, or None if there is no such ticket."""
     from . import review as review_mod
@@ -525,7 +615,10 @@ def render_ticket(ticket_id: int) -> tuple[str, str] | None:
         return None
 
     status = ticket.get("status") or tickets_mod.BACKLOG
-    body = [f"{_status_icon(status)} **{status}** · p{ticket.get('priority', '?')} · {_money(ticket)}"]
+    body = [
+        f"{_status_icon(status)} **{status}** · p{ticket.get('priority', '?')} · "
+        f"{_money(ticket)} · 📁 {tickets_mod.area_of(ticket)}"
+    ]
 
     prereqs = tickets_mod.prerequisites(ticket)
     if prereqs:
@@ -739,6 +832,64 @@ async def cmd_ticket(interaction: discord.Interaction, id: int):
     await interaction.followup.send(embed=discord.Embed(
         title=title[:256], description=body[:4000], color=discord.Color.blurple(),
     ))
+@bot.tree.command(name="roadmap", description="Show a project's roadmap, grouped by area")
+@app_commands.describe(project="Project alias (see /projects)")
+async def cmd_roadmap(interaction: discord.Interaction, project: str):
+    projects = load_projects()
+    if project not in projects:
+        await interaction.response.send_message(_unknown_project(project, projects), ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    loop = asyncio.get_running_loop()
+    try:
+        title, body = await loop.run_in_executor(
+            bot.executor, render_roadmap, projects[project]
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+        return
+    await interaction.followup.send(embed=discord.Embed(
+        title=title[:256], description=body[:4000], color=discord.Color.blurple(),
+    ))
+
+
+@bot.tree.command(name="area", description="Put a ticket in an area (its roadmap column)")
+@app_commands.describe(
+    ticket_id="Ticket ID (see /backlog)",
+    area="Short area name, e.g. Engine. Leave empty to clear it.",
+)
+async def cmd_area(interaction: discord.Interaction, ticket_id: int, area: str = ""):
+    await interaction.response.defer()
+    loop = asyncio.get_running_loop()
+    actor = str(getattr(interaction.user, "name", None) or interaction.user)
+    try:
+        message = await loop.run_in_executor(
+            bot.executor, area_reply, ticket_id, area, actor
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+        return
+    await interaction.followup.send(message[:2000])
+
+
+@cmd_area.autocomplete("area")
+async def _area_autocomplete(interaction: discord.Interaction, current: str):
+    """The areas a configured project already uses — reusing one is the point."""
+    from . import tracker
+
+    names: list[str] = []
+    try:
+        for cfg in load_projects().values():
+            for ticket in tracker.list_project_tickets(cfg.get("path") or ""):
+                name = (ticket.get("area") or "").strip()
+                if name and name not in names and current.lower() in name.lower():
+                    names.append(name)
+    except Exception:
+        return []
+    return [app_commands.Choice(name=n, value=n) for n in sorted(names)][:25]
+
+
 @bot.tree.command(name="queue", description="Show a project's ticket queue")
 @app_commands.describe(project="Project alias (see /projects)")
 async def cmd_queue(interaction: discord.Interaction, project: str):
