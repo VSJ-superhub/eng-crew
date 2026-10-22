@@ -176,81 +176,35 @@ def build_reply(ticket_id: int, actor: str, settings=None) -> str:
 
 
 # ── Task execution ──────────────────────────────────────────────────────────────
-def _dispatch_blocking(task: str, cfg: dict) -> tuple[dict, str, str]:
-    """Run one task end-to-end (blocking). Returns (run_detail, summary, branch)."""
-    from .config import load_settings
-    from .run import run_task
-    from . import tracker
+def task_reply(cfg: dict, task: str, actor: str, settings=None) -> str:
+    """File a free-text task as a ticket and build it, as `run_task` does.
 
-    # Single-agent default has no HITL gate; disable approval so nothing blocks.
-    settings = load_settings().model_copy(update={"require_approval": False})
-    state = run_task(task=task, project_path=cfg["path"], settings=settings)
-    run_id = state.get("run_id")
-    detail = tracker.get_run_detail(run_id) if run_id else {}
-    return detail or {}, state.get("final_summary") or "", state.get("git_branch") or ""
+    The confirm card used to call the pipeline directly, so a Discord task got
+    no ticket — no acceptance criteria, no independent review, no budget, no
+    retro. Going through dispatch gives it all four, and the click is the
+    approval that readies the ticket, credited to whoever clicked.
+    """
+    from . import dispatch
 
-
-async def _execute(channel: "discord.abc.Messageable", cfg: dict, task: str,
-                   loop: asyncio.AbstractEventLoop) -> None:
-    status = await channel.send(
-        embed=discord.Embed(
-            title=f"🔄 {cfg.get('name', 'Project')} — running",
-            description=f"**Task:** {task}\n\n⏳ Single-agent is implementing...",
-            color=discord.Color.yellow(),
+    result = dispatch.dispatch_task(cfg["path"], task, actor=actor, settings=settings)
+    if not result.ok:
+        return f"❌ {result.detail}"
+    lines = []
+    if result.started:
+        lines.append(
+            f"🚀 Filed and building ticket **#{result.ticket_id}** — "
+            f"{result.wip.get('in_flight', '?')}/{result.wip.get('limit', '?')} in flight. "
+            f"Track it on the dashboard; the result lands on an `ai-team/*` branch."
         )
-    )
-
-    # Guard: don't start a second run on a project that already has one active.
-    try:
-        from . import tracker
-        active = tracker.get_active_runs_for_project(cfg["path"])
-    except Exception:
-        active = []
-    if active:
-        ids = ", ".join(f"#{r['id']}" for r in active)
-        await status.edit(embed=discord.Embed(
-            title=f"⚠️ {cfg.get('name', 'Project')} — blocked",
-            description=f"A run is already active for this project ({ids}). "
-                        f"Wait for it to finish before starting another.",
-            color=discord.Color.orange(),
-        ))
-        return
-
-    try:
-        detail, summary, branch = await loop.run_in_executor(
-            bot.executor, _dispatch_blocking, task, cfg
-        )
-        run_status = (detail or {}).get("status", "unknown")
-        ok = run_status == "completed"
-        # Unverified is neither: the change landed, nothing vouched for it.
-        unverified = run_status == "unverified"
-        embed = discord.Embed(
-            title=(
-                f"{'✅' if ok else '⚠️' if unverified else '❌'} "
-                f"{cfg.get('name', 'Project')} — {run_status.upper()}"
-            ),
-            description=(summary or "No summary.")[:2000],
-            color=(
-                discord.Color.green() if ok
-                else discord.Color.orange() if unverified
-                else discord.Color.red()
-            ),
-        )
-        if branch:
-            embed.add_field(name="Branch", value=f"`{branch}`", inline=True)
-        cost = (detail or {}).get("total_cost_usd")
-        if cost:
-            try:
-                embed.add_field(name="Cost", value=f"${float(cost):.4f}", inline=True)
-            except (TypeError, ValueError):
-                pass
-        await status.edit(embed=embed)
-    except Exception as e:
-        await status.edit(embed=discord.Embed(
-            title=f"❌ {cfg.get('name', 'Project')} — ERROR",
-            description=str(e)[:2000],
-            color=discord.Color.red(),
-        ))
+    else:
+        lines.append(f"⏸️ {result.detail}")
+    if result.criteria_source == "manager":
+        lines.append("The Manager drafted its acceptance criteria — `/ticket "
+                     f"{result.ticket_id}` shows them.")
+    if result.warning:
+        lines.append(f"⚠️ {result.warning}")
+    return "
+".join(lines)
 
 
 # ── Confirm card ────────────────────────────────────────────────────────────────
@@ -267,11 +221,15 @@ class ConfirmView(discord.ui.View):
             for item in self.children:
                 item.disabled = True
             await interaction.edit_original_response(
-                content="⏳ Dispatching to eng-crew...", view=self
+                content="⏳ Filing a ticket with eng-crew...", view=self
             )
-            loop = asyncio.get_running_loop()
-            asyncio.create_task(_execute(interaction.channel, self._cfg, self._task, loop))
             self.stop()
+            actor = str(getattr(interaction.user, "name", None) or interaction.user)
+            loop = asyncio.get_running_loop()
+            reply = await loop.run_in_executor(
+                bot.executor, task_reply, self._cfg, self._task, actor
+            )
+            await interaction.channel.send(reply)
         except Exception as e:
             try:
                 await interaction.edit_original_response(content=f"❌ Error: {e}", view=None)
@@ -299,7 +257,7 @@ async def _post_confirm(target, projects: dict, project_key: str, task: str) -> 
         description=f"**Task:** {task}\n\n**Project:** `{cfg['path']}`",
         color=discord.Color.blue(),
     )
-    embed.set_footer(text="Runs on an isolated ai-team/* branch. Review the diff after.")
+    embed.set_footer(text="Files a ticket and builds it on an isolated ai-team/* branch, with review and a budget.")
     await target.reply(embed=embed, view=ConfirmView(cfg, task))
 
 
@@ -767,7 +725,7 @@ async def cmd_task(interaction: discord.Interaction, project: str, task: str):
         description=f"**Task:** {task}\n\n**Project:** `{cfg['path']}`",
         color=discord.Color.blue(),
     )
-    embed.set_footer(text="Runs on an isolated ai-team/* branch. Review the diff after.")
+    embed.set_footer(text="Files a ticket and builds it on an isolated ai-team/* branch, with review and a budget.")
     await interaction.response.send_message(embed=embed, view=ConfirmView(cfg, task))
 
 
