@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import logging
 import shutil
 import subprocess
@@ -315,23 +316,25 @@ def snapshot_tests(project_path: str | Path) -> dict[str, str]:
     if not root.is_dir():
         return snapshot
 
-    for path in root.rglob("*"):
-        try:
-            if not path.is_file():
+    # Ignored directories are pruned before they are entered, not filtered
+    # after: walking into node_modules is itself what can fail — pnpm's
+    # junctions on Windows name paths that do not exist, and rglob raised
+    # straight through the gate. An unreadable directory is skipped too.
+    for dirpath, dirnames, filenames in os.walk(root, onerror=lambda _exc: None):
+        dirnames[:] = [d for d in dirnames if d not in _TEST_IGNORE_DIRS]
+        for name in filenames:
+            path = Path(dirpath) / name
+            try:
+                rel_posix = path.relative_to(root).as_posix()
+            except ValueError:
                 continue
-            rel = path.relative_to(root)
-        except (OSError, ValueError):
-            continue
-        if any(part in _TEST_IGNORE_DIRS for part in rel.parts):
-            continue
-        rel_posix = rel.as_posix()
-        if not is_test_path(rel_posix):
-            continue
-        try:
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError:
-            continue
-        snapshot[rel_posix] = digest
+            if not is_test_path(rel_posix):
+                continue
+            try:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                continue
+            snapshot[rel_posix] = digest
     return snapshot
 
 
