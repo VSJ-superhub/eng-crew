@@ -82,6 +82,45 @@ def test_snapshot_covers_tests_and_ignores_source_and_vendored_dirs():
     assert set(snap) == {"tests/test_a.py"}
 
 
+def test_snapshot_never_walks_into_ignored_dirs(monkeypatch):
+    """pnpm's node_modules junctions on Windows name paths that do not exist;
+    walking into them raised out of the gate and failed a finished build."""
+    import os
+
+    root = _tmp()
+    _write(root, "tests/test_a.py", "assert True")
+    _write(root, "node_modules/.pnpm/pkg/index.js", "x")
+    entered: list[str] = []
+    real_scandir = os.scandir
+
+    def scandir(path="."):
+        entered.append(str(path))
+        if "node_modules" in str(path):
+            raise FileNotFoundError(path)
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    assert set(snapshot_tests(root)) == {"tests/test_a.py"}
+    assert not [p for p in entered if "node_modules" in p]
+
+
+def test_snapshot_skips_a_directory_it_cannot_read(monkeypatch):
+    import os
+
+    root = _tmp()
+    _write(root, "tests/test_a.py", "assert True")
+    _write(root, "broken/thing.py", "x = 1")
+    real_scandir = os.scandir
+
+    def scandir(path="."):
+        if str(path).endswith("broken"):
+            raise FileNotFoundError(path)
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    assert set(snapshot_tests(root)) == {"tests/test_a.py"}
+
+
 def test_snapshot_of_missing_project_is_empty():
     assert snapshot_tests(_tmp() / "nope") == {}
 
