@@ -193,6 +193,10 @@ def _init_db():
                 -- "the configured default" (ENG_CREW_TICKET_BUDGET_USD), so
                 -- changing that default moves every ticket that never set one.
                 budget_usd          REAL,
+                -- The ticket ids this one waits on, as a JSON array. '' (or
+                -- '[]') means nothing to wait for, which is what every ticket
+                -- written before dependencies existed says.
+                depends_on          TEXT DEFAULT '',
                 plan_id             INTEGER REFERENCES project_plans(id),
                 created_at          TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );
@@ -378,6 +382,10 @@ def _init_db():
             # pick up the configured default rather than being frozen at it.
             if "budget_usd" not in bl_cols:
                 _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN budget_usd REAL")
+            # What a ticket waits on. Empty for every existing ticket, so they
+            # keep behaving exactly as they did: nothing to wait for.
+            if "depends_on" not in bl_cols:
+                _alter(_mig, "ALTER TABLE backlog_items ADD COLUMN depends_on TEXT DEFAULT ''")
             # The branch a run produced. The retro reads a shipped ticket's
             # history back and wants to know which files its runs touched;
             # without the branch there is nothing to diff against.
@@ -1399,22 +1407,28 @@ def add_backlog_item(title: str, description: str, project_path: str,
                      claude_md_path: str, priority: int = 50,
                      project_id: int = None, item_type: str = 'feature',
                      acceptance_criteria: str = "", created_by: str = "user",
-                     plan_id: int = None, budget_usd: float | None = None) -> int:
+                     plan_id: int = None, budget_usd: float | None = None,
+                     depends_on=None) -> int:
     """Create a ticket. It starts in `backlog`; use tickets.move to advance it.
 
     ``budget_usd`` overrides the configured default spend authority for this one
-    ticket; None leaves it on the default.
+    ticket; None leaves it on the default. ``depends_on`` is the ticket ids this
+    one waits on — a brand new ticket cannot close a cycle, so the ids are only
+    normalised here; :func:`eng_crew.tickets.set_dependencies` is the checked
+    way to change them later.
     """
-    from .tickets import BACKLOG
+    from .tickets import BACKLOG, encode_dependencies
 
     with _lock:
         with _connect() as con:
             cur = con.execute(
                 "INSERT INTO backlog_items (title, description, project_path, claude_md_path,"
-                " priority, project_id, type, status, acceptance_criteria, plan_id, budget_usd)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " priority, project_id, type, status, acceptance_criteria, plan_id, budget_usd,"
+                " depends_on)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (title, description, project_path, claude_md_path, priority, project_id,
-                 item_type, BACKLOG, acceptance_criteria, plan_id, budget_usd),
+                 item_type, BACKLOG, acceptance_criteria, plan_id, budget_usd,
+                 encode_dependencies(depends_on)),
             )
             ticket_id = cur.lastrowid
             con.execute(
@@ -1448,6 +1462,58 @@ def set_ticket_status(ticket_id: int, from_status: str, to_status: str,
                 (ticket_id, from_status, to_status, actor or "system", note or ""),
             )
             return True
+
+
+def set_ticket_dependencies(ticket_id: int, depends_on) -> bool:
+    """Store the ticket ids a ticket waits on. The rules live in tickets.py."""
+    from .tickets import encode_dependencies
+
+    with _lock:
+        with _connect() as con:
+            cur = con.execute(
+                "UPDATE backlog_items SET depends_on=? WHERE id=?",
+                (encode_dependencies(depends_on), ticket_id),
+            )
+            return cur.rowcount > 0
+
+
+def get_ticket_dependency_map(ticket_ids=None) -> dict:
+    """{ticket id: [ids it depends on]} — the whole dependency graph, or a slice.
+
+    Cycle detection needs the edges of tickets it is not looking at, so this
+    reads them in one query rather than a walk of get_backlog_item calls.
+    """
+    from .tickets import parse_dependencies
+
+    query = "SELECT id, depends_on FROM backlog_items"
+    params: list = []
+    if ticket_ids is not None:
+        ids = [int(i) for i in ticket_ids]
+        if not ids:
+            return {}
+        query += f" WHERE id IN ({','.join('?' * len(ids))})"
+        params = ids
+    con = _connect()
+    return {
+        int(row[0]): parse_dependencies(row[1])
+        for row in con.execute(query, params).fetchall()
+    }
+
+
+def get_ticket_summaries(ticket_ids) -> dict:
+    """{ticket id: {id, title, status}} for the ids that exist."""
+    ids = [int(i) for i in ticket_ids]
+    if not ids:
+        return {}
+    con = _connect()
+    rows = con.execute(
+        f"SELECT id, title, status FROM backlog_items WHERE id IN ({','.join('?' * len(ids))})",
+        ids,
+    ).fetchall()
+    return {
+        int(r[0]): {"id": int(r[0]), "title": r[1] or "", "status": r[2] or ""}
+        for r in rows
+    }
 
 
 def add_ticket_event(ticket_id: int, from_status: str, to_status: str,

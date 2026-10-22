@@ -20,6 +20,11 @@ Rules:
   not emit one.
 - Order the tickets so that a ticket only depends on work earlier in the list.
   `priority` is the queue position: 10 is pulled before 20.
+- Say what a ticket actually waits on in `depends_on`: the 1-based positions of
+  the tickets in this list that must be finished before it can start (the first
+  ticket is 1). Omit it, or leave it empty, when a ticket can be built on its
+  own — a ticket is only held back by a real prerequisite, and a dependency
+  that is not needed stalls the queue. Dependencies must not form a cycle.
 - `type` is one of: feature, bug, chore.
 - Write the description as the instruction the engineer will actually read.
 
@@ -31,7 +36,8 @@ Respond with ONLY valid JSON in this exact format — no prose, no markdown fenc
       "description": "What to build and where, in a couple of sentences.",
       "acceptance_criteria": "- the first checkable statement\n- the second",
       "type": "feature",
-      "priority": 10
+      "priority": 10,
+      "depends_on": []
     }
   ]
 }

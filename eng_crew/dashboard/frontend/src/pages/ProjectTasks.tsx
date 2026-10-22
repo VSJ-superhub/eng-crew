@@ -117,6 +117,9 @@ function TicketCard({ ticket, busy, onMove, onRun, onBudget }: {
   const limit = ticket.budget_usd
   const spent = ticket.spent_usd ?? 0
   const overBudget = ticket.budget_exhausted === true
+  const prereqs = ticket.prerequisites ?? []
+  const unmet = ticket.unmet_prerequisites ?? []
+  const blocked = ticket.blocked === true
 
   return (
     <div className='bg-[#161927] rounded-lg border border-white/5 p-3'>
@@ -135,6 +138,16 @@ function TicketCard({ ticket, busy, onMove, onRun, onBudget }: {
                 no acceptance criteria
               </span>
             )}
+            {prereqs.length > 0 && (
+              <span className={'text-[10px] ' + (blocked ? 'text-amber-400' : 'text-gray-600')}
+                title={blocked
+                  ? 'This ticket waits on work that is not finished. A build is refused until it is.'
+                  : 'Everything this ticket waited on is finished.'}>
+                {blocked
+                  ? 'blocked by ' + unmet.map(p => '#' + p.id).join(', ')
+                  : 'after ' + prereqs.map(p => '#' + p.id).join(', ')}
+              </span>
+            )}
             {limit !== undefined && (
               <span className={'text-[10px] font-mono ' + (overBudget ? 'text-red-400' : 'text-gray-600')}
                 title={overBudget
@@ -146,7 +159,10 @@ function TicketCard({ ticket, busy, onMove, onRun, onBudget }: {
           </div>
         </button>
         {ticket.status === 'ready' && (
-          <button onClick={() => onRun(ticket.id)} disabled={busy}
+          <button onClick={() => onRun(ticket.id)} disabled={busy || blocked}
+            title={blocked
+              ? 'Blocked by ' + unmet.map(p => '#' + p.id + ' (' + p.status + ')').join(', ')
+              : 'Build this ticket'}
             className='text-[11px] px-2.5 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-40'>
             {busy ? '…' : 'Build'}
           </button>
@@ -164,6 +180,18 @@ function TicketCard({ ticket, busy, onMove, onRun, onBudget }: {
               ? <p className='text-xs text-gray-400 whitespace-pre-wrap'>{criteria}</p>
               : <p className='text-xs text-amber-500'>None yet — add some on the Backlog page before this can be made ready.</p>}
           </div>
+
+          {prereqs.length > 0 && (
+            <div>
+              <p className='text-[10px] uppercase text-gray-500 font-bold mb-1'>Depends on</p>
+              {prereqs.map(p => (
+                <p key={p.id} className={'text-xs ' +
+                  (unmet.some(u => u.id === p.id) ? 'text-amber-400' : 'text-gray-400')}>
+                  #{p.id} {p.title} — {p.status}
+                </p>
+              ))}
+            </div>
+          )}
 
           {limit !== undefined && (
             <div>

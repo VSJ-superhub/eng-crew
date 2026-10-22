@@ -230,14 +230,21 @@ def queue(
     table.add_column("Title")
     table.add_column("AC", justify="center")
     table.add_column("Spend")
+    table.add_column("Depends on")
     for t in rows:
         spend = budget_mod.annotate(t, cfg)
         money = f"${spend['spent_usd']:.2f}/${spend['budget_usd']:.2f}"
+        prereqs = tickets.prerequisites(t)
+        unmet = tickets.unmet_prerequisites(t)
+        deps = ", ".join(f"#{p['id']}" for p in prereqs)
+        if unmet:
+            deps = f"[red]blocked by {tickets.describe_prerequisites(unmet)}[/red]"
         table.add_row(
             str(t["id"]), str(t.get("priority", "")), str(t.get("status", "")),
             str(t.get("title", ""))[:60],
             "yes" if (t.get("acceptance_criteria") or "").strip() else "[red]no[/red]",
             f"[red]{money}[/red]" if spend["budget_exhausted"] else money,
+            deps,
         )
     console.print(table)
 

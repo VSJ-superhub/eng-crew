@@ -25,6 +25,7 @@ here; the SQL lives in :mod:`eng_crew.tracker`.
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Iterable
 
 # tracker imports the status constants below during its schema migration, so the
@@ -83,6 +84,181 @@ class TransitionRefused(ValueError):
     """A status change the lifecycle does not allow."""
 
 
+class Blocked(TransitionRefused):
+    """A build refused because the ticket's prerequisites are not finished.
+
+    A subclass of :class:`TransitionRefused` so every surface that already
+    reports a refused move — the CLI, the dashboard, Discord — reports this one
+    the same way, with the unfinished prerequisites named in the message.
+    """
+
+    def __init__(self, ticket_id: int, unmet: list[dict]):
+        self.ticket_id = ticket_id
+        self.unmet = unmet
+        super().__init__(
+            f"ticket {ticket_id} is blocked by {describe_prerequisites(unmet)} — "
+            f"finish them first"
+        )
+
+
+class DependencyRefused(TransitionRefused):
+    """A dependency that cannot be stored: unknown, self-referential, a cycle."""
+
+
+#: A prerequisite counts as met once it has reached one of these. "Done" is the
+#: point at which the work exists and has been reviewed; shipping is later, and
+#: a ticket that waited for a shipped one has waited for a done one too.
+MET: tuple[str, ...] = (DONE, SHIPPED)
+
+
+def parse_dependencies(raw: Any) -> list[int]:
+    """The ticket ids in a stored ``depends_on``, in order, de-duplicated.
+
+    Stored as JSON, but this accepts a list, a comma-separated string, or the
+    empty value every pre-dependency ticket carries, so nothing has to care
+    which way the ids arrived.
+    """
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return [int(raw)]
+    items: Any = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            items = json.loads(text)
+        except json.JSONDecodeError:
+            items = text.replace("#", "").split(",")
+        if not isinstance(items, list):
+            items = [items]
+    ids: list[int] = []
+    for item in items:
+        try:
+            value = int(str(item).strip().lstrip("#"))
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and value not in ids:
+            ids.append(value)
+    return ids
+
+
+def encode_dependencies(depends_on: Any) -> str:
+    """How a dependency list is stored: JSON, and "" for nothing."""
+    ids = parse_dependencies(depends_on)
+    return json.dumps(ids) if ids else ""
+
+
+def dependencies(ticket: dict | int) -> list[int]:
+    """The ticket ids a ticket waits on. Empty when it waits on nothing."""
+    if isinstance(ticket, int):
+        ticket = _tracker().get_backlog_item(ticket) or {}
+    return parse_dependencies((ticket or {}).get("depends_on"))
+
+
+def prerequisites(ticket: dict | int) -> list[dict]:
+    """The prerequisite tickets themselves — id, title, status — in order."""
+    ids = dependencies(ticket)
+    if not ids:
+        return []
+    known = _tracker().get_ticket_summaries(ids)
+    return [known[i] for i in ids if i in known]
+
+
+def unmet_prerequisites(ticket: dict | int) -> list[dict]:
+    """The prerequisites that are not done or shipped yet."""
+    return [p for p in prerequisites(ticket) if p.get("status") not in MET]
+
+
+def is_blocked(ticket: dict | int) -> bool:
+    """True when something this ticket waits on is still unfinished."""
+    return bool(unmet_prerequisites(ticket))
+
+
+def describe_prerequisites(unmet: Iterable[dict]) -> str:
+    """How a refusal names what is unfinished: "#3 (ready), #4 (in_progress)"."""
+    return ", ".join(
+        f"#{p['id']} ({p.get('status') or BACKLOG})" for p in unmet
+    ) or "nothing"
+
+
+def with_dependencies(ticket: dict) -> dict:
+    """A ticket dict carrying its prerequisites and whether they block it.
+
+    For a display surface: the dashboard and the Discord views all want the
+    same three fields, and none of them should be working the graph out itself.
+    """
+    unmet = unmet_prerequisites(ticket)
+    return {
+        **ticket,
+        "depends_on": dependencies(ticket),
+        "prerequisites": prerequisites(ticket),
+        "unmet_prerequisites": unmet,
+        "blocked": bool(unmet),
+    }
+
+
+def set_dependencies(ticket_id: int, depends_on: Any, actor: str = "user") -> list[int]:
+    """Record what a ticket waits on, refusing anything unusable.
+
+    Refused: a ticket that does not exist, a ticket depending on itself, and an
+    edge that would close a cycle — a cycle is a set of tickets none of which
+    can ever start, which is worse than the ordering mistake it came from.
+    """
+    tracker = _tracker()
+    ticket = tracker.get_backlog_item(ticket_id)
+    if not ticket:
+        raise DependencyRefused(f"no ticket {ticket_id}")
+
+    ids = parse_dependencies(depends_on)
+    if ticket_id in ids:
+        raise DependencyRefused(f"ticket {ticket_id} cannot depend on itself")
+
+    known = tracker.get_ticket_summaries(ids)
+    missing = [i for i in ids if i not in known]
+    if missing:
+        raise DependencyRefused("no ticket " + ", ".join(str(i) for i in missing))
+
+    graph = tracker.get_ticket_dependency_map()
+    graph[ticket_id] = ids
+    cycle = _find_cycle(graph, ticket_id)
+    if cycle:
+        raise DependencyRefused(
+            f"ticket {ticket_id} cannot depend on "
+            + ", ".join(f"#{i}" for i in ids)
+            + ": that would make a cycle ("
+            + " -> ".join(f"#{i}" for i in cycle) + ")"
+        )
+
+    tracker.set_ticket_dependencies(ticket_id, ids)
+    note(ticket_id, actor, "depends on " + (
+        ", ".join(f"#{i}" for i in ids) if ids else "nothing"
+    ))
+    return ids
+
+
+def _find_cycle(graph: dict[int, list[int]], start: int) -> list[int]:
+    """The path from ``start`` back to itself through ``graph``, or []."""
+    path: list[int] = []
+    seen: set[int] = set()
+
+    def walk(node: int) -> list[int]:
+        path.append(node)
+        for nxt in graph.get(node, []):
+            if nxt == start:
+                return [*path, start]
+            if nxt not in seen:
+                seen.add(nxt)
+                found = walk(nxt)
+                if found:
+                    return found
+        path.pop()
+        return []
+
+    return walk(start)
+
+
 def allowed_transitions(status: str) -> frozenset[str]:
     return TRANSITIONS.get(status, frozenset())
 
@@ -111,9 +287,20 @@ def wip(project_path: str, settings: Any = None) -> dict:
     }
 
 
-def queue(project_path: str, limit: int | None = None) -> list[dict]:
-    """The continuous queue: tickets in ``ready``, highest priority first."""
-    return _tracker().list_ready_tickets(project_path, limit=limit)
+def queue(project_path: str, limit: int | None = None,
+          *, include_blocked: bool = False) -> list[dict]:
+    """The continuous queue: tickets in ``ready``, highest priority first.
+
+    A ticket whose prerequisites are unfinished is passed over rather than left
+    at the head of the queue blocking everything behind it — pulling it would
+    be refused every time, and the tickets below it would never be reached.
+    ``include_blocked`` is for a surface that is *showing* the queue rather
+    than pulling from it.
+    """
+    rows = _tracker().list_ready_tickets(project_path)
+    if not include_blocked:
+        rows = [t for t in rows if not is_blocked(t)]
+    return rows[:limit] if limit is not None else rows
 
 
 def move(ticket_id: int, to_status: str, actor: str, note: str = "",
@@ -147,6 +334,14 @@ def move(ticket_id: int, to_status: str, actor: str, note: str = "",
         raise TransitionRefused(
             f"ticket {ticket_id} has no acceptance criteria — it cannot be ready"
         )
+
+    if to_status == IN_PROGRESS:
+        # Prerequisites first, before the budget: a ticket that cannot start
+        # yet should not get a budget stop written into its history for a
+        # build nobody could have run.
+        unmet = unmet_prerequisites(ticket)
+        if unmet:
+            raise Blocked(ticket_id, unmet)
 
     if to_status == IN_PROGRESS:
         # Entering in_progress is a build about to start, which is the first
