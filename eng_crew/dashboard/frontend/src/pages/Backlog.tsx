@@ -177,6 +177,14 @@ export default function Backlog() {
                       {typeMeta.label}
                     </span>
                     <p className='text-sm text-white font-medium'>{item.title}</p>
+                    {(item.depends_on?.length ?? 0) > 0 && (
+                      <span className={'px-1.5 py-0.5 rounded text-[10px] font-medium ' +
+                        (item.blocked ? 'bg-amber-500/20 text-amber-300' : 'bg-white/5 text-gray-400')}>
+                        {item.blocked
+                          ? 'blocked by ' + (item.unmet_prerequisites ?? []).map(p => '#' + p.id).join(', ')
+                          : 'after ' + (item.depends_on ?? []).map(id => '#' + id).join(', ')}
+                      </span>
+                    )}
                   </div>
                   <p className='text-xs text-gray-500 mt-0.5'>
                     {projectName(item)
@@ -199,7 +207,10 @@ export default function Backlog() {
                 )}
                 {item.status === 'ready' && (
                   <button onClick={() => act(item.id, () => runTicket(item.id))}
-                    disabled={busy === item.id}
+                    disabled={busy === item.id || item.blocked}
+                    title={item.blocked
+                      ? 'Blocked by ' + (item.unmet_prerequisites ?? []).map(p => '#' + p.id + ' (' + p.status + ')').join(', ')
+                      : 'Build this ticket'}
                     className='text-xs px-3 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-40'>
                     {busy === item.id ? 'Queuing...' : 'Build'}
                   </button>

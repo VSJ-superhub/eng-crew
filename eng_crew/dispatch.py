@@ -267,6 +267,19 @@ def build_ticket(
             ticket_id=ticket_id,
         )
 
+    # Prerequisites before anything else: a blocked ticket must stay exactly
+    # where it is, so this is checked before the approval to `ready` as well as
+    # before the claim (the lifecycle checks the claim itself).
+    unmet = tickets.unmet_prerequisites(ticket)
+    if unmet:
+        return Dispatch(
+            False,
+            f"ticket {ticket_id} is blocked by "
+            f"{tickets.describe_prerequisites(unmet)} — finish them first; "
+            f"nothing was started",
+            ticket_id=ticket_id,
+        )
+
     if status in (tickets.BACKLOG, tickets.REJECTED):
         # Approving it is the step a person has to take; a ticket with no
         # definition of done is refused here, by the lifecycle, with its reason.

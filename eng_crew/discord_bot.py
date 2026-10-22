@@ -146,7 +146,7 @@ def queue_lines(cfg: dict, settings=None) -> list[str]:
         lines.append(
             f"`#{ticket['id']}` p{ticket.get('priority', '')} · "
             f"**{ticket.get('status', '')}** · {str(ticket.get('title', ''))[:60]} · "
-            f"{criteria} · {money}"
+            f"{criteria} · {money}{_depends(ticket)}"
         )
     if len(rows) > _QUEUE_ROWS:
         lines.append(f"_…and {len(rows) - _QUEUE_ROWS} more — see the dashboard._")
@@ -456,6 +456,19 @@ def _money(ticket: dict) -> str:
     return f"{money} ⛔" if spend["budget_exhausted"] else money
 
 
+def _depends(ticket: dict) -> str:
+    """A one-line note of what a ticket waits on, and whether it is blocked."""
+    from . import tickets as tickets_mod
+
+    prereqs = tickets_mod.prerequisites(ticket)
+    if not prereqs:
+        return ""
+    unmet = [p for p in prereqs if p.get("status") not in tickets_mod.MET]
+    if unmet:
+        return f" · ⛔ blocked by {tickets_mod.describe_prerequisites(unmet)}"
+    return " · needs " + ", ".join(f"#{p['id']}" for p in prereqs) + " ✅"
+
+
 def render_backlog(cfg: dict, status: str | None = None, limit: int = 20) -> tuple[str, str]:
     """(title, body) for a project's tracker. Tickets grouped in lifecycle order."""
     from . import tickets as tickets_mod
@@ -495,6 +508,7 @@ def render_backlog(cfg: dict, status: str | None = None, limit: int = 20) -> tup
         body.append(
             f"`#{ticket['id']}` {str(ticket.get('title') or '')[:70]}"
             f"\n   p{ticket.get('priority', '?')} · {_money(ticket)}{flag}"
+            f"{_depends(ticket)}"
         )
     if overflow:
         body.append(f"\n*+{overflow} more — `/backlog` with a status, or the dashboard.*")
@@ -513,6 +527,19 @@ def render_ticket(ticket_id: int) -> tuple[str, str] | None:
 
     status = ticket.get("status") or tickets_mod.BACKLOG
     body = [f"{_status_icon(status)} **{status}** · p{ticket.get('priority', '?')} · {_money(ticket)}"]
+
+    prereqs = tickets_mod.prerequisites(ticket)
+    if prereqs:
+        unmet = tickets_mod.unmet_prerequisites(ticket)
+        body.append(
+            "\n**Depends on**" + ("  ⛔ blocked" if unmet else "  ✅ all finished")
+        )
+        for prereq in prereqs:
+            icon = "⛔" if prereq.get("status") not in tickets_mod.MET else "✅"
+            body.append(
+                f"  • {icon} `#{prereq['id']}` {str(prereq.get('title') or '')[:60]}"
+                f" · {prereq.get('status') or ''}"
+            )
 
     description = str(ticket.get("description") or "").strip()
     if description and description != str(ticket.get("title") or "").strip():

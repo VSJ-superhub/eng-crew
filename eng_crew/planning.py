@@ -12,7 +12,7 @@ import json
 import re
 from typing import Any
 
-from . import prompts, tracker
+from . import prompts, tickets, tracker
 from .agents.base import BaseAgent
 from .project_context import load_project_context
 
@@ -58,7 +58,31 @@ def _clean(raw: Any, index: int) -> dict | None:
         "acceptance_criteria": criteria,
         "type": ticket_type,
         "priority": priority,
+        # Positions in this plan, 1-based: the planner is writing tickets that
+        # do not exist yet, so it cannot name their ids.
+        "depends_on": _positions(raw.get("depends_on"), index),
     }
+
+
+def _positions(raw: Any, index: int) -> list[int]:
+    """The 1-based plan positions one ticket says it depends on.
+
+    Anything unusable is dropped rather than failing the plan — a bad edge is
+    worth less than the tickets around it. A ticket depending on itself is
+    dropped for the same reason.
+    """
+    if raw is None:
+        return []
+    items = raw if isinstance(raw, list) else [raw]
+    out: list[int] = []
+    for item in items:
+        try:
+            position = int(str(item).strip().lstrip("#tT"))
+        except (TypeError, ValueError):
+            continue
+        if position >= 1 and position != index + 1 and position not in out:
+            out.append(position)
+    return out
 
 
 def plan_tickets(
@@ -88,6 +112,10 @@ def plan_tickets(
         raise PlanningFailed("the planner produced no tickets")
 
     created: list[dict] = []
+    # position in the plan -> the ticket id it became, so the dependencies the
+    # planner wrote between *positions* can be resolved once every ticket exists.
+    ids_by_position: dict[int, int] = {}
+    wanted: list[tuple[int, list[int]]] = []
     for index, raw in enumerate(raw_tickets[:_MAX_TICKETS]):
         cleaned = _clean(raw, index)
         if cleaned is None:
@@ -104,11 +132,36 @@ def plan_tickets(
             created_by=actor,
             plan_id=plan_id,
         )
+        ids_by_position[index + 1] = ticket_id
+        if cleaned["depends_on"]:
+            wanted.append((ticket_id, cleaned["depends_on"]))
         created.append(tracker.get_backlog_item(ticket_id) or {})
+
+    _save_dependencies(wanted, ids_by_position)
 
     if not created:
         raise PlanningFailed("the planner produced no usable tickets")
     return created
+
+
+def _save_dependencies(
+    wanted: list[tuple[int, list[int]]], ids_by_position: dict[int, int]
+) -> None:
+    """Turn the planner's plan-position edges into real ticket dependencies.
+
+    A second pass, because a ticket can be written before the one it depends
+    on exists. An edge that cannot be stored — it points nowhere, or it would
+    close a cycle — is dropped with a warning: the tickets are still worth
+    more than the ordering mistake.
+    """
+    for ticket_id, positions in wanted:
+        depends_on = [ids_by_position[p] for p in positions if p in ids_by_position]
+        if not depends_on:
+            continue
+        try:
+            tickets.set_dependencies(ticket_id, depends_on, actor="planner")
+        except tickets.TransitionRefused as exc:
+            print(f"[planning] dependency dropped: {exc}")
 
 
 def plan_project(

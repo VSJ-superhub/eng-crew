@@ -60,14 +60,17 @@ export interface HealthMetrics {
 export type TicketStatus = 'backlog' | 'ready' | 'in_progress' | 'in_review' | 'in_qa' | 'done' | 'rejected' | 'shipped'
 export const TICKET_STATUSES: TicketStatus[] = ['backlog', 'ready', 'in_progress', 'in_review', 'in_qa', 'done', 'rejected', 'shipped']
 /** A ticket. `BacklogItem` is the legacy name for the same row. */
-export interface BacklogItem { id: number; title: string; description?: string; project_path?: string; claude_md_path?: string; priority: number; status: TicketStatus | string; acceptance_criteria?: string; created_at: string; project_id?: number; plan_id?: number; type?: string; run_id?: number; budget_usd?: number; spent_usd?: number; budget_exhausted?: boolean }
+export interface BacklogItem { id: number; title: string; description?: string; project_path?: string; claude_md_path?: string; priority: number; status: TicketStatus | string; acceptance_criteria?: string; created_at: string; project_id?: number; plan_id?: number; type?: string; run_id?: number; budget_usd?: number; spent_usd?: number; budget_exhausted?: boolean; depends_on?: number[]; prerequisites?: TicketRef[]; unmet_prerequisites?: TicketRef[]; blocked?: boolean }
+
+/** A ticket this one waits on, as the tracker reports it. */
+export interface TicketRef { id: number; title: string; status: string }
 
 /** A ticket's spend authority and what it has spent against it. */
 export interface TicketBudget { ticket_id: number; budget_usd: number; spent_usd: number; remaining_usd: number; exhausted: boolean }
 export type Ticket = BacklogItem
 export interface TicketEvent { id: number; ticket_id: number; from_status: string; to_status: string; actor: string; note: string; created_at: string }
 export interface Wip { limit: number; in_flight: number; slots: number; statuses: string[] }
-export interface TicketQueue { project: Project; tickets: Ticket[]; ready: Ticket[]; counts: Record<string, number>; wip: Wip }
+export interface TicketQueue { project: Project; tickets: Ticket[]; ready: Ticket[]; blocked: Ticket[]; counts: Record<string, number>; wip: Wip }
 export interface ProjectStats { total_runs: number; completed: number; failed: number; running: number; total_cost_usd: number }
 export interface Project { id: number; name: string; project_path: string; claude_md_path: string; repo_url?: string; default_branch?: string; tech_stack?: string[]; test_command?: string; description?: string; active?: number; created_at?: string; stats?: ProjectStats }
 export interface FsEntry { name: string; path: string }
@@ -122,7 +125,7 @@ export function updateBacklogItem(id: number, f: { title?: string; description?:
 export function moveTicket(id: number, status: TicketStatus, actor = 'user', note = ''): Promise<{ ok: boolean; ticket: Ticket }> {
   return put('/api/tickets/' + id + '/status', { status, actor, note })
 }
-export function getTicket(id: number): Promise<{ ticket: Ticket; budget: TicketBudget | null; events: TicketEvent[]; allowed_transitions: TicketStatus[] }> { return api('/api/tickets/' + id) }
+export function getTicket(id: number): Promise<{ ticket: Ticket; budget: TicketBudget | null; events: TicketEvent[]; allowed_transitions: TicketStatus[]; blocked: boolean; prerequisites: TicketRef[]; unmet_prerequisites: TicketRef[] }> { return api('/api/tickets/' + id) }
 
 /** Change a ticket's spend authority. Raising it releases work stopped for
  *  budget; it starts nothing on its own. */

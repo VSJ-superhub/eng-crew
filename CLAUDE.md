@@ -25,6 +25,15 @@ This is a generalized, pip-installable version of a private internal tool. It mu
 - There are no sprints. Tickets form one continuous queue ordered by priority,
   bounded by a WIP limit (`ENG_CREW_WIP_LIMIT`, default 3) on how many are in
   flight (in_progress/in_review/in_qa) per project.
+- A ticket can record the tickets it waits on (`depends_on`, parsed and
+  enforced in `eng_crew/tickets.py`). A prerequisite counts as met once it is
+  `done` or `shipped`. The planner emits dependencies between the tickets it
+  writes, the queue passes over a `ready` ticket whose prerequisites are
+  unfinished and picks by priority among the rest, and every surface that can
+  start a build — the CLI, the dashboard, Discord `/build` — refuses a blocked
+  one naming what is unfinished and leaves the ticket where it was. A
+  dependency that would close a cycle is refused rather than stored. A ticket
+  with no dependencies behaves exactly as it always did.
 - Planning a project creates tickets (`eng_crew/planning.py`); it does not launch
   a build of the goal text. Running queued work builds the actual tickets — the
   task handed to the pipeline is the ticket's title, description, and acceptance

@@ -91,7 +91,12 @@ class PlanGoalPayload(BaseModel):
 
 @router.get("/backlog")
 async def api_backlog_list(status: Optional[str] = None, project: Optional[str] = None):
-    return JSONResponse(list_backlog_items(status=status, project_path=project))
+    # Annotated with what each ticket waits on: the list offers a Build button,
+    # and a blocked ticket's build would be refused.
+    return JSONResponse([
+        tickets.with_dependencies(t)
+        for t in list_backlog_items(status=status, project_path=project)
+    ])
 
 @router.post("/backlog")
 async def api_backlog_create(item: BacklogItemIn):
@@ -130,8 +135,15 @@ async def api_ticket_get(ticket_id: int):
         return JSONResponse({"error": "not found"}, status_code=404)
     from ... import review
 
+    # What this ticket waits on, and whether any of it is still unfinished: a
+    # blocked ticket cannot be built, so the page has to say so rather than
+    # offering a button that will be refused.
+    annotated = tickets.with_dependencies(ticket)
     return JSONResponse({
-        "ticket": ticket,
+        "ticket": annotated,
+        "blocked": annotated["blocked"],
+        "prerequisites": annotated["prerequisites"],
+        "unmet_prerequisites": annotated["unmet_prerequisites"],
         # What this ticket may spend and what it has spent, side by side: the
         # number a person needs when a build was stopped for budget.
         "budget": budget.status(ticket_id),
@@ -185,11 +197,19 @@ async def api_project_queue(project_id: int):
     p = get_project(project_id)
     if not p:
         return JSONResponse({"error": "not found"}, status_code=404)
-    all_tickets = [budget.annotate(t) for t in list_project_tickets(p["project_path"])]
+    all_tickets = [
+        tickets.with_dependencies(budget.annotate(t))
+        for t in list_project_tickets(p["project_path"])
+    ]
     return JSONResponse({
         "project": p,
         "tickets": all_tickets,
-        "ready": [t for t in all_tickets if t["status"] == tickets.READY],
+        # `ready` is what the queue would actually pull from, so a ready ticket
+        # whose prerequisites are unfinished is not in it.
+        "ready": [t for t in all_tickets
+                  if t["status"] == tickets.READY and not t["blocked"]],
+        "blocked": [t for t in all_tickets
+                    if t["status"] == tickets.READY and t["blocked"]],
         "counts": tickets.summarize(all_tickets),
         "wip": tickets.wip(p["project_path"]),
     })
@@ -548,7 +568,9 @@ async def api_run_queue(project_id: int):
     path = p["project_path"]
 
     state = tickets.wip(path)
-    waiting = tickets.queue(path)
+    # Everything ready, blocked ones included: they are still waiting, they
+    # just cannot be pulled yet, and the caller is told which and why.
+    waiting = tickets.queue(path, include_blocked=True)
     if state["slots"] <= 0:
         return JSONResponse(
             {"error": f"WIP limit reached ({state['in_flight']}/{state['limit']} in flight)",
@@ -571,10 +593,24 @@ async def api_run_queue(project_id: int):
     # A ticket that has spent its budget is waiting on a person, not on the
     # queue. Pulling it would be refused every time and block everything behind
     # it, so the queue passes over it and says so.
-    over_budget = [t for t in waiting if (budget.status(t["id"]) or {}).get("exhausted")]
-    pullable = [t for t in waiting if t not in over_budget]
-    held = [{"ticket_id": t["id"], "detail": "over budget — needs a human decision"}
-            for t in over_budget]
+    #
+    # A blocked ticket is passed over for the same reason: its prerequisites
+    # are unfinished, so the build would be refused and everything behind it
+    # would wait on work nobody is doing.
+    held = []
+    pullable = []
+    for t in waiting:
+        unmet = tickets.unmet_prerequisites(t)
+        if unmet:
+            held.append({
+                "ticket_id": t["id"],
+                "detail": f"blocked by {tickets.describe_prerequisites(unmet)}",
+            })
+        elif (budget.status(t["id"]) or {}).get("exhausted"):
+            held.append({"ticket_id": t["id"],
+                         "detail": "over budget — needs a human decision"})
+        else:
+            pullable.append(t)
     if not pullable:
         return JSONResponse({"started": [], "refused": held,
                              "waiting": len(waiting), "wip": state})
