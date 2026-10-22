@@ -29,6 +29,12 @@ QUESTIONS = [
     "any idea why sqlite locks up",
     "does resolvemind use websockets?",
     "thoughts on switching to uv",
+    # Contractions, and the apostrophe a phone keyboard drops or curls.
+    "what's next on x4barter",
+    "what’s next on x4barter",
+    "Whats next in roadmap for x4barter",
+    "hows the build going",
+    "wheres the login code",
 ]
 
 DIRECTIVES = [

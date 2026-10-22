@@ -14,6 +14,7 @@ what a WAL journal is and it will just tell you.
 """
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -76,6 +77,10 @@ _ASKING = (
     "any idea", "thoughts", "opinion", "wdyt",
 )
 
+# The question words people contract: "what's", or "whats" once autocorrect
+# or a thumb has dropped the apostrophe.
+_WH_WORDS = ("what", "how", "where", "who", "when", "why")
+
 
 def is_question(text: str) -> bool:
     """Is this a thing to discuss rather than a thing to build?
@@ -89,9 +94,16 @@ def is_question(text: str) -> bool:
         return False
     if stripped.endswith("?"):
         return True
-    lowered = stripped.lower()
+    lowered = stripped.lower().replace("’", "'")
     first = lowered.split()[0].strip(",.!:;") if lowered.split() else ""
-    return first in _ASKING or lowered.startswith(("help me understand", "any idea", "tell me"))
+    # "what's next", "how'd", "who're": a contraction still opens a question.
+    stem = re.sub(r"'(s|re|d|ll|ve)$", "", first)
+    # Typed on a phone the apostrophe often goes: "whats next on x4barter".
+    dropped = first.endswith("s") and first[:-1] in _WH_WORDS
+    return (
+        stem in _ASKING or dropped
+        or lowered.startswith(("help me understand", "any idea", "tell me"))
+    )
 
 
 def _ticket_line(ticket: dict) -> str:
