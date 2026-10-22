@@ -459,45 +459,44 @@ def _money(ticket: dict) -> str:
 def render_backlog(cfg: dict, status: str | None = None, limit: int = 20) -> tuple[str, str]:
     """(title, body) for a project's tracker. Tickets grouped in lifecycle order."""
     from . import tickets as tickets_mod
-    from . import tracker
 
     name = cfg.get("name") or cfg.get("path") or "project"
-    rows = tracker.list_project_tickets(cfg["path"])
-    counts = tickets_mod.summarize(rows)
-    state = tickets_mod.wip(cfg["path"])
+    board = tickets_mod.board(cfg["path"], status=status, limit=limit)
+    state = board["wip"]
 
     header = [
         f"**WIP** {state['in_flight']}/{state['limit']} in flight "
         f"({state['slots']} slot(s) free)",
     ]
-    tally = " · ".join(f"{_status_icon(s)} {s} {n}" for s, n in counts.items() if n)
+    tally = " · ".join(
+        f"{_status_icon(s)} {s} {n}" for s, n in board["counts"].items() if n
+    )
     if tally:
         header.append(tally)
 
-    if status:
-        rows = [t for t in rows if (t.get("status") or tickets_mod.BACKLOG) == status]
-    if not rows:
+    if not board["tickets"]:
         header.append(
             f"\n*No {status} tickets.*" if status
             else "\n*No tickets yet — `/ideate` to write one.*"
         )
         return f"🗂️ Backlog — {name}", "\n".join(header)
 
-    shown, overflow = rows[:limit], max(0, len(rows) - limit)
     body = list(header)
-    group = None
-    for ticket in shown:
-        ticket_status = ticket.get("status") or tickets_mod.BACKLOG
-        if ticket_status != group:
-            group = ticket_status
-            body.append(f"\n**{_status_icon(group)} {group}**")
-        flag = "" if (ticket.get("acceptance_criteria") or "").strip() else " ⚠️ no criteria"
+    for group, items in board["groups"]:
+        body.append(f"\n**{_status_icon(group)} {group}**")
+        for ticket in items:
+            flag = "" if (ticket.get("acceptance_criteria") or "").strip() else " ⚠️ no criteria"
+            money = f"${ticket['spent_usd']:.2f}/${ticket['budget_usd']:.2f}"
+            if ticket["budget_exhausted"]:
+                money += " ⛔"
+            body.append(
+                f"`#{ticket['id']}` {str(ticket.get('title') or '')[:70]}"
+                f"\n   p{ticket.get('priority', '?')} · {money}{flag}"
+            )
+    if board["overflow"]:
         body.append(
-            f"`#{ticket['id']}` {str(ticket.get('title') or '')[:70]}"
-            f"\n   p{ticket.get('priority', '?')} · {_money(ticket)}{flag}"
+            f"\n*+{board['overflow']} more — `/backlog` with a status, or the dashboard.*"
         )
-    if overflow:
-        body.append(f"\n*+{overflow} more — `/backlog` with a status, or the dashboard.*")
     return f"🗂️ Backlog — {name}", "\n".join(body)
 
 
