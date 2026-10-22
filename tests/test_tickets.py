@@ -421,6 +421,61 @@ def test_cleanup_leaves_a_just_claimed_ticket_for_its_starting_build(db):
     assert tracker.get_backlog_item(ticket_id)["status"] == tickets.IN_PROGRESS
 
 
+def _rebuilt_ticket() -> tuple[int, int]:
+    """A ticket whose first run failed, re-readied and claimed for a new build.
+
+    Its run_id still points at the failed attempt: the new build process has
+    not created its own run yet.
+    """
+    ticket_id = ready_ticket()
+    tickets.move(ticket_id, tickets.IN_PROGRESS, "tester")
+    old_run = tracker.create_run("t", "/proj", ticket_id=ticket_id)
+    tracker.update_backlog_item(ticket_id, run_id=old_run)
+    tracker.finish_run(old_run, status="failed")
+    with tracker._connect() as conn:
+        conn.execute(
+            "UPDATE runs SET started_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-2 hours')"
+            " WHERE id = ?", (old_run,),
+        )
+        conn.execute(
+            "UPDATE ticket_events SET created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-2 hours')"
+            " WHERE ticket_id = ?", (ticket_id,),
+        )
+    tracker.cleanup_stale_backlog_items()
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.REJECTED
+    tickets.move(ticket_id, tickets.READY, "tester")
+    tickets.move(ticket_id, tickets.IN_PROGRESS, "tester")
+    return ticket_id, old_run
+
+
+def test_cleanup_does_not_judge_a_rebuild_by_the_previous_runs_failure(db):
+    """Rebuilding a ticket whose last run failed was rejected a second after it
+    was claimed: cleanup saw in_progress plus a failed run_id, and that run was
+    the previous attempt's."""
+    ticket_id, _ = _rebuilt_ticket()
+
+    assert tracker.cleanup_stale_backlog_items() == 0
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.IN_PROGRESS
+
+
+def test_a_rebuild_whose_build_never_started_is_still_an_orphan(db):
+    ticket_id, _ = _rebuilt_ticket()
+    _age_ticket_events(ticket_id, tracker.ORPHAN_CLAIM_GRACE_MINUTES + 1)
+
+    tracker.cleanup_stale_backlog_items()
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.BACKLOG
+
+
+def test_a_rebuilds_own_run_is_what_cleanup_reads(db):
+    ticket_id, _ = _rebuilt_ticket()
+    new_run = tracker.create_run("t", "/proj", ticket_id=ticket_id)
+    tracker.update_backlog_item(ticket_id, run_id=new_run)
+    tracker.finish_run(new_run, status="completed")
+
+    assert tracker.cleanup_stale_backlog_items() == 1
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.IN_REVIEW
+
+
 def test_cleanup_leaves_a_ticket_whose_run_is_still_going(db):
     ticket_id = ready_ticket()
     tickets.move(ticket_id, tickets.IN_PROGRESS, "tester")
