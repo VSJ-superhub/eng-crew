@@ -16,6 +16,7 @@ import threading
 import time
 from typing import Any, Callable, Iterator
 
+from .. import mcp_policy
 from .base import LLMResult, Provider, calculate_cost
 
 # Prefix applied to output from a run that exhausted its turn budget. The
@@ -260,10 +261,12 @@ class ClaudeCLIProvider(Provider):
         disallowed_tools = kwargs.get("disallowed_tools")
         if disallowed_tools:
             cmd.extend(["--disallowedTools", disallowed_tools])
-        # --strict-mcp-config with no --mcp-config loads no MCP servers at all,
-        # so a sandboxed session cannot reach the user's own (dispatch, mail...).
-        if kwargs.get("no_mcp"):
-            cmd.append("--strict-mcp-config")
+        # Every session runs with an explicit MCP configuration and
+        # --strict-mcp-config, so the CLI ignores the user's global and project
+        # servers (dispatch, mail, trading) and loads only what eng-crew
+        # configures for agents — never eng-crew's own server. A sandboxed
+        # session (no_mcp, the ticket reviewer) gets none at all.
+        cmd.extend(mcp_policy.cli_args(allow_servers=not kwargs.get("no_mcp")))
         resume_session = kwargs.get("resume_session")
         if resume_session:
             cmd.extend(["--resume", str(resume_session)])
