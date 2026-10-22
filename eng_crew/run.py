@@ -70,15 +70,28 @@ def run_ticket(ticket_id: int, *, actor: str = "queue", log_path: str | None = N
     requests with an HTTP error) finds it in_progress and keeps it there.
 
     ``base_branch`` stacks the ticket's run on that ref instead of the project
-    checkout's HEAD, the same as a plain task run.
+    checkout's HEAD, the same as a plain task run. Left out, the base is worked
+    out from the ticket's prerequisites (:mod:`eng_crew.basing`): a prerequisite
+    that is done but whose branch nobody has merged is still work this build
+    must start from, or it would be built again. This is where every surface
+    resolves it, because `eng-crew ticket <id>` is what all of them launch.
     """
-    from . import tickets, tracker
+    from . import basing, tickets, tracker
 
     cfg = settings or load_settings()
     ticket = tracker.get_backlog_item(ticket_id)
     if not ticket:
         log.warning("run_ticket: no ticket %s", ticket_id)
         return None
+
+    # Unfinished prerequisites first: that refusal is the lifecycle's, and
+    # there is nothing to base on until they are done. Then the base itself —
+    # before the claim, so a ticket whose prerequisites cannot be combined
+    # stays exactly where it is, with the conflict named.
+    unmet = tickets.unmet_prerequisites(ticket)
+    if unmet:
+        raise tickets.Blocked(ticket_id, unmet)
+    base = basing.resolve_base(ticket, explicit_base=base_branch or "")
 
     if ticket["status"] != tickets.IN_PROGRESS:
         tickets.move(ticket_id, tickets.IN_PROGRESS, actor, "build started", settings=cfg)
@@ -87,11 +100,13 @@ def run_ticket(ticket_id: int, *, actor: str = "queue", log_path: str | None = N
     project_path = ticket["project_path"]
     run_id = tracker.create_run(task, project_path, log_path=log_path, ticket_id=ticket_id)
     tracker.update_backlog_item(ticket_id, run_id=run_id)
+    tracker.update_run_base(run_id, base.ref or "HEAD", base.reason)
+    log.info("ticket %s builds on %s (%s)", ticket_id, base.ref or "HEAD", base.reason)
 
     try:
         state = run_pipeline(
             task=task, project_path=project_path, settings=cfg, run_id=run_id,
-            base_branch=base_branch,
+            base_branch=base.ref,
         )
     except Exception:
         _settle_ticket(ticket_id, tickets.REJECTED, actor, f"run {run_id} raised")

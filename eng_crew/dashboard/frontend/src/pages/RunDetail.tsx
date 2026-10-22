@@ -648,6 +648,17 @@ export default function RunDetail() {
           </div>
         </div>
 
+        {/* What this run forked from. A ticket's run may be stacked on its
+            prerequisites' unmerged branches, and the diff only reads correctly
+            if you know which code it started from. */}
+        <div className='pb-4 border-b border-white/5'>
+          <p className='text-[10px] text-gray-500 uppercase font-bold tracking-wider'>Based on</p>
+          <code className='text-[10px] font-mono text-violet-300'>{run.base_branch || 'HEAD'}</code>
+          {run.base_reason && (
+            <p className='text-[11px] text-gray-500 mt-0.5'>{run.base_reason}</p>
+          )}
+        </div>
+
         {run.status === 'running' && currentAgent && (
           <div className='mt-4 p-3 bg-blue-500/5 border border-blue-500/20 rounded-lg flex items-center gap-3'>
             <div className='w-2 h-2 rounded-full bg-blue-400 animate-ping' />

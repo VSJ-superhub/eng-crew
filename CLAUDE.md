@@ -34,6 +34,19 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   one naming what is unfinished and leaves the ticket where it was. A
   dependency that would close a cycle is refused rather than stored. A ticket
   with no dependencies behaves exactly as it always did.
+- A dependent ticket's run starts from its prerequisites' work
+  (`eng_crew/basing.py`). A prerequisite counts as met when it is `done`, but
+  its work sits on its run's branch until somebody merges it — so when a
+  prerequisite's branch is not yet contained in the project checkout's HEAD,
+  the run forks from that branch instead of from HEAD; with several such
+  branches it forks from a branch that merges all of them onto HEAD. If they
+  cannot be combined the build is refused before it starts, naming the
+  conflicting prerequisites, and the ticket stays where it was. The branch a
+  run was based on and why are recorded on the run (`runs.base_branch`,
+  `runs.base_reason`) and shown with it. Every surface gets this, because
+  `eng-crew ticket <id>` — what the CLI, the dashboard, Discord `/build` and a
+  queue pull all launch — is where it is resolved; an explicit base from the
+  caller (`--base`, `base_branch`) still wins.
 - A ticket carries an **area** (`eng_crew/tickets.py`): a short per-project
   label — Engine, Website, Admin — saying which part of the product the work
   belongs to. The planner decides a small set of them for the project and gives

@@ -5,8 +5,10 @@ from typing import Optional, List, Dict
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from ...tracker import (
@@ -215,14 +217,21 @@ def launch_ticket_run(ticket_id: int, *, actor: str = "user",
     subprocess then runs `eng-crew ticket <id>`, which builds the ticket's own
     text and links its run back to the ticket.
     """
-    import subprocess
-    import time
+    from ... import basing
 
     ticket = get_backlog_item(ticket_id)
     if not ticket:
         return False, "not found"
     if get_active_runs_for_project(ticket["project_path"]):
         return False, "Already running for this project"
+
+    # The ticket's prerequisites may be done on branches nobody has merged; the
+    # build starts from them (eng_crew.basing). If they do not combine it cannot
+    # start at all, and the refusal belongs here, before the claim.
+    try:
+        basing.ensure_buildable(ticket)
+    except basing.ConflictingPrerequisites as exc:
+        return False, str(exc)
 
     try:
         tickets.move(ticket_id, tickets.IN_PROGRESS, actor, "build requested")

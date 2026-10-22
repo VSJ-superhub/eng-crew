@@ -302,6 +302,16 @@ def run_pipeline(
         tracker.update_run_log_path(run_id, log_path)
     tracker.update_run_status(run_id, "running")
 
+    # What this run forked from, for anyone reading its diff later. A ticket's
+    # run already recorded a fuller reason (its prerequisites' branches, see
+    # eng_crew.basing), so only a run that has none says it plainly here.
+    if not ((tracker.get_run_detail(run_id) or {}).get("base_reason") or ""):
+        tracker.update_run_base(
+            run_id, base_branch or "HEAD",
+            f"the caller asked to base this run on {base_branch}" if base_branch
+            else "the project checkout's HEAD",
+        )
+
     branch: str | None = None
     worktree_path: str | None = None
     main_project_path = project_path

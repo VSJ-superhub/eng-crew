@@ -400,6 +400,14 @@ def _init_db():
             # without the branch there is nothing to diff against.
             if "git_branch" not in run_cols:
                 _alter(_mig, "ALTER TABLE runs ADD COLUMN git_branch TEXT DEFAULT ''")
+            # What the run forked from, and why. A ticket's run may be stacked
+            # on its prerequisites' unmerged branches (eng_crew/basing.py), and
+            # "which code was this built on" is unanswerable after the fact
+            # without recording it.
+            if "base_branch" not in run_cols:
+                _alter(_mig, "ALTER TABLE runs ADD COLUMN base_branch TEXT DEFAULT ''")
+            if "base_reason" not in run_cols:
+                _alter(_mig, "ALTER TABLE runs ADD COLUMN base_reason TEXT DEFAULT ''")
             if "ticket_id" not in run_cols:
                 _alter(_mig, "ALTER TABLE runs ADD COLUMN ticket_id INTEGER REFERENCES backlog_items(id)")
                 _mig.execute(
@@ -593,6 +601,23 @@ def update_run_branch(run_id: int, branch: str) -> None:
                 )
     except Exception as e:
         print(f"[tracker] update_run_branch error: {e}", file=sys.stderr)
+
+
+def update_run_base(run_id: int, base_branch: str, base_reason: str = "") -> None:
+    """Record what a run forked from and why, so its diff can be read in context.
+
+    A ticket's run may be stacked on its prerequisites' branches rather than on
+    the checkout's HEAD; without this, nothing says which.
+    """
+    try:
+        with _lock:
+            with _connect() as conn:
+                conn.execute(
+                    "UPDATE runs SET base_branch=?, base_reason=? WHERE id=?",
+                    (base_branch or "", base_reason or "", run_id),
+                )
+    except Exception as e:
+        print(f"[tracker] update_run_base error: {e}", file=sys.stderr)
 
 
 def update_run_subtask_count(run_id: int, total: int):

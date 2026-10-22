@@ -370,6 +370,7 @@ def ticket(
     if no_approval:
         cfg = cfg.model_copy(update={"require_approval": False})
 
+    from eng_crew import basing as _basing
     from eng_crew import review as _review
     from eng_crew import tickets as _tickets
     from eng_crew import tracker as _tracker
@@ -383,7 +384,9 @@ def ticket(
             base_branch=base,
             settings=cfg,
         )
-    except _tickets.TransitionRefused as exc:
+    except (_tickets.TransitionRefused, _basing.ConflictingPrerequisites) as exc:
+        # Either the lifecycle refused the build, or its prerequisites' branches
+        # do not combine. Both leave the ticket exactly where it was.
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 

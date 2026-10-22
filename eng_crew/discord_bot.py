@@ -613,9 +613,13 @@ def render_ticket(ticket_id: int) -> tuple[str, str] | None:
         body.append("\n**Runs**")
         for run in runs[-3:]:
             branch = run.get("git_branch") or ""
+            # Where it forked from, when that was not simply HEAD: a run stacked
+            # on a prerequisite's branch built on different code.
+            base = run.get("base_branch") or ""
             body.append(
                 f"  • #{run['id']} {run.get('status', '?')}"
                 + (f" · `{branch}`" if branch else "")
+                + (f" · on `{base}`" if base and base != "HEAD" else "")
             )
 
     history = tickets_mod.events(ticket_id)
