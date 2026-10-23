@@ -131,6 +131,15 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   instead of being reported as "started" and then, silently, "stopped".
   `eng-crew discord [--check]` runs it in the foreground with the reason
   printed at you.
+- Every agent CLI call eng-crew makes — builders, repair passes, the ticket
+  reviewer, the manager, the discussion agent — runs with an explicit MCP
+  configuration and `--strict-mcp-config` (`eng_crew/mcp_policy.py`), so it
+  ignores the user's global and project MCP servers rather than inheriting
+  whatever can mail, trade or dispatch on their behalf. eng-crew's own server is
+  never among an agent's servers, however it is spelled: a run may not dispatch,
+  plan or build other eng-crew work from inside itself. What agents do get is
+  `ENG_CREW_AGENT_MCP_SERVERS` — inline JSON or a path to a JSON file, empty by
+  default — and a sandboxed call (the reviewer) gets none at all.
 - Agent prompts live in `.claude/skills/<name>/SKILL.md` (frontmatter + template),
   loaded by `eng_crew/prompts.py` — edit a prompt without touching agent code.
 - Runs execute in their own git worktree and branch (`worktree_isolation`, on by

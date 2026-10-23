@@ -173,9 +173,17 @@ def test_update_run_progress_never_raises_on_a_bad_run_id():
     tracker.update_run_progress(999_999_999, -1, "no such run")
 
 
-def test_no_mcp_loads_no_mcp_servers():
-    assert "--strict-mcp-config" in _cmd(no_mcp=True)
-    assert "--strict-mcp-config" not in _cmd()
+def test_every_call_pins_its_mcp_servers_and_no_mcp_means_none():
+    """Both calls ignore the user's own servers (--strict-mcp-config); no_mcp is
+    the stronger form, which loads nothing at all. See tests/test_mcp_policy.py."""
+    import json
+
+    for cmd in (_cmd(), _cmd(no_mcp=True)):
+        assert "--strict-mcp-config" in cmd
+        assert "--mcp-config" in cmd
+    sandboxed = _cmd(no_mcp=True)
+    payload = sandboxed[sandboxed.index("--mcp-config") + 1]
+    assert json.loads(payload) == {"mcpServers": {}}
 
 
 def test_prompt_goes_on_stdin_not_the_command_line():
