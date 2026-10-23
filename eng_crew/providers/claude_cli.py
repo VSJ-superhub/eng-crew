@@ -16,6 +16,7 @@ import threading
 import time
 from typing import Any, Callable, Iterator
 
+from .. import mcp_policy
 from .base import LLMResult, Provider, calculate_cost
 
 # Prefix applied to output from a run that exhausted its turn budget. The
@@ -58,6 +59,21 @@ TOOL_CALL_EVENT = "tool_call"
 #: (turn limit, crash, cancelled run). Recorded rather than dropped: a run cut
 #: off mid-Bash is exactly what someone reading the trace is looking for.
 INCOMPLETE = "incomplete"
+
+
+def _extra_mcp_servers(cwd: str) -> dict:
+    """MCP servers eng-crew adds for an agent session, by project directory.
+
+    One place decides this, so every agent that runs through the CLI gets the
+    same set. Optional integrations answer with {} when they are off.
+    """
+    from .. import entroly_integration
+
+    try:
+        return entroly_integration.mcp_servers(cwd)
+    except Exception as exc:
+        print(f"[claude_cli] entroly MCP config skipped: {exc}", file=sys.stderr)
+        return {}
 
 
 def _cli_env() -> dict[str, str]:
@@ -271,10 +287,15 @@ class ClaudeCLIProvider(Provider):
         disallowed_tools = kwargs.get("disallowed_tools")
         if disallowed_tools:
             cmd.extend(["--disallowedTools", disallowed_tools])
-        # --strict-mcp-config with no --mcp-config loads no MCP servers at all,
-        # so a sandboxed session cannot reach the user's own (dispatch, mail...).
-        if kwargs.get("no_mcp"):
-            cmd.append("--strict-mcp-config")
+        # Every session runs with an explicit MCP configuration and
+        # --strict-mcp-config, so the CLI ignores the user's global and project
+        # servers (dispatch, mail, trading) and loads only what eng-crew
+        # configures for agents — never eng-crew's own server — plus entroly's
+        # optimizer when it is enabled and installed. A sandboxed session
+        # (no_mcp, the ticket reviewer) gets none at all.
+        allow = not kwargs.get("no_mcp")
+        extra = _extra_mcp_servers(kwargs.get("cwd") or ".") if allow else {}
+        cmd.extend(mcp_policy.cli_args(allow_servers=allow, extra=extra))
         resume_session = kwargs.get("resume_session")
         if resume_session:
             cmd.extend(["--resume", str(resume_session)])

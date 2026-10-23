@@ -152,6 +152,14 @@ class Settings(BaseSettings):
     builder_max_turns: int = 60
     builder_test_first_max_turns: int = 100
 
+    # --- MCP servers given to agents ---
+    # Every agent CLI call runs with an explicit MCP configuration and ignores
+    # the user's global and project servers, so an agent reaches only what is
+    # named here: inline JSON ({"mcpServers": {...}}) or a path to such a file.
+    # Empty by default, and eng-crew's own server is always excluded — a run may
+    # not dispatch, plan or build other eng-crew work (eng_crew/mcp_policy.py).
+    agent_mcp_servers: str = ""
+
     # --- Verification gate ---
     # Runs the project's own tests/build after the agent tiers and decides the
     # run's final status. Disable only for a project with no runnable checks.

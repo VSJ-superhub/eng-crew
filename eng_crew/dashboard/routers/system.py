@@ -40,7 +40,10 @@ async def api_health_metrics():
 
 @router.get("/entroly/status")
 async def api_entroly_status():
-    return JSONResponse({"enabled": False, "available": False, "quality": 0.0, "token_budget": 0})
+    """The real state of the optional Entroly context optimizer: whether it is
+    enabled, whether its CLI is installed, and the settings in force."""
+    from ...entroly_integration import status
+    return JSONResponse(status())
 
 
 @router.get("/stacks")

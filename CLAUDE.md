@@ -131,6 +131,15 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   instead of being reported as "started" and then, silently, "stopped".
   `eng-crew discord [--check]` runs it in the foreground with the reason
   printed at you.
+- Every agent CLI call eng-crew makes — builders, repair passes, the ticket
+  reviewer, the manager, the discussion agent — runs with an explicit MCP
+  configuration and `--strict-mcp-config` (`eng_crew/mcp_policy.py`), so it
+  ignores the user's global and project MCP servers rather than inheriting
+  whatever can mail, trade or dispatch on their behalf. eng-crew's own server is
+  never among an agent's servers, however it is spelled: a run may not dispatch,
+  plan or build other eng-crew work from inside itself. What agents do get is
+  `ENG_CREW_AGENT_MCP_SERVERS` — inline JSON or a path to a JSON file, empty by
+  default — and a sandboxed call (the reviewer) gets none at all.
 - Agent prompts live in `.claude/skills/<name>/SKILL.md` (frontmatter + template),
   loaded by `eng_crew/prompts.py` — edit a prompt without touching agent code.
 - Runs execute in their own git worktree and branch (`worktree_isolation`, on by
@@ -157,5 +166,15 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   without the change fails the run. A run that adds no tests skips the phase,
   unless the task carried acceptance criteria and the project has a test suite:
   then adding no tests fails the run too, since test-first never happened.
+- The **Entroly** context optimizer (`eng_crew/entroly_integration.py`) is an
+  optional extra, off by default (`ENTROLY_ENABLED`, with `ENTROLY_QUALITY` and
+  `ENTROLY_TOKEN_BUDGET`). Enabled and installed, a run refreshes the project's
+  Entroly index before the agents start, the project context they are handed is
+  compressed to the token budget, and `entroly` is added to the MCP servers the
+  CLI gives agents (`providers/claude_cli._extra_mcp_servers`, so a sandboxed
+  session still gets none). Off, or with the CLI missing, eng-crew behaves
+  exactly as it does without it, and every entry point falls back to the
+  uncompressed context rather than failing a run. `/api/entroly/status` and the
+  dashboard card report the real state.
 - Dashboard at configurable port (default 9000)
 - Supports multiple LLM providers: Anthropic Claude CLI, OpenRouter, Gemini

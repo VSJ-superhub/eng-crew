@@ -146,11 +146,15 @@ export default function Dashboard() {
                   <div className='text-xs text-[#94a3b8]'>Token Budget</div>
                   <div className='text-sm font-mono text-[#a78bfa]'>{entroly.token_budget.toLocaleString()}</div>
                 </div>
-                <div className='text-xs text-[#64748b] self-center'>~78% context reduction · Shannon entropy + KKT selection</div>
+                <div className='text-xs text-[#64748b] self-center'>
+                  {entroly.available
+                    ? 'Project indexed per run · context compressed to the budget · offered to agents over MCP'
+                    : 'The entroly CLI is not installed — install it (pip install entroly[native]) or set ENTROLY_BIN'}
+                </div>
               </>
             )}
             {!entroly.enabled && (
-              <div className='text-xs text-[#64748b] self-center'>Set ENTROLY_ENABLED=1 to enable context compression</div>
+              <div className='text-xs text-[#64748b] self-center'>Optional. Set ENTROLY_ENABLED=1 (and install entroly) to compress the context agents are given</div>
             )}
           </div>
         </div>

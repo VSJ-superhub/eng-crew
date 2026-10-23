@@ -20,7 +20,7 @@ from eng_crew.agents.verifier import VerifierAgent
 from eng_crew.agents.single_agent import SingleAgentEngineer
 from eng_crew.config import Settings
 from eng_crew.project_context import load_project_context
-from eng_crew import retro
+from eng_crew import entroly_integration, retro
 from eng_crew.state import TeamState
 
 log = logging.getLogger(__name__)
@@ -373,8 +373,23 @@ def run_pipeline(
         log.warning("could not record the run's base commit: %s", exc)
         base_commit = None
 
+    # Entroly, when enabled and installed, indexes the project before the
+    # agents start and compresses the context they are handed. Both are
+    # best-effort: a context optimizer must never be what fails a run.
+    try:
+        if entroly_integration.init_project(work_path):
+            log.info("entroly index refreshed for %s", work_path)
+    except Exception as exc:
+        log.warning("entroly indexing failed: %s", exc)
+
     ctx = load_project_context(work_path)
     project_context = ctx.render()
+    try:
+        project_context = entroly_integration.compress_context(
+            project_context, query=task
+        )
+    except Exception as exc:
+        log.warning("entroly context compression failed: %s", exc)
     claude_md_path = str(Path(work_path).expanduser().resolve() / "CLAUDE.md")
 
     # Retros from tickets this project already shipped. Looked up against the
