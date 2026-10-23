@@ -106,12 +106,27 @@ def servers(spec: Any = _UNSET) -> dict:
     return allowed
 
 
-def config_json(spec: Any = _UNSET, *, allow_servers: bool = True) -> str:
+def config_json(
+    spec: Any = _UNSET, *, allow_servers: bool = True, extra: dict | None = None
+) -> str:
     """The ``--mcp-config`` payload. ``allow_servers=False`` means none at all —
-    what a sandboxed session (the ticket reviewer) gets."""
-    return json.dumps({"mcpServers": servers(spec) if allow_servers else {}})
+    what a sandboxed session (the ticket reviewer) gets. ``extra`` is servers
+    eng-crew's own integrations add (entroly); the own-server rule still holds."""
+    if not allow_servers:
+        return json.dumps({"mcpServers": {}})
+    merged = servers(spec)
+    for name, definition in (extra or {}).items():
+        if not is_own_server(name):
+            merged[str(name)] = definition
+    return json.dumps({"mcpServers": merged})
 
 
-def cli_args(spec: Any = _UNSET, *, allow_servers: bool = True) -> list[str]:
+def cli_args(
+    spec: Any = _UNSET, *, allow_servers: bool = True, extra: dict | None = None
+) -> list[str]:
     """The flags every agent CLI call carries."""
-    return [CONFIG_FLAG, config_json(spec, allow_servers=allow_servers), STRICT_FLAG]
+    return [
+        CONFIG_FLAG,
+        config_json(spec, allow_servers=allow_servers, extra=extra),
+        STRICT_FLAG,
+    ]

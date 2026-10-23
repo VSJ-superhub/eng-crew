@@ -166,5 +166,15 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   without the change fails the run. A run that adds no tests skips the phase,
   unless the task carried acceptance criteria and the project has a test suite:
   then adding no tests fails the run too, since test-first never happened.
+- The **Entroly** context optimizer (`eng_crew/entroly_integration.py`) is an
+  optional extra, off by default (`ENTROLY_ENABLED`, with `ENTROLY_QUALITY` and
+  `ENTROLY_TOKEN_BUDGET`). Enabled and installed, a run refreshes the project's
+  Entroly index before the agents start, the project context they are handed is
+  compressed to the token budget, and `entroly` is added to the MCP servers the
+  CLI gives agents (`providers/claude_cli._extra_mcp_servers`, so a sandboxed
+  session still gets none). Off, or with the CLI missing, eng-crew behaves
+  exactly as it does without it, and every entry point falls back to the
+  uncompressed context rather than failing a run. `/api/entroly/status` and the
+  dashboard card report the real state.
 - Dashboard at configurable port (default 9000)
 - Supports multiple LLM providers: Anthropic Claude CLI, OpenRouter, Gemini
