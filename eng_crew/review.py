@@ -58,6 +58,12 @@ CHANGES_REQUESTED = "changes_requested"
 #: Not a verdict: what the ticket's history records when no review could run.
 UNAVAILABLE = "unavailable"
 
+#: The word the reviewer answers with when a criterion's judgement turns
+#: entirely on a file the truncated diff did not show it. It is not a third
+#: verdict — it is the reviewer reporting it was not given enough to review,
+#: and it lands on the same "no review happened" path as an outage.
+UNABLE_TO_JUDGE_TOKEN = "UNABLE_TO_JUDGE"
+
 #: Run statuses that mean the work is on a branch. Only "completed" also means
 #: the verification gate vouched for it; "unverified" is the work without the
 #: evidence.
@@ -122,6 +128,10 @@ _FIRST_WORD = {
     "REQUEST_CHANGES": CHANGES_REQUESTED,
     "REJECT": CHANGES_REQUESTED,
     "REJECTED": CHANGES_REQUESTED,
+    # Only the token the prompt asks for, and the one obvious rephrasing of
+    # it. Nothing looser: "unable to approve" is a rejection, not an outage.
+    UNABLE_TO_JUDGE_TOKEN: UNAVAILABLE,
+    "CANNOT_JUDGE": UNAVAILABLE,
 }
 
 
@@ -260,6 +270,10 @@ def parse_verdict(text: str) -> tuple[str, str]:
 
     Anything unrecognised is changes-requested: a reply nobody can read is not
     an approval, and the expensive direction of this mistake is approving.
+
+    :data:`UNABLE_TO_JUDGE_TOKEN` is the one reply that is neither: it comes
+    back as :data:`UNAVAILABLE`, which the caller turns into a review that
+    could not run rather than a judgement on the build.
     """
     body = (text or "").strip()
     if not body:
@@ -269,7 +283,7 @@ def parse_verdict(text: str) -> tuple[str, str]:
     # goes on: "APPROVE", "**Changes requested**", "APPROVE — every criterion…".
     words = re.findall(r"[A-Za-z]+", head)
     verdict = None
-    for count in (2, 1):
+    for count in (3, 2, 1):
         if len(words) >= count:
             verdict = _FIRST_WORD.get("_".join(words[:count]).upper())
             if verdict is not None:
@@ -432,7 +446,16 @@ def _ask(ticket: dict, run: dict | None, diff: str, *, run_id: int,
         raise ReviewUnavailable(f"the reviewer could not be reached: {exc}") from exc
     if not (result.text or "").strip():
         raise ReviewUnavailable("the reviewer returned nothing")
-    return parse_verdict(result.text)
+    verdict, reasons = parse_verdict(result.text)
+    if verdict == UNAVAILABLE:
+        # The reviewer read the criteria and said it was not shown the code one
+        # of them turns on. That is the same fact as an outage — nobody judged
+        # the work — so it takes the same path and leaves no verdict behind.
+        raise ReviewUnavailable(
+            f"the reviewer could not judge the criteria from the diff it was "
+            f"shown: {reasons}"
+        )
+    return verdict, reasons
 
 
 def _verification_note(run: dict | None) -> str:

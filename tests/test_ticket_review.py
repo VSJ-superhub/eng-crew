@@ -448,3 +448,81 @@ def test_a_usage_limit_reply_is_review_unavailable_not_a_rejection(db, reviewer,
     assert tracker.get_backlog_item(ticket_id)["status"] == tickets.IN_REVIEW
     assert review.latest_verdict(ticket_id)["verdict"] == review.UNAVAILABLE
     assert "changes_requested" not in notes_of(ticket_id)
+
+
+# --- "can't judge, the file was cut" is not a rejection ------------------
+#
+# The prompt tells the reviewer not to request changes over a file it was never
+# shown — but it only ever had two verdicts to answer with, and anything else
+# fell through parse_verdict's unrecognised-token default to changes_requested.
+# A reviewer saying "I cannot judge criterion 2 without tracker.py" is a review
+# that could not run, not a judgement on the build.
+
+
+def test_the_skill_offers_a_token_for_a_criterion_it_cannot_judge():
+    from eng_crew import prompts
+
+    body = prompts.load("review-ticket", refresh=True).body
+    assert review.UNABLE_TO_JUDGE_TOKEN in body, \
+        "the template gives the reviewer no way to say it cannot judge a criterion"
+    rule = body.split(review.UNABLE_TO_JUDGE_TOKEN, 1)[1].lower()
+    assert "not shown" in rule, \
+        "the template does not tie the token to a file it was not shown"
+    # It is the narrow exception, not an escape hatch: the two real verdicts are
+    # still what a reviewer that has seen enough must answer with.
+    assert "APPROVE" in body and "CHANGES_REQUESTED" in body
+
+
+def test_an_unable_to_judge_reply_is_recorded_as_a_review_that_could_not_run(
+    db, reviewer
+):
+    reviewer["box"]["text"] = (
+        f"{review.UNABLE_TO_JUDGE_TOKEN} — criterion 2 turns entirely on "
+        "eng_crew/tracker.py, which was not shown to me."
+    )
+    ticket_id = in_review_ticket()
+
+    with pytest.raises(review.ReviewUnavailable):
+        review.review_ticket(ticket_id, diff=DIFF, settings=Settings())
+
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.IN_REVIEW
+    notes = notes_of(ticket_id)
+    assert "review unavailable" in notes.lower(), \
+        "the history does not say the review was unavailable"
+    assert review.CHANGES_REQUESTED not in notes, \
+        "a reviewer that could not judge was recorded as a rejection"
+    assert f"{review._NOTE_PREFIX} " not in notes, \
+        "a 'review:' verdict note was recorded for a review that gave no verdict"
+    assert "tracker.py" in notes, "the history does not say what was missing"
+    assert review.latest_verdict(ticket_id)["verdict"] == review.UNAVAILABLE
+
+
+def test_a_changes_requested_reply_is_still_a_verdict_not_an_outage(db, reviewer):
+    """The contrast case: the reviewer judged and said no. Unchanged."""
+    reviewer["box"]["text"] = "CHANGES_REQUESTED\nThe button is still green."
+    ticket_id = in_review_ticket()
+
+    result = review.review_ticket(ticket_id, diff=DIFF, settings=Settings())
+
+    assert result["verdict"] == review.CHANGES_REQUESTED
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.IN_REVIEW
+    notes = notes_of(ticket_id)
+    assert review.CHANGES_REQUESTED in notes
+    assert "review unavailable" not in notes.lower()
+    assert review.latest_verdict(ticket_id)["verdict"] == review.CHANGES_REQUESTED
+
+
+@pytest.mark.parametrize("reply, verdict", [
+    ("APPROVE\nevery criterion is met", review.APPROVE),
+    ("CHANGES_REQUESTED\n- the button is red", review.CHANGES_REQUESTED),
+])
+def test_the_two_real_verdicts_parse_as_they_always_did(reply, verdict):
+    assert review.parse_verdict(reply)[0] == verdict
+
+
+def test_an_unable_to_judge_reply_parses_as_unavailable():
+    verdict, reasons = review.parse_verdict(
+        "UNABLE_TO_JUDGE — criterion 2 depends on eng_crew/tracker.py"
+    )
+    assert verdict == review.UNAVAILABLE
+    assert "tracker.py" in reasons

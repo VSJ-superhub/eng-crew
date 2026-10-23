@@ -83,9 +83,10 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   passed the verification gate moves in_review → in_qa → done, credited to
   `reviewer` and `qa`. A changes-requested verdict leaves the ticket in
   in_review with the reasons attached and starts no new build. A review that
-  could not run at all — no API key, a provider error, an empty reply — is not a
-  verdict: the ticket stays in_review with a "review unavailable" event saying
-  why, never `changes_requested`. `done → shipped` is refused for every eng-crew
+  could not run at all — no API key, a provider error, an empty reply, or a
+  reviewer answering `UNABLE_TO_JUDGE` because a criterion turns on a file the
+  truncated diff never showed it — is not a verdict: the ticket stays in_review
+  with a "review unavailable" event saying why, never `changes_requested`. `done → shipped` is refused for every eng-crew
   actor (`tickets.ROBOTS`) — shipping is a human action.
 - Every ticket carries a spending budget (`eng_crew/budget.py`) — the
   configured default (`ENG_CREW_TICKET_BUDGET_USD`, $15) unless the ticket
