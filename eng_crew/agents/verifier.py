@@ -70,7 +70,15 @@ class VerifierAgent(BaseAgent):
                 f"[verify] repair pass {attempts}/{max_fixes} — {len(result.failures)} failing check(s)",
                 file=sys.stderr,
             )
-            repair_account = self._repair(state, result, run_id, attempts) or repair_account
+            # And the pass itself may only spend what the ticket has left: one
+            # repair session must not carry a ticket from under its budget to
+            # far over it. None for a run with no ticket.
+            ticket_budget = budget.status_for_run(run_id, self.settings) if run_id else None
+            cap = ticket_budget["remaining_usd"] if ticket_budget else None
+            repair_account = (
+                self._repair(state, result, run_id, attempts, max_budget_usd=cap)
+                or repair_account
+            )
             # Re-verify against the tree, not the repair agent's own account of it.
             # Passing agent_output="" drops the repair's narration on purpose, so
             # an established truncation is handed over explicitly — otherwise a
@@ -244,8 +252,13 @@ class VerifierAgent(BaseAgent):
 
         return run_event_handler(run_id, label)
 
-    def _repair(self, state: TeamState, result, run_id: int, attempt: int) -> str:
-        """Run one repair pass. Returns the repair agent's own account, or ""."""
+    def _repair(self, state: TeamState, result, run_id: int, attempt: int,
+                *, max_budget_usd: float | None = None) -> str:
+        """Run one repair pass. Returns the repair agent's own account, or "".
+
+        ``max_budget_usd`` caps what the session may spend — the ticket's
+        remaining budget. A provider that cannot cap a session ignores it.
+        """
         task = state.get("raw_task", "")
         project_path = state.get("project_path", ".")
 
@@ -276,6 +289,7 @@ class VerifierAgent(BaseAgent):
                 cwd=project_path,
                 resume_session=session_id or None,
                 on_event=self._progress(run_id, f"repair {attempt}"),
+                max_budget_usd=max_budget_usd,
             )
         except Exception as exc:  # a failed repair must not crash the gate
             print(f"[verify] repair call failed: {exc}", file=sys.stderr)

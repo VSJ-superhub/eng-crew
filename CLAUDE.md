@@ -78,15 +78,24 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   checks the run's diff against the ticket's acceptance criteria: one cheap model
   call on the `ticket_reviewer` role, with its cost recorded against the run. It
   must not be able to edit the code it judges, so a CLI-only setup reviews
-  through the Claude CLI with every file and shell tool disabled. The verdict
-  and its reasons go into `ticket_events`. An approved ticket whose run also
-  passed the verification gate moves in_review → in_qa → done, credited to
-  `reviewer` and `qa`. A changes-requested verdict leaves the ticket in
-  in_review with the reasons attached and starts no new build. A review that
-  could not run at all — no API key, a provider error, an empty reply — is not a
-  verdict: the ticket stays in_review with a "review unavailable" event saying
-  why, never `changes_requested`. `done → shipped` is refused for every eng-crew
-  actor (`tickets.ROBOTS`) — shipping is a human action.
+  through the Claude CLI with every file and shell tool disabled. The diff is
+  measured against the branch the run was built on (`runs.base_branch`), so a
+  run stacked on an unmerged prerequisite is not judged on the prerequisite's
+  code, and is cut at `ENG_CREW_TICKET_REVIEW_MAX_DIFF_CHARS` (120000). The
+  verdict and its reasons go into `ticket_events`. An approved ticket whose run
+  also passed the verification gate moves in_review → in_qa → done, credited to
+  `reviewer` and `qa` — unless the diff was truncated: an approval that did not
+  see every changed file says how many it saw and which it did not, and leaves
+  the ticket in in_review for a person. A changes-requested verdict leaves the
+  ticket in in_review with the reasons attached and starts no new build. A
+  review that could not run at all — no API key, a provider error, an empty
+  reply, a spent budget — is not a verdict: the ticket stays in_review with a
+  "review unavailable" event saying why, never `changes_requested`, and is
+  *waiting on a review* (`review.awaiting_review`) until one gives a verdict.
+  `eng-crew review <id>` and the dashboard's Run review button run that review;
+  a ticket with a verdict already is not reviewed again. `done → shipped` is
+  refused for every eng-crew actor (`tickets.ROBOTS`) — shipping is a human
+  action.
 - Every ticket carries a spending budget (`eng_crew/budget.py`) — the
   configured default (`ENG_CREW_TICKET_BUDGET_USD`, $15) unless the ticket
   overrides it. A ticket's spend is the total of every run charged to it,
@@ -94,9 +103,13 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   interrupted mid-flight, the budget is enforced where a *new* paid step would
   start: entering `in_progress` (a build), and before a repair pass or a
   review. The step already running finishes; the next one does not begin. A
-  stopped ticket records why in `ticket_events` and waits — nothing retries it.
-  Raising the budget (`eng-crew budget <id> <amount>`, or the dashboard) is what
-  releases it. A run with no ticket is never budget-checked.
+  repair pass is also capped at what the ticket has left (`--max-budget-usd`
+  on the Claude CLI session), so one pass cannot carry a ticket far past its
+  budget. A stopped ticket records why in `ticket_events` and waits — nothing
+  retries it. Raising the budget (`eng-crew budget <id> <amount>`, or the
+  dashboard) is what releases it: a review the budget stopped runs then, and
+  the next build checks the new figure. Raising it starts no build. A run with
+  no ticket is never budget-checked.
 - Shipping a ticket ends in a retro (`eng_crew/retro.py`). `done → shipped`
   writes a short note into the existing lessons store (the `memories` table)
   built from the ticket's own history — its runs, what it spent against its

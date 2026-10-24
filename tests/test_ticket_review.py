@@ -306,8 +306,10 @@ def truncated_diff(paths: list[str]) -> str:
     """A diff over several files, cut the way git_skill.branch_diff cuts it."""
     from eng_crew import git_skill
 
-    # The first file's changes fit inside the cut; the rest fall past it.
-    text = "".join(_diff_section(p, 1000 if i == 0 else 200)
+    # The first file's changes fit inside the cut; the rest fall past it. Sized
+    # from the limit (~30 chars a line), so a new limit does not break this.
+    first, rest = review.MAX_DIFF_CHARS // 40, review.MAX_DIFF_CHARS // 80
+    text = "".join(_diff_section(p, first if i == 0 else rest)
                    for i, p in enumerate(paths))
     assert len(text) > review.MAX_DIFF_CHARS, "this diff is not big enough to truncate"
     return text[:review.MAX_DIFF_CHARS] + git_skill.TRUNCATION_NOTE
@@ -371,7 +373,7 @@ def test_a_file_cut_from_a_real_branch_diff_is_reported_as_unshown(db, reviewer,
     subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
 
     subprocess.run(["git", "checkout", "-q", "-b", "ai-team/big"], cwd=root, check=True)
-    (root / "app.py").write_text("".join(f"line {i}\n" for i in range(4000)),
+    (root / "app.py").write_text("".join(f"line {i}\n" for i in range(review.MAX_DIFF_CHARS // 8)),
                                  encoding="utf-8")
     (root / "tracker.py").write_text("x = 2  # the change the reviewer wants\n",
                                      encoding="utf-8")
@@ -448,3 +450,251 @@ def test_a_usage_limit_reply_is_review_unavailable_not_a_rejection(db, reviewer,
     assert tracker.get_backlog_item(ticket_id)["status"] == tickets.IN_REVIEW
     assert review.latest_verdict(ticket_id)["verdict"] == review.UNAVAILABLE
     assert "changes_requested" not in notes_of(ticket_id)
+
+
+# --- what the review is measured against ---------------------------------
+#
+# Ticket #100765's run was built on #100758's unmerged branch. Diffed against
+# HEAD, the reviewer would have judged #100758's sign-up work as #100765's.
+
+
+def _git_repo(root):
+    import subprocess
+
+    root.mkdir()
+    for args in (("init", "-q", "-b", "main"), ("config", "user.email", "t@e.com"),
+                 ("config", "user.name", "T")):
+        subprocess.run(["git", *args], cwd=root, check=True)
+    (root / "app.py").write_text("print('v1')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
+    return root
+
+
+def _commit_on(root, branch, start, name, text):
+    import subprocess
+
+    subprocess.run(["git", "checkout", "-q", "-b", branch, start], cwd=root, check=True)
+    (root / name).write_text(text, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", name], cwd=root, check=True)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=root, check=True)
+
+
+def stacked_run(tmp_path, ticket_id=None):
+    """A run whose branch forked from a prerequisite's unmerged branch."""
+    root = _git_repo(tmp_path / "proj")
+    _commit_on(root, "ai-team/prereq", "main", "signup.py", "PREREQ_WORK = 1\n")
+    _commit_on(root, "ai-team/feature", "ai-team/prereq", "listings.py", "FEATURE_WORK = 1\n")
+    run_id = tracker.create_run("feature", str(root), ticket_id=ticket_id)
+    tracker.update_run_branch(run_id, "ai-team/feature")
+    tracker.update_run_base(run_id, "ai-team/prereq", "#1's branch")
+    return root, tracker.get_run_detail(run_id)
+
+
+def test_a_stacked_run_is_reviewed_against_the_branch_it_was_built_on(db, tmp_path):
+    _, run = stacked_run(tmp_path)
+
+    diff = review.run_diff(run)
+
+    assert "FEATURE_WORK" in diff
+    assert "PREREQ_WORK" not in diff, "the prerequisite's work was judged as this ticket's"
+    assert review.changed_files(run) == ["listings.py"]
+
+
+def test_the_pipelines_state_finds_the_base_through_the_run(db, tmp_path):
+    root, run = stacked_run(tmp_path)
+    state = {"git_branch": "ai-team/feature", "main_project_path": str(root),
+             "run_id": run["id"]}
+
+    assert review.review_base(state) == "ai-team/prereq"
+    assert "PREREQ_WORK" not in review.run_diff(state)
+
+
+def test_a_base_that_no_longer_exists_falls_back_to_head(db, tmp_path):
+    import subprocess
+
+    root, run = stacked_run(tmp_path)
+    subprocess.run(["git", "merge", "-q", "--no-edit", "ai-team/prereq"], cwd=root, check=True)
+    subprocess.run(["git", "branch", "-qD", "ai-team/prereq"], cwd=root, check=True)
+
+    assert review.review_base(run) == "HEAD"
+    diff = review.run_diff(run)
+    assert "FEATURE_WORK" in diff and "PREREQ_WORK" not in diff
+
+
+def test_a_run_forked_from_head_is_still_measured_against_head(db, tmp_path):
+    root = _git_repo(tmp_path / "proj")
+    _commit_on(root, "ai-team/plain", "main", "x.py", "X = 1\n")
+    run_id = tracker.create_run("plain", str(root))
+    tracker.update_run_branch(run_id, "ai-team/plain")
+    tracker.update_run_base(run_id, "HEAD", "the project checkout's HEAD")
+    run = tracker.get_run_detail(run_id)
+
+    assert review.review_base(run) == "HEAD"
+    assert "X = 1" in review.run_diff(run)
+
+
+def test_a_review_handed_no_diff_reads_it_from_the_run(db, reviewer, tmp_path):
+    """Called the way a resumed review calls it: ticket and run, nothing else."""
+    ticket_id = in_review_ticket()
+    _, run = stacked_run(tmp_path, ticket_id=ticket_id)
+
+    review.review_ticket(ticket_id, run["id"], settings=Settings())
+
+    prompt = reviewer["calls"][0]["prompt"]
+    assert "FEATURE_WORK" in prompt
+    assert "PREREQ_WORK" not in prompt
+    assert "(the diff could not be read)" not in prompt
+
+
+# --- an approval that did not see everything ------------------------------
+
+
+def test_an_approval_that_did_not_see_every_file_keeps_the_ticket_in_review(db, reviewer):
+    files = ["api/listings.py", "apps/web/ListingForm.tsx", "apps/web/ProfileForm.tsx"]
+    ticket_id = in_review_ticket()
+    tracker.finish_run(tracker.get_ticket_run(ticket_id)["id"], status="completed")
+
+    verdict = review.review_ticket(ticket_id, diff=truncated_diff(files), files=files,
+                                   settings=Settings())
+
+    assert verdict["verdict"] == review.APPROVE
+    assert verdict["status"] == tickets.IN_REVIEW
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.IN_REVIEW
+    notes = notes_of(ticket_id)
+    assert "1 of 3 changed files" in notes
+    assert "apps/web/ProfileForm.tsx" in notes
+    assert review.latest_verdict(ticket_id)["partial"] is True
+    # A verdict was given; it is a person's to act on, not a reason to ask again.
+    assert review.awaiting_review(ticket_id) is None
+
+
+def test_the_diff_limit_is_configurable():
+    assert review.max_diff_chars(Settings(ticket_review_max_diff_chars=5000)) == 5000
+    assert review.max_diff_chars(Settings()) == review.MAX_DIFF_CHARS
+
+
+# --- a review the budget stopped runs once the budget allows it -----------
+
+
+def over_budget_in_review(budget_usd=15.0, spent=21.35) -> tuple[int, int]:
+    """#100765: the build and its repair spent past the budget, so the review
+    after them never started."""
+    ticket_id = tracker.add_backlog_item("t", "d", "/proj", "",
+                                         acceptance_criteria="- it works",
+                                         budget_usd=budget_usd)
+    tickets.move(ticket_id, tickets.READY, "tester")
+    tickets.move(ticket_id, tickets.IN_PROGRESS, "queue")
+    run_id = tracker.create_run("t", "/proj", ticket_id=ticket_id)
+    tracker.log_event(run_id, 0, "single_agent", LLMResult(text="", cost_usd=spent))
+    tracker.finish_run(run_id, status="completed")
+    tickets.move(ticket_id, tickets.IN_REVIEW, "cli", f"run {run_id} finished as completed")
+    return ticket_id, run_id
+
+
+def test_a_review_stopped_for_budget_leaves_the_ticket_waiting_on_one(db, reviewer):
+    ticket_id, run_id = over_budget_in_review()
+
+    with pytest.raises(review.ReviewUnavailable):
+        review.review_ticket(ticket_id, run_id, settings=Settings())
+
+    assert reviewer["calls"] == []
+    assert review.awaiting_review(ticket_id) == run_id
+    assert review.review_if_waiting(ticket_id, Settings()) is None   # still no money
+    assert reviewer["calls"] == []
+
+
+def test_raising_the_budget_lets_the_waiting_review_run(db, reviewer, monkeypatch):
+    from eng_crew import budget
+
+    monkeypatch.setattr(review, "run_diff", lambda state, **kw: DIFF)
+    ticket_id, run_id = over_budget_in_review()
+    with pytest.raises(review.ReviewUnavailable):
+        review.review_ticket(ticket_id, run_id, settings=Settings())
+
+    budget.set_budget(ticket_id, 25.0, actor="alway")
+    verdict = review.review_if_waiting(ticket_id, Settings())
+
+    assert verdict["verdict"] == review.APPROVE
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.DONE
+    assert review.awaiting_review(ticket_id) is None
+
+
+def test_a_ticket_that_already_has_a_verdict_is_not_reviewed_again(db, reviewer):
+    reviewer["box"]["text"] = "CHANGES_REQUESTED\n- the button is red"
+    ticket_id, _ = landed_ticket()
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.IN_REVIEW
+
+    assert review.awaiting_review(ticket_id) is None
+    assert review.review_if_waiting(ticket_id, Settings()) is None
+    assert len(reviewer["calls"]) == 1
+
+
+def _inline_threads(monkeypatch):
+    """Run the dashboard's background review inline, so a test can see it."""
+    import types
+
+    from eng_crew.dashboard.routers import projects
+
+    class Inline:
+        def __init__(self, target, **kw):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(projects, "threading", types.SimpleNamespace(Thread=Inline))
+
+
+def test_raising_the_budget_on_the_dashboard_starts_the_waiting_review(db, reviewer, monkeypatch):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from eng_crew.dashboard.app import app
+
+    monkeypatch.setattr(review, "run_diff", lambda state, **kw: DIFF)
+    _inline_threads(monkeypatch)
+    ticket_id, run_id = over_budget_in_review()
+    with pytest.raises(review.ReviewUnavailable):
+        review.review_ticket(ticket_id, run_id, settings=Settings())
+
+    with TestClient(app) as client:
+        assert client.get(f"/api/tickets/{ticket_id}").json()["awaiting_review"] is True
+        body = client.put(f"/api/tickets/{ticket_id}/budget",
+                          json={"budget_usd": 25.0, "actor": "alway"}).json()
+
+    assert body["review_started"] is True
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.DONE
+
+
+def test_the_dashboard_review_button_refuses_a_ticket_with_a_verdict(db, reviewer, monkeypatch):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from eng_crew.dashboard.app import app
+
+    _inline_threads(monkeypatch)
+    reviewer["box"]["text"] = "CHANGES_REQUESTED\n- the button is red"
+    ticket_id, _ = landed_ticket()
+
+    with TestClient(app) as client:
+        refused = client.post(f"/api/tickets/{ticket_id}/review")
+
+    assert refused.status_code == 409
+    assert len(reviewer["calls"]) == 1
+
+
+def test_the_cli_review_command_runs_a_waiting_review(db, reviewer, monkeypatch):
+    from typer.testing import CliRunner
+
+    from eng_crew import cli
+
+    monkeypatch.setattr(review, "run_diff", lambda state, **kw: DIFF)
+    ticket_id, _ = over_budget_in_review(budget_usd=50.0)
+
+    out = CliRunner().invoke(cli.app, ["review", str(ticket_id)])
+
+    assert out.exit_code == 0, out.output
+    assert "approve" in out.output
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.DONE

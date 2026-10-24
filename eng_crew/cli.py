@@ -327,8 +327,9 @@ def budget(
 ) -> None:
     """Show or change a ticket's spend authority.
 
-    Raising it is what releases a ticket whose work was stopped for budget; the
-    next build picks up the new figure. This starts no run.
+    Raising it is what releases a ticket whose work was stopped for budget: a
+    review the budget stopped runs now, and the next build picks up the new
+    figure. This starts no build.
     """
     if amount is not None and amount < 0:
         console.print("[red]a budget cannot be negative[/red]")
@@ -349,6 +350,46 @@ def budget(
         f"ticket {ticket_id}: [{colour}]${state['spent_usd']:.2f}[/] spent of "
         f"${state['budget_usd']:.2f} (${state['remaining_usd']:.2f} left)"
     )
+    if amount is not None and not state["exhausted"]:
+        _review_waiting(ticket_id, cfg, quiet=True)
+
+
+def _review_waiting(ticket_id: int, cfg, *, quiet: bool = False) -> None:
+    """Run the review a ticket is waiting on, and say what came of it."""
+    from eng_crew import review as review_mod
+
+    if not review_mod.awaiting_review(ticket_id):
+        if not quiet:
+            console.print(f"ticket {ticket_id} is not waiting on a review")
+        return
+    console.print(f"reviewing ticket {ticket_id}…")
+    try:
+        verdict = review_mod.review_if_waiting(ticket_id, cfg)
+    except review_mod.ReviewUnavailable as exc:
+        console.print(f"[yellow]review unavailable:[/yellow] {exc}")
+        return
+    if not verdict:
+        console.print("[yellow]the review did not start — see the ticket's history[/yellow]")
+        return
+    colour = "green" if verdict["verdict"] == review_mod.APPROVE else "yellow"
+    console.print(
+        f"[{colour}]{verdict['verdict']}[/] — ticket {ticket_id} is now {verdict['status']}"
+    )
+    console.print(verdict["reasons"])
+
+
+@app.command()
+def review(
+    ticket_id: int = typer.Argument(..., help="Ticket ID waiting in review."),
+    env_file: Optional[Path] = typer.Option(None, "--env", help="Path to .env file."),
+) -> None:
+    """Run the review a ticket in review is still waiting on.
+
+    For a ticket whose review never gave a verdict — stopped for budget, or the
+    reviewer was unreachable. A ticket with a verdict already is left alone:
+    acting on that verdict is a person's call.
+    """
+    _review_waiting(ticket_id, load_settings(env_file))
 
 
 @app.command()

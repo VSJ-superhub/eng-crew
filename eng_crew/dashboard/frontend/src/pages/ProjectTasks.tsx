@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   ApiError, createProjectPlan, getProjectPlan, getRoadmap, getTicketQueue, getTicketEvents,
-  moveTicket, planFromClaudeMd, runQueue, runTicket, setTicketArea, setTicketBudget,
+  moveTicket, planFromClaudeMd, reviewTicket, runQueue, runTicket, setTicketArea, setTicketBudget,
   ROADMAP_STATES,
 } from '../api/client';
 import type {
@@ -107,13 +107,14 @@ function money(n: number): string {
   return '$' + n.toFixed(2)
 }
 
-function TicketCard({ ticket, busy, onMove, onRun, onBudget, onArea }: {
+function TicketCard({ ticket, busy, onMove, onRun, onBudget, onArea, onReview }: {
   ticket: Ticket
   busy: boolean
   onMove: (id: number, status: TicketStatus) => void
   onRun: (id: number) => void
   onBudget: (id: number, amount: number) => void
   onArea: (id: number, area: string) => void
+  onReview: (id: number) => void
 }) {
   const [open, setOpen] = useState(false)
   const criteria = (ticket.acceptance_criteria ?? '').trim()
@@ -226,6 +227,23 @@ function TicketCard({ ticket, busy, onMove, onRun, onBudget, onArea }: {
                 }}
                 className='mt-1.5 text-[11px] px-2 py-1 rounded bg-white/5 text-gray-300 hover:bg-white/10 disabled:opacity-40'>
                 Change budget
+              </button>
+            </div>
+          )}
+
+          {ticket.awaiting_review && (
+            <div>
+              <p className='text-[10px] uppercase text-gray-500 font-bold mb-1'>Review</p>
+              <p className='text-xs text-amber-400'>
+                No verdict yet — the review was stopped or could not run.
+              </p>
+              <button disabled={busy || overBudget}
+                onClick={() => onReview(ticket.id)}
+                title={overBudget
+                  ? 'This ticket has spent its budget. Raise it first; the review then runs on its own.'
+                  : 'Check the run against this ticket’s acceptance criteria.'}
+                className='mt-1.5 text-[11px] px-2 py-1 rounded bg-white/5 text-gray-300 hover:bg-white/10 disabled:opacity-40'>
+                Run review
               </button>
             </div>
           )}
@@ -558,7 +576,8 @@ export default function ProjectTasks() {
                       onMove={(tid, status) => act(tid, () => moveTicket(tid, status))}
                       onRun={tid => act(tid, () => runTicket(tid))}
                       onBudget={(tid, amount) => act(tid, () => setTicketBudget(tid, amount))}
-                      onArea={(tid, area) => act(tid, () => setTicketArea(tid, area))} />
+                      onArea={(tid, area) => act(tid, () => setTicketArea(tid, area))}
+                      onReview={tid => act(tid, () => reviewTicket(tid))} />
                   ))}
             </div>
           ))}
