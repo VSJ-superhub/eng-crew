@@ -38,10 +38,13 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   (`eng_crew/basing.py`). A prerequisite counts as met when it is `done`, but
   its work sits on its run's branch until somebody merges it — so when a
   prerequisite's branch is not yet contained in the project checkout's HEAD,
-  the run forks from that branch instead of from HEAD; with several such
-  branches it forks from a branch that merges all of them onto HEAD. If they
-  cannot be combined the build is refused before it starts, naming the
-  conflicting prerequisites, and the ticket stays where it was. The branch a
+  the run forks from that branch instead of from HEAD — as long as that branch
+  already contains HEAD. With several such branches, or one that HEAD has
+  moved on from, it forks from a branch that merges them onto HEAD; a
+  prerequisite branch another one already contains is carried by it, not
+  merged twice. If they cannot be combined the build is refused before it
+  starts, naming the conflicting prerequisites and whether they conflict with
+  each other or with HEAD, and the ticket stays where it was. The branch a
   run was based on and why are recorded on the run (`runs.base_branch`,
   `runs.base_reason`) and shown with it. Every surface gets this, because
   `eng-crew ticket <id>` — what the CLI, the dashboard, Discord `/build` and a

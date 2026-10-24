@@ -206,6 +206,97 @@ def test_a_refused_basing_leaves_no_branch_behind(db, repo):
     assert _git("branch", "--list", cwd=repo).stdout == before
 
 
+def commit_on_main(repo, files: dict[str, str], message: str = "meanwhile") -> None:
+    """Other work landing on HEAD after a prerequisite branched off it."""
+    for name, text in files.items():
+        (repo / name).write_text(text, encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-qm", message, cwd=repo)
+
+
+def stacked_prerequisite(repo, *, on: str, title: str, files: dict[str, str]) -> tuple[int, str]:
+    """A done ticket whose run was based on another prerequisite's branch."""
+    ticket_id, branch = done_prerequisite(repo, title=title, files={})
+    _git("branch", "-qD", branch, cwd=repo)
+    _git("checkout", "-q", "-b", branch, on, cwd=repo)
+    for name, text in files.items():
+        (repo / name).write_text(text, encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-qm", f"{title} work", cwd=repo)
+    _git("checkout", "-q", "main", cwd=repo)
+    return ticket_id, branch
+
+
+def test_one_prerequisite_branch_behind_head_is_merged_onto_it(db, repo):
+    """Forking from the branch alone would lose what landed on HEAD since."""
+    first, branch = done_prerequisite(repo, title="schema", files={"schema.py": "T = 1\n"})
+    commit_on_main(repo, {"ui.py": "U = 1\n"})
+    ticket_id = dependent(repo, depends_on=[first])
+
+    base = basing.resolve_base(ticket_id)
+
+    assert base.ref not in (None, branch)
+    assert git_skill.is_contained_in(repo, branch, base.ref)
+    assert git_skill.is_contained_in(repo, "main", base.ref)
+    assert f"#{first}" in base.reason and "moved on" in base.reason
+    assert git_skill.current_branch(repo) == "main"
+
+
+def test_a_prerequisite_conflicting_with_head_is_named_as_such(db, repo):
+    first, _ = done_prerequisite(repo, title="left", files={"app.py": "print('left')\n"})
+    commit_on_main(repo, {"app.py": "print('main')\n"})
+    ticket_id = dependent(repo, depends_on=[first])
+    before = _git("branch", "--list", cwd=repo).stdout
+
+    with pytest.raises(basing.ConflictingPrerequisites) as refused:
+        basing.resolve_base(ticket_id)
+
+    assert refused.value.with_head
+    assert refused.value.conflicting == [first]
+    assert "conflicts with HEAD" in str(refused.value)
+    assert _git("branch", "--list", cwd=repo).stdout == before
+
+
+def test_a_stacked_prerequisite_is_carried_by_the_branch_built_on_it(db, repo):
+    first, one = done_prerequisite(repo, title="api", files={"api.py": "E = 1\n"})
+    second, two = stacked_prerequisite(repo, on=one, title="web", files={"web.py": "W = 1\n"})
+    ticket_id = dependent(repo, depends_on=[first, second])
+
+    base = basing.resolve_base(ticket_id)
+
+    # One branch holds both, and HEAD has not moved: no merge branch needed.
+    assert base.ref == two
+    assert base.prerequisites == [first, second]
+
+
+def test_a_stacked_chain_behind_a_conflicting_head_blames_head_not_the_chain(db, repo):
+    """The case that read as "#B conflict": B's branch clashed with HEAD alone."""
+    first, one = done_prerequisite(repo, title="api", files={"api.py": "E = 1\n"})
+    second, two = stacked_prerequisite(repo, on=one, title="web", files={"app.py": "print('web')\n"})
+    commit_on_main(repo, {"app.py": "print('main')\n"})
+    ticket_id = dependent(repo, depends_on=[second, first])
+
+    with pytest.raises(basing.ConflictingPrerequisites) as refused:
+        basing.resolve_base(ticket_id)
+
+    assert refused.value.with_head
+    assert refused.value.conflicting == [second]
+    assert "conflicts with HEAD" in str(refused.value)
+
+
+def test_prerequisites_that_conflict_with_each_other_say_so(db, repo):
+    first, _ = done_prerequisite(repo, title="left", files={"app.py": "print('left')\n"})
+    second, _ = done_prerequisite(repo, title="right", files={"app.py": "print('right')\n"})
+    ticket_id = dependent(repo, depends_on=[first, second])
+
+    with pytest.raises(basing.ConflictingPrerequisites) as refused:
+        basing.resolve_base(ticket_id)
+
+    assert not refused.value.with_head
+    assert refused.value.conflicting == [first, second]
+    assert "with each other" in str(refused.value)
+
+
 # --- criterion 4: recorded on the run, and shown -----------------------
 
 
