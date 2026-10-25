@@ -96,6 +96,24 @@ def is_contained_in(project_path: str | Path, ref: str, container: str = "HEAD")
     return result.returncode == 0
 
 
+def merges_cleanly(project_path: str | Path, ours: str, theirs: str) -> bool | None:
+    """Whether ``theirs`` merges into ``ours`` without a conflict, touching nothing.
+
+    None when this git cannot say (``merge-tree --write-tree`` needs 2.38+):
+    the caller has to fall back to whatever it knew without asking.
+    """
+    root = Path(project_path).expanduser().resolve()
+    result = subprocess.run(
+        ["git", "merge-tree", "--write-tree", "--quiet", ours, theirs],
+        cwd=root, capture_output=True, encoding="utf-8", errors="replace",
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
 def merge_branches(
     project_path: str | Path,
     branch: str,
