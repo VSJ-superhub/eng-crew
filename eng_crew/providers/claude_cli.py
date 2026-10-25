@@ -26,6 +26,8 @@ TRUNCATION_PREFIX = (
 )
 
 _MAX_RETRIES = 3
+#: The result subtype the CLI ends a session with when ``--max-budget-usd`` is hit.
+_BUDGET_STOP = "error_max_budget_usd"
 _RETRY_DELAYS = [2, 5, 10]
 
 
@@ -160,6 +162,8 @@ def summarize_event(evt: dict) -> str:
         turns = evt.get("num_turns", "?")
         if subtype == "error_max_turns":
             return f"stopped: turn limit reached after {turns} turns"
+        if subtype == _BUDGET_STOP:
+            return f"stopped: spending cap reached after {turns} turns"
         return f"finished ({turns} turns)"
 
     return ""
@@ -299,6 +303,11 @@ class ClaudeCLIProvider(Provider):
         resume_session = kwargs.get("resume_session")
         if resume_session:
             cmd.extend(["--resume", str(resume_session)])
+        # A spending cap for the whole session — a ticket's remaining budget. The
+        # CLI stops the session when it is reached, so one call cannot overrun.
+        max_budget = kwargs.get("max_budget_usd")
+        if max_budget is not None:
+            cmd.extend(["--max-budget-usd", f"{max(float(max_budget), 0.01):.2f}"])
         return cmd
 
     def _stream(self, cmd: list[str], cwd: str, prompt: str = "") -> Iterator[dict]:
@@ -374,7 +383,9 @@ class ClaudeCLIProvider(Provider):
                 collected["output_tokens"] = int(usage.get("output_tokens", 0) or 0)
                 cost = evt.get("total_cost_usd")
                 collected["cost_usd"] = float(cost) if cost is not None else 0.0
-                if evt.get("subtype") == "error_max_turns":
+                if evt.get("subtype") in ("error_max_turns", _BUDGET_STOP):
+                    # Stopped by a limit eng-crew set, not broken: partial work,
+                    # marked as such — and not retried, which would spend again.
                     collected["truncated"] = True
                 elif evt.get("is_error"):
                     collected["is_error"] = True
@@ -422,7 +433,7 @@ class ClaudeCLIProvider(Provider):
             if got["truncated"]:
                 # Partial work is still useful, but must never read as complete.
                 print(
-                    f"[claude_cli] max-turns reached — using partial output ({len(text)} chars)",
+                    f"[claude_cli] turn or spending limit reached — using partial output ({len(text)} chars)",
                     file=sys.stderr,
                 )
                 text = TRUNCATION_PREFIX + text

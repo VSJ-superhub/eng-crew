@@ -19,7 +19,9 @@ Two properties make it authority rather than a warning:
     The enforcement points are therefore: entering ``in_progress`` (a build),
     and the two paid steps that happen after a build without a new
     transition — the repair pass in :mod:`eng_crew.agents.verifier` and the
-    review in :mod:`eng_crew.review`.
+    review in :mod:`eng_crew.review`. A repair pass is the one step that can
+    also be bounded while it runs: its session is capped at what the ticket
+    has left, so it cannot carry the ticket far past its budget.
 
 A run with no ticket is outside all of this. There is nothing to charge it to
 and nobody asked for authority over it, so it behaves exactly as it always did.
@@ -161,7 +163,9 @@ def set_budget(ticket_id: int, amount: float, actor: str = "user",
 
     Raising it is what releases a ticket stopped for budget: the next paid step
     checks the new figure and proceeds. Nothing is restarted here — a person
-    decided to authorise more spend, not to launch a build.
+    decided to authorise more spend, not to launch a build. A review the budget
+    stopped is the surfaces' to restart (:func:`eng_crew.review.review_if_waiting`),
+    since it is a model call and this is a bookkeeping change.
     """
     from . import tickets
 

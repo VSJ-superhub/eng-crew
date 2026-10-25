@@ -60,7 +60,7 @@ export interface HealthMetrics {
 export type TicketStatus = 'backlog' | 'ready' | 'in_progress' | 'in_review' | 'in_qa' | 'done' | 'rejected' | 'shipped'
 export const TICKET_STATUSES: TicketStatus[] = ['backlog', 'ready', 'in_progress', 'in_review', 'in_qa', 'done', 'rejected', 'shipped']
 /** A ticket. `BacklogItem` is the legacy name for the same row. */
-export interface BacklogItem { id: number; title: string; description?: string; project_path?: string; claude_md_path?: string; priority: number; status: TicketStatus | string; acceptance_criteria?: string; created_at: string; project_id?: number; plan_id?: number; type?: string; run_id?: number; budget_usd?: number; spent_usd?: number; budget_exhausted?: boolean; depends_on?: number[]; prerequisites?: TicketRef[]; unmet_prerequisites?: TicketRef[]; blocked?: boolean; area?: string }
+export interface BacklogItem { id: number; title: string; description?: string; project_path?: string; claude_md_path?: string; priority: number; status: TicketStatus | string; acceptance_criteria?: string; created_at: string; project_id?: number; plan_id?: number; type?: string; run_id?: number; budget_usd?: number; spent_usd?: number; budget_exhausted?: boolean; depends_on?: number[]; prerequisites?: TicketRef[]; unmet_prerequisites?: TicketRef[]; blocked?: boolean; area?: string; awaiting_review?: boolean }
 
 /** A ticket this one waits on, as the tracker reports it. */
 export interface TicketRef { id: number; title: string; status: string }
@@ -134,9 +134,15 @@ export function moveTicket(id: number, status: TicketStatus, actor = 'user', not
 export function getTicket(id: number): Promise<{ ticket: Ticket; budget: TicketBudget | null; events: TicketEvent[]; allowed_transitions: TicketStatus[]; blocked: boolean; prerequisites: TicketRef[]; unmet_prerequisites: TicketRef[] }> { return api('/api/tickets/' + id) }
 
 /** Change a ticket's spend authority. Raising it releases work stopped for
- *  budget; it starts nothing on its own. */
-export function setTicketBudget(id: number, budget_usd: number, actor = 'user'): Promise<{ ok: boolean; budget: TicketBudget }> {
+ *  budget: a review the budget stopped starts again (`review_started`); no
+ *  build starts on its own. */
+export function setTicketBudget(id: number, budget_usd: number, actor = 'user'): Promise<{ ok: boolean; budget: TicketBudget; review_started?: boolean }> {
   return put('/api/tickets/' + id + '/budget', { budget_usd, actor })
+}
+/** Run the review a ticket in review is still waiting on. 409 when it already
+ *  has a verdict, or has no budget left for one. */
+export function reviewTicket(id: number): Promise<{ ok: boolean; started: boolean }> {
+  return post('/api/tickets/' + id + '/review', {})
 }
 export function getTicketEvents(id: number): Promise<{ events: TicketEvent[] }> { return api('/api/tickets/' + id + '/events') }
 export function runTicket(id: number): Promise<{ ok: boolean }> { return post('/api/tickets/' + id + '/run', {}) }

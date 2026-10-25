@@ -35,3 +35,23 @@ def test_an_error_result_is_raised_and_not_retried(monkeypatch):
 def test_a_normal_result_is_returned_as_text(monkeypatch):
     provider, _ = _provider(monkeypatch, {**BASE, "text": "APPROVE"})
     assert provider.call("claude-opus-5", "review this").text == "APPROVE"
+
+
+def test_a_session_stopped_by_its_spending_cap_is_partial_work_not_an_error(monkeypatch):
+    """`--max-budget-usd` ends the session with its own subtype. That is the
+    limit eng-crew asked for: keep the partial work, marked, and do not retry —
+    a retry would spend the cap all over again."""
+    provider = claude_cli.ClaudeCLIProvider()
+    stream = [{"type": "result", "subtype": "error_max_budget_usd", "is_error": True,
+               "result": "half done", "total_cost_usd": 5.17, "session_id": "s"}]
+    monkeypatch.setattr(provider, "_stream", lambda *a, **k: iter(stream))
+    attempts = []
+    real = provider._attempt
+    monkeypatch.setattr(provider, "_attempt", lambda *a, **k: attempts.append(1) or real(*a, **k))
+
+    result = provider.call("claude-opus-5", "repair it", max_budget_usd=5.17)
+
+    assert len(attempts) == 1
+    assert result.text.startswith(claude_cli.TRUNCATION_PREFIX)
+    assert "half done" in result.text
+    assert result.cost_usd == pytest.approx(5.17)

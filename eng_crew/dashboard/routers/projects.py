@@ -155,6 +155,9 @@ async def api_ticket_get(ticket_id: int):
         # The verdict on the ticket's last review, pulled out of the history so
         # a ticket held back at in_review can show why without reading events.
         "review": review.latest_verdict(ticket_id),
+        # In review with no verdict yet — stopped for budget, or the reviewer was
+        # unreachable — so the page can offer to run it.
+        "awaiting_review": review.awaiting_review(ticket_id) is not None,
         "allowed_transitions": sorted(tickets.allowed_transitions(ticket["status"])),
     })
 
@@ -184,15 +187,61 @@ class TicketBudgetIn(BaseModel):
 async def api_ticket_budget(ticket_id: int, payload: TicketBudgetIn):
     """Change a ticket's budget. Raising it is what releases stopped work.
 
-    This starts nothing: authorising more spend and deciding to build again are
-    separate calls, and the second one is the person's too.
+    A review the budget stopped starts again in the background once the budget
+    allows it. No build starts: authorising more spend and deciding to build
+    again are separate calls, and the second one is the person's.
     """
     if not get_backlog_item(ticket_id):
         return JSONResponse({"error": "not found"}, status_code=404)
     if payload.budget_usd < 0:
         return JSONResponse({"error": "a budget cannot be negative"}, status_code=400)
     state = budget.set_budget(ticket_id, payload.budget_usd, payload.actor)
-    return JSONResponse({"ok": True, "budget": state})
+    started = bool(state and not state["exhausted"]) and _start_waiting_review(ticket_id)
+    return JSONResponse({"ok": True, "budget": state, "review_started": started})
+
+
+def _start_waiting_review(ticket_id: int) -> bool:
+    """Run a ticket's waiting review off the request thread. False if none waits.
+
+    The review is one model call, but a call is seconds to minutes; its verdict
+    lands in the ticket's history, which the page re-reads.
+    """
+    from ... import review
+
+    if review.awaiting_review(ticket_id) is None:
+        return False
+
+    def work() -> None:
+        try:
+            review.review_if_waiting(ticket_id)
+        except review.ReviewUnavailable as exc:
+            print(f"[review] ticket {ticket_id} was not reviewed: {exc}", file=sys.stderr)
+        except Exception as exc:
+            print(f"[review] reviewing ticket {ticket_id} failed: {exc}", file=sys.stderr)
+
+    threading.Thread(target=work, daemon=True, name=f"review-{ticket_id}").start()
+    return True
+
+
+@router.post("/tickets/{ticket_id}/review")
+async def api_ticket_review(ticket_id: int):
+    """Run the review a ticket in review is still waiting on.
+
+    Refused for a ticket that already has a verdict: acting on a verdict is a
+    person's call, not a reason to ask the reviewer again.
+    """
+    if not get_backlog_item(ticket_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    state = budget.status(ticket_id)
+    if state and state["exhausted"]:
+        return JSONResponse(
+            {"error": "this ticket has spent its budget — raise it first"}, status_code=409,
+        )
+    if not _start_waiting_review(ticket_id):
+        return JSONResponse(
+            {"error": "this ticket is not waiting on a review"}, status_code=409,
+        )
+    return JSONResponse({"ok": True, "started": True})
 
 
 class TicketAreaIn(BaseModel):
@@ -240,8 +289,15 @@ async def api_project_queue(project_id: int):
     p = get_project(project_id)
     if not p:
         return JSONResponse({"error": "not found"}, status_code=404)
+    from ... import review
+
     all_tickets = [
-        tickets.with_dependencies(budget.annotate(t))
+        {
+            **tickets.with_dependencies(budget.annotate(t)),
+            # In review with no verdict yet, so the card can offer to run it.
+            "awaiting_review": t["status"] == tickets.IN_REVIEW
+            and review.awaiting_review(t["id"]) is not None,
+        }
         for t in list_project_tickets(p["project_path"])
     ]
     return JSONResponse({

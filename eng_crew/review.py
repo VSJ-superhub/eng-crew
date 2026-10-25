@@ -22,12 +22,18 @@ Three properties make it a review rather than a rubber stamp:
     ticket whose run came back ``unverified`` stays in review.
   - **It cannot ship.** ``done -> shipped`` is a human move, enforced in
     :mod:`eng_crew.tickets`.
+  - **It only vouches for what it saw.** The diff is measured against the
+    branch the run was built on, and an approval of a truncated diff does not
+    move the ticket on: it names the files the reviewer was not shown, and a
+    person checks them.
 
 A review that could not run is not a verdict. No API key for the configured
 provider, a provider that errors, an empty reply — none of that is evidence
 about the work, and recording it as ``changes_requested`` blames the build for
 the reviewer's outage. The ticket stays in ``in_review`` with a history event
-saying the review was unavailable and why, and a person decides what to do.
+saying the review was unavailable and why, and waits on a review
+(:func:`awaiting_review`) until one runs — when its budget is raised, or a
+person asks (:func:`review_if_waiting`).
 
 A changes-requested verdict stops there deliberately: it leaves the ticket in
 ``in_review`` with the reasons attached and starts no new build. Deciding to
@@ -96,8 +102,11 @@ _API_KEYS = {
 }
 
 #: The review is one call on a bounded prompt; a huge diff is truncated rather
-#: than sent whole.
-MAX_DIFF_CHARS = 30000
+#: than sent whole. Override with ENG_CREW_TICKET_REVIEW_MAX_DIFF_CHARS. Sized so
+#: an ordinary feature fits — an approval that did not see every file does not
+#: move the ticket on (see :func:`review_ticket`), so a small limit only means
+#: more tickets wait for a person.
+MAX_DIFF_CHARS = 120000
 
 #: Headings for the note that says what the truncated diff left out. The
 #: reviewer is told the whole shape of the change even when it cannot be shown
@@ -168,6 +177,38 @@ def reviewer_config(settings: Any = None) -> dict:
     return {**agent, "sandbox": False}
 
 
+def max_diff_chars(settings: Any = None) -> int:
+    """How much diff one review is shown before it is truncated."""
+    return int(getattr(_settings(settings), "ticket_review_max_diff_chars", MAX_DIFF_CHARS)
+               or MAX_DIFF_CHARS)
+
+
+def review_base(state: dict | None) -> str:
+    """What the run's work is measured against: the branch it was built on.
+
+    A run stacked on an unmerged prerequisite's branch (eng_crew/basing.py)
+    carries that prerequisite's work too; measured against HEAD, the reviewer
+    would judge the prerequisite's code as this ticket's. HEAD when the run
+    forked from HEAD, or when its base has since gone — a base merged into HEAD
+    and deleted gives the same answer through the merge base.
+    """
+    from . import git_skill
+
+    state = state or {}
+    base = state.get("base_branch")
+    if base is None:
+        run_id = state.get("run_id") or state.get("id")
+        base = (tracker.get_run_detail(run_id) or {}).get("base_branch") if run_id else ""
+    base = (base or "").strip()
+    project = state.get("main_project_path") or state.get("project_path")
+    if not base or base == "HEAD" or not project:
+        return "HEAD"
+    try:
+        return base if git_skill.branch_exists(project, base) else "HEAD"
+    except Exception:
+        return "HEAD"
+
+
 def run_diff(state: dict | None, *, max_chars: int = MAX_DIFF_CHARS) -> str:
     """The diff a run produced, read from the branch it committed to.
 
@@ -181,7 +222,9 @@ def run_diff(state: dict | None, *, max_chars: int = MAX_DIFF_CHARS) -> str:
     if not branch or not project:
         return ""
     try:
-        return git_skill.branch_diff(project, branch, max_chars=max_chars)
+        return git_skill.branch_diff(
+            project, branch, base=review_base(state), max_chars=max_chars,
+        )
     except Exception as exc:
         log.warning("could not read the diff for branch %s: %s", branch, exc)
         return ""
@@ -197,7 +240,7 @@ def changed_files(state: dict | None) -> list[str]:
     if not branch or not project:
         return []
     try:
-        return git_skill.branch_files(project, branch)
+        return git_skill.branch_files(project, branch, base=review_base(state))
     except Exception as exc:
         log.warning("could not list the files changed on branch %s: %s", branch, exc)
         return []
@@ -290,6 +333,14 @@ def latest_verdict(ticket_id: int) -> dict | None:
         note = event.get("note") or ""
         if event.get("actor") != REVIEWER_ACTOR:
             continue
+        if note.startswith(PARTIAL_PREFIX):
+            return {
+                "verdict": APPROVE,
+                "partial": True,
+                "reasons": note[len(PARTIAL_PREFIX):].strip(),
+                "at": event.get("created_at"),
+                "actor": event.get("actor"),
+            }
         if note.startswith(_UNAVAILABLE_PREFIX):
             verdict = UNAVAILABLE
         elif note.startswith(_NOTE_PREFIX):
@@ -307,6 +358,59 @@ def latest_verdict(ticket_id: int) -> dict | None:
 
 _NOTE_PREFIX = "review:"
 _UNAVAILABLE_PREFIX = "review unavailable:"
+#: The note on an approval that did not see every changed file.
+PARTIAL_PREFIX = "review partial:"
+
+
+def awaiting_review(ticket_id: int) -> int | None:
+    """The run a ticket is still waiting to have reviewed, or None.
+
+    A ticket is waiting when it sits in ``in_review``, its latest run landed,
+    and nothing has given a verdict on it since it got there — the review was
+    stopped for budget, could not reach a reviewer, or never ran. A verdict of
+    either kind ends the wait: changes requested is a person's call to act on,
+    not a reason to ask again.
+    """
+    from . import tickets
+
+    ticket = tracker.get_backlog_item(ticket_id)
+    if not ticket or ticket.get("status") != tickets.IN_REVIEW:
+        return None
+    history = tickets.events(ticket_id)
+    arrived = max(
+        (i for i, e in enumerate(history)
+         if e.get("to_status") == tickets.IN_REVIEW
+         and e.get("from_status") != tickets.IN_REVIEW),
+        default=-1,
+    )
+    for event in history[arrived + 1:]:
+        if event.get("actor") == REVIEWER_ACTOR and (event.get("note") or "").startswith(_NOTE_PREFIX):
+            return None
+    run = tracker.get_ticket_run(ticket_id)
+    if not run or run.get("status") not in LANDED:
+        return None
+    return run.get("id")
+
+
+def review_if_waiting(ticket_id: int, settings: Any = None) -> dict | None:
+    """Run the review a ticket is waiting on, if it is waiting on one.
+
+    What raising a budget calls, so a review the budget stopped happens once
+    there is money for it instead of the ticket sitting in review for good; and
+    what a person asking for a review calls. None when there is nothing to
+    review, or the budget still does not allow it — that stop is already in
+    the ticket's history. Raises :class:`ReviewUnavailable` like
+    :func:`review_ticket`.
+    """
+    from . import budget
+
+    run_id = awaiting_review(ticket_id)
+    if not run_id:
+        return None
+    state = budget.status(ticket_id, settings)
+    if state and state["exhausted"]:
+        return None
+    return review_ticket(ticket_id, run_id, settings=settings)
 
 
 def _unavailable(ticket_id: int, reason: str) -> ReviewUnavailable:
@@ -371,6 +475,13 @@ def review_ticket(
     run = tracker.get_run_detail(run_id) if run_id else tracker.get_ticket_run(ticket_id)
     run_status = (run or {}).get("status") or "unknown"
     run_id = run_id or (run or {}).get("id") or 0
+    # A caller that has the diff to hand passes it; any other (a review resumed
+    # after a budget raise, a person asking from the dashboard) gets it read
+    # from the run's branch here, rather than a reviewer handed nothing.
+    if not diff:
+        diff = run_diff(run, max_chars=max_diff_chars(cfg))
+    if files is None:
+        files = changed_files(run)
 
     # Resolving a reviewer and reaching it are the two ways a review simply does
     # not happen. Either way the ticket's history says so, and nothing is judged.
@@ -378,7 +489,7 @@ def review_ticket(
         reviewer = reviewer_config(cfg)
         verdict, reasons = _ask(
             ticket, run, diff, run_id=run_id, settings=cfg, reviewer=reviewer,
-            files=files if files is not None else changed_files(run),
+            files=files,
         )
     except ReviewUnavailable as exc:
         raise _unavailable(ticket_id, str(exc)) from exc
@@ -388,7 +499,18 @@ def review_ticket(
     tickets.note(ticket_id, REVIEWER_ACTOR, _note(verdict, reasons))
 
     status = tickets.IN_REVIEW
-    if verdict == APPROVE and run_status == VERIFIED:
+    unseen = files_not_shown(diff, files)
+    if verdict == APPROVE and unseen:
+        # An approval only vouches for what the reviewer was shown. Code past
+        # the cut is not approved code, so a person looks at the rest.
+        seen = len(files or []) - len(unseen)
+        tickets.note(
+            ticket_id, REVIEWER_ACTOR,
+            f"{PARTIAL_PREFIX} approved having seen {seen} of {len(files or [])} "
+            f"changed files — the diff was truncated, so the ticket stays in review "
+            f"for a person to check the rest. Not shown: " + ", ".join(unseen),
+        )
+    elif verdict == APPROVE and run_status == VERIFIED:
         status = _advance(ticket_id, reasons)
     elif verdict == APPROVE:
         tickets.note(

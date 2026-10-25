@@ -134,12 +134,9 @@ def _review_ticket(ticket_id: int, run_id: int, state, settings) -> None:
     from . import review
 
     try:
-        verdict = review.review_ticket(
-            ticket_id, run_id,
-            diff=review.run_diff(state),
-            files=review.changed_files(state),
-            settings=settings,
-        )
+        # The diff is read from the run's branch, measured against the base
+        # the run was built on (runs.base_branch) — not from the state.
+        verdict = review.review_ticket(ticket_id, run_id, settings=settings)
     except review.ReviewUnavailable as exc:
         log.warning("ticket %s was not reviewed: %s", ticket_id, exc)
     except Exception:

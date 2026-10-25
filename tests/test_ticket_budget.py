@@ -65,12 +65,23 @@ def failing_gate(monkeypatch):
     monkeypatch.setattr(verify, "snapshot_tests", lambda *a, **k: {})
     monkeypatch.setattr(verify, "verify_red", lambda *a, **k: None)
 
-    repairs: list[int] = []
-    monkeypatch.setattr(
-        VerifierAgent, "_repair",
-        lambda self, state, result, run_id, attempt: (repairs.append(attempt), "")[1],
-    )
+    repairs = Repairs()
+
+    def fake_repair(self, state, result, run_id, attempt, *, max_budget_usd=None):
+        repairs.append(attempt)
+        repairs.caps.append(max_budget_usd)
+        return ""
+
+    monkeypatch.setattr(VerifierAgent, "_repair", fake_repair)
     return repairs
+
+
+class Repairs(list):
+    """The repair passes that would have run, and the spending cap each got."""
+
+    def __init__(self):
+        super().__init__()
+        self.caps: list[float | None] = []
 
 
 # --- criterion 1: every ticket has a budget, configurable and overridable ---
@@ -169,6 +180,30 @@ def test_a_repair_pass_still_runs_while_the_ticket_is_within_budget(db, failing_
     assert failing_gate == [1]
 
 
+def test_a_repair_pass_may_only_spend_what_the_ticket_has_left(db, failing_gate):
+    """A repair that started at $9.83 of $15 and ended at $21.35 was allowed to:
+    the check passed, and nothing bounded the session itself."""
+    ticket_id = ready_ticket(budget_usd=15.0)
+    tickets.move(ticket_id, tickets.IN_PROGRESS, "queue")
+    run_id = charge(ticket_id, 9.83, status=None)
+
+    VerifierAgent(Settings()).run(
+        {"raw_task": "do it", "project_path": ".", "run_id": run_id}
+    )
+
+    assert failing_gate == [1]
+    assert failing_gate.caps == [pytest.approx(5.17)]
+
+
+def test_the_claude_cli_session_is_given_the_spending_cap():
+    from eng_crew.providers.claude_cli import ClaudeCLIProvider
+
+    provider = ClaudeCLIProvider()
+    capped = provider._build_cmd("m", "p", {"max_budget_usd": 5.17})
+    assert capped[capped.index("--max-budget-usd") + 1] == "5.17"
+    assert "--max-budget-usd" not in provider._build_cmd("m", "p", {})
+
+
 # --- criterion 5: raising the budget releases the work ---------------------
 
 
@@ -199,3 +234,4 @@ def test_a_run_with_no_ticket_is_never_stopped_for_budget(db, failing_gate):
     )
 
     assert failing_gate == [1]
+    assert failing_gate.caps == [None]          # and no cap on what it spends

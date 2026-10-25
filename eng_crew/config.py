@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     ticket_reviewer_provider: Optional[str] = None
     ticket_reviewer_model: Optional[str] = None
     ticket_review_enabled: bool = True
+    # How much of a run's diff the reviewer is shown before it is truncated. An
+    # approval that did not see every changed file keeps the ticket in review.
+    ticket_review_max_diff_chars: int = 120000
 
     # --- Executor ---
     executor_provider: Optional[str] = None
