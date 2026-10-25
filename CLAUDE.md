@@ -92,9 +92,11 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   the ticket in in_review for a person. A changes-requested verdict leaves the
   ticket in in_review with the reasons attached and starts no new build. A
   review that could not run at all — no API key, a provider error, an empty
-  reply, a spent budget — is not a verdict: the ticket stays in_review with a
-  "review unavailable" event saying why, never `changes_requested`, and is
-  *waiting on a review* (`review.awaiting_review`) until one gives a verdict.
+  reply, a spent budget, or a reviewer answering `UNABLE_TO_JUDGE` because a
+  criterion turns on a file the truncated diff never showed it — is not a
+  verdict: the ticket stays in_review with a "review unavailable" event saying
+  why, never `changes_requested`, and is *waiting on a review*
+  (`review.awaiting_review`) until one gives a verdict.
   `eng-crew review <id>` and the dashboard's Run review button run that review;
   a ticket with a verdict already is not reviewed again. `done → shipped` is
   refused for every eng-crew actor (`tickets.ROBOTS`) — shipping is a human
