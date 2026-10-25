@@ -57,5 +57,6 @@ class TeamState(TypedDict):
     verification_red_phase: Optional[str]
     verify_fix_count: int
     cli_session_id: Optional[str]
+    cli_session_cost_usd: Optional[float]
     worktree_path: Optional[str]
     main_project_path: Optional[str]

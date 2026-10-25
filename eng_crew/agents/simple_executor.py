@@ -53,4 +53,5 @@ class SimpleExecutorAgent(BaseAgent):
             "execution_results": [summary],
             "final_summary": summary,
             "cli_session_id": getattr(result, "session_id", "") or "",
+            "cli_session_cost_usd": getattr(result, "cost_usd", 0.0) or 0.0,
         }

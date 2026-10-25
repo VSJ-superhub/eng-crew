@@ -129,4 +129,7 @@ class SingleAgentEngineer(BaseAgent):
             # Lets the verification gate resume this session for repairs
             # instead of re-deriving the change from a cold start.
             "cli_session_id": getattr(result, "session_id", "") or "",
+            # What that session has spent so far: resuming it reports a running
+            # total, which the verifier turns back into each repair's own cost.
+            "cli_session_cost_usd": getattr(result, "cost_usd", 0.0) or 0.0,
         }
