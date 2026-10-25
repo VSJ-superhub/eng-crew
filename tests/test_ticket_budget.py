@@ -235,3 +235,63 @@ def test_a_run_with_no_ticket_is_never_stopped_for_budget(db, failing_gate):
 
     assert failing_gate == [1]
     assert failing_gate.caps == [None]          # and no cap on what it spends
+
+
+def resumed_repair(monkeypatch, reported: float):
+    """A repair that resumes the build's CLI session, which reports `reported`.
+
+    Returns the kwargs call_llm was given."""
+    from eng_crew.agents import verifier as verifier_mod
+
+    calls: list[dict] = []
+
+    def fake_call_llm(provider, model, prompt, **kw):
+        calls.append(kw)
+        return LLMResult(text="fixed", cost_usd=reported, session_id="s-1")
+
+    monkeypatch.setattr(verifier_mod, "call_llm", fake_call_llm)
+    return calls
+
+
+def test_a_resumed_repair_is_charged_its_own_cost_not_the_sessions_total(db, monkeypatch):
+    """A resumed CLI session reports what the whole session has spent: a build
+    at $8.39 and a repair that added $1.40 came back as $9.79, and the ticket
+    was charged $18.18 for $9.79 of work."""
+    ticket_id = ready_ticket(budget_usd=15.0)
+    tickets.move(ticket_id, tickets.IN_PROGRESS, "queue")
+    run_id = charge(ticket_id, 8.39, status=None)
+    calls = resumed_repair(monkeypatch, reported=9.79)
+    state = {"raw_task": "do it", "project_path": ".", "run_id": run_id,
+             "cli_session_id": "s-1", "cli_session_cost_usd": 8.39}
+    red = verify.VerificationResult(results=[verify.CheckResult(
+        "pytest", "test", verify.FAILED, output="1 failed", cmd="pytest")])
+
+    VerifierAgent(Settings())._repair(state, red, run_id, 1, max_budget_usd=6.61)
+
+    # The CLI measures its cap against the session total, so it is handed
+    # what the session already spent plus what the ticket has left.
+    assert calls[0]["max_budget_usd"] == pytest.approx(15.0)
+    assert budget.status(ticket_id)["spent_usd"] == pytest.approx(9.79)
+    assert state["cli_session_cost_usd"] == pytest.approx(9.79)
+
+    # A second pass resumes the same session; it too pays only for itself.
+    resumed_repair(monkeypatch, reported=10.29)
+    VerifierAgent(Settings())._repair(state, red, run_id, 2, max_budget_usd=5.21)
+    assert budget.status(ticket_id)["spent_usd"] == pytest.approx(10.29)
+
+
+def test_a_fresh_repair_session_is_charged_what_it_reports(db, monkeypatch):
+    ticket_id = ready_ticket(budget_usd=15.0)
+    tickets.move(ticket_id, tickets.IN_PROGRESS, "queue")
+    run_id = charge(ticket_id, 8.39, status=None)
+    calls = resumed_repair(monkeypatch, reported=1.25)
+    red = verify.VerificationResult(results=[verify.CheckResult(
+        "pytest", "test", verify.FAILED, output="1 failed", cmd="pytest")])
+
+    VerifierAgent(Settings())._repair(
+        {"raw_task": "do it", "project_path": ".", "run_id": run_id},
+        red, run_id, 1, max_budget_usd=6.61,
+    )
+
+    assert calls[0]["max_budget_usd"] == pytest.approx(6.61)
+    assert budget.status(ticket_id)["spent_usd"] == pytest.approx(9.64)

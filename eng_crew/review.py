@@ -45,6 +45,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from typing import Any
 
 from . import prompts, tracing, tracker
@@ -432,6 +433,20 @@ def _note(verdict: str, reasons: str) -> str:
     return f"{_NOTE_PREFIX} {verdict} — {reasons}".strip()
 
 
+#: Tickets with a review running in this process. A second request for the
+#: same ticket — a double click on Run review, a budget raise landing while a
+#: review runs — would see the ticket still waiting and pay for a second
+#: verdict on it.
+_reviewing: set[int] = set()
+_reviewing_lock = threading.Lock()
+
+
+def reviewing(ticket_id: int) -> bool:
+    """Whether a review of this ticket is running in this process right now."""
+    with _reviewing_lock:
+        return ticket_id in _reviewing
+
+
 def review_ticket(
     ticket_id: int,
     run_id: int | None = None,
@@ -443,9 +458,30 @@ def review_ticket(
     """Review a ticket's landed run and move the ticket accordingly.
 
     Returns the verdict as ``{verdict, reasons, status}``, or None when there is
-    nothing to review (no ticket, or a ticket that is not awaiting review).
-    Raises :class:`ReviewUnavailable` if no reviewer can safely be used.
+    nothing to review (no ticket, a ticket that is not awaiting review, or one
+    whose review is already running). Raises :class:`ReviewUnavailable` if no
+    reviewer can safely be used.
     """
+    with _reviewing_lock:
+        if ticket_id in _reviewing:
+            log.info("review_ticket: ticket %s is already being reviewed", ticket_id)
+            return None
+        _reviewing.add(ticket_id)
+    try:
+        return _review_ticket(ticket_id, run_id, diff=diff, files=files, settings=settings)
+    finally:
+        with _reviewing_lock:
+            _reviewing.discard(ticket_id)
+
+
+def _review_ticket(
+    ticket_id: int,
+    run_id: int | None,
+    *,
+    diff: str,
+    files: list[str] | None,
+    settings: Any,
+) -> dict | None:
     from . import tickets
 
     cfg = _settings(settings)
@@ -495,6 +531,18 @@ def review_ticket(
         raise _unavailable(ticket_id, str(exc)) from exc
     if run_id:
         tracker.recalculate_run_cost(run_id)
+
+    # Another process (the CLI beside the dashboard) may have reviewed the
+    # ticket while this call waited on the model. Its verdict stands; a second
+    # one recorded on a ticket that has already moved on would only muddy the
+    # history. The call is paid for either way, and its cost is on the run.
+    current = tracker.get_backlog_item(ticket_id) or {}
+    if current.get("status") != tickets.IN_REVIEW:
+        log.info(
+            "review_ticket: ticket %s moved to %s during the review; verdict not recorded",
+            ticket_id, current.get("status"),
+        )
+        return None
 
     tickets.note(ticket_id, REVIEWER_ACTOR, _note(verdict, reasons))
 

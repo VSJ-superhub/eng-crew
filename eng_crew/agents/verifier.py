@@ -263,6 +263,12 @@ class VerifierAgent(BaseAgent):
         project_path = state.get("project_path", ".")
 
         session_id = state.get("cli_session_id") or ""
+        # A resumed CLI session reports its cost cumulatively — everything the
+        # session has spent, the build included, not just this call. What the
+        # session had spent before this pass is subtracted from what it reports
+        # and added to the cap, so the pass is charged and bounded by its own
+        # spend. Without it every repair re-charged the build to the ticket.
+        spent_before = float(state.get("cli_session_cost_usd") or 0.0) if session_id else 0.0
 
         if session_id:
             # Resuming: the agent still has the change it just made in context,
@@ -289,11 +295,21 @@ class VerifierAgent(BaseAgent):
                 cwd=project_path,
                 resume_session=session_id or None,
                 on_event=self._progress(run_id, f"repair {attempt}"),
-                max_budget_usd=max_budget_usd,
+                max_budget_usd=(
+                    None if max_budget_usd is None else spent_before + max_budget_usd
+                ),
             )
         except Exception as exc:  # a failed repair must not crash the gate
             print(f"[verify] repair call failed: {exc}", file=sys.stderr)
             return ""
+
+        if spent_before:
+            reported = llm_result.cost_usd or 0.0
+            # A report below what the session had already spent cannot be a
+            # session total, so it is taken as this call's own cost.
+            own = reported - spent_before if reported >= spent_before else reported
+            state["cli_session_cost_usd"] = spent_before + own
+            llm_result = dc_replace(llm_result, cost_usd=own)
 
         if run_id:
             try:

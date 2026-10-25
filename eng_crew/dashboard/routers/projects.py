@@ -208,7 +208,7 @@ def _start_waiting_review(ticket_id: int) -> bool:
     """
     from ... import review
 
-    if review.awaiting_review(ticket_id) is None:
+    if review.awaiting_review(ticket_id) is None or review.reviewing(ticket_id):
         return False
 
     def work() -> None:
@@ -236,6 +236,13 @@ async def api_ticket_review(ticket_id: int):
     if state and state["exhausted"]:
         return JSONResponse(
             {"error": "this ticket has spent its budget — raise it first"}, status_code=409,
+        )
+    from ... import review
+
+    if review.reviewing(ticket_id):
+        return JSONResponse(
+            {"error": "a review of this ticket is already running — its verdict "
+                      "will appear in the history"}, status_code=409,
         )
     if not _start_waiting_review(ticket_id):
         return JSONResponse(

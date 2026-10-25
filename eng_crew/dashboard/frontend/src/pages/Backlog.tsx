@@ -216,9 +216,10 @@ export default function Backlog() {
                   </button>
                 )}
                 {item.project_id && (
-                  <button onClick={() => navigate('/projects/' + item.project_id + '/tasks')}
+                  <button onClick={() => navigate('/projects/' + item.project_id + '/tasks?ticket=' + item.id)}
+                    title='Open this ticket on its project page: status moves, budget, review, area and history'
                     className='text-xs px-3 py-1 rounded bg-white/5 text-gray-300 hover:bg-white/10'>
-                    Queue
+                    Open
                   </button>
                 )}
                 <button onClick={() => act(item.id, () => deleteBacklogItem(item.id))}

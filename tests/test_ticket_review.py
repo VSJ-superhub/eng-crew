@@ -698,3 +698,62 @@ def test_the_cli_review_command_runs_a_waiting_review(db, reviewer, monkeypatch)
     assert out.exit_code == 0, out.output
     assert "approve" in out.output
     assert tracker.get_backlog_item(ticket_id)["status"] == tickets.DONE
+
+
+# --- one verdict per wait: concurrent requests do not pay twice -----------
+
+
+def test_a_second_review_of_a_ticket_already_under_review_does_not_run(db, reviewer, monkeypatch):
+    """Run review clicked twice: both requests saw the ticket waiting, and a
+    second verdict landed nine seconds later on a ticket already done."""
+    ticket_id = in_review_ticket()
+    monkeypatch.setattr(review, "run_diff", lambda state, **kw: DIFF)
+    inner: list = []
+    stub = agent_base.call_llm
+
+    def call_while_reviewing(provider, model, prompt, **kwargs):
+        # The second request arrives while the first waits on the model.
+        assert review.reviewing(ticket_id)
+        inner.append(review.review_ticket(ticket_id, settings=Settings()))
+        return stub(provider, model, prompt, **kwargs)
+
+    monkeypatch.setattr(agent_base, "call_llm", call_while_reviewing)
+
+    first = review.review_ticket(ticket_id, settings=Settings())
+
+    assert inner == [None]
+    assert len(reviewer["calls"]) == 1
+    assert first["verdict"] == review.APPROVE
+    assert notes_of(ticket_id).count("review: approve") == 1
+    assert not review.reviewing(ticket_id)
+
+
+def test_a_verdict_is_not_recorded_on_a_ticket_that_moved_on_during_the_review(
+        db, reviewer, monkeypatch):
+    """Another process gave its verdict first; this one's is dropped."""
+    ticket_id = in_review_ticket()
+    monkeypatch.setattr(review, "run_diff", lambda state, **kw: DIFF)
+    stub = agent_base.call_llm
+
+    def ticket_moves_meanwhile(provider, model, prompt, **kwargs):
+        tickets.move(ticket_id, tickets.REJECTED, "user")
+        return stub(provider, model, prompt, **kwargs)
+
+    monkeypatch.setattr(agent_base, "call_llm", ticket_moves_meanwhile)
+
+    assert review.review_ticket(ticket_id, settings=Settings()) is None
+    assert "review: approve" not in notes_of(ticket_id)
+    assert tracker.get_backlog_item(ticket_id)["status"] == tickets.REJECTED
+
+
+def test_the_dashboard_refuses_a_review_that_is_already_running(db, monkeypatch):
+    from fastapi.testclient import TestClient
+    from eng_crew.dashboard.app import app
+
+    ticket_id = in_review_ticket()
+    monkeypatch.setattr(review, "reviewing", lambda tid: tid == ticket_id)
+
+    response = TestClient(app).post(f"/api/tickets/{ticket_id}/review")
+
+    assert response.status_code == 409
+    assert "already running" in response.json()["error"]

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import {
   ApiError, createProjectPlan, getProjectPlan, getRoadmap, getTicketQueue, getTicketEvents,
   moveTicket, planFromClaudeMd, reviewTicket, runQueue, runTicket, setTicketArea, setTicketBudget,
@@ -102,21 +102,87 @@ function TicketHistory({ ticketId }: { ticketId: number }) {
   )
 }
 
+/** A button that opens an input in place. Not window.prompt: a browser that
+ *  has been told to block a page's dialogs cancels every prompt without a
+ *  word, and the button then silently does nothing. */
+function InlineEdit({ label, initial, placeholder, busy, validate, onSave, className }: {
+  label: string
+  initial: string
+  placeholder?: string
+  busy: boolean
+  validate?: (value: string) => string
+  onSave: (value: string) => void
+  className?: string
+}) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(initial)
+  const problem = validate ? validate(value) : ''
+
+  if (!editing) {
+    return (
+      <button disabled={busy} onClick={() => { setValue(initial); setEditing(true) }}
+        className={className ?? 'mt-1.5 text-[11px] px-2 py-1 rounded bg-white/5 text-gray-300 hover:bg-white/10 disabled:opacity-40'}>
+        {label}
+      </button>
+    )
+  }
+
+  const save = () => {
+    if (problem) return
+    setEditing(false)
+    onSave(value.trim())
+  }
+
+  return (
+    <div className='mt-1.5 flex flex-wrap items-center gap-1.5'>
+      <input autoFocus value={value} placeholder={placeholder}
+        onChange={e => setValue(e.target.value)}
+        onKeyDown={e => {
+          if (e.key === 'Enter') save()
+          if (e.key === 'Escape') setEditing(false)
+        }}
+        className='text-[11px] px-2 py-1 rounded bg-black/30 border border-white/10 text-gray-200 w-32 focus:outline-none focus:border-violet-500' />
+      <button disabled={busy || !!problem} onClick={save}
+        className='text-[11px] px-2 py-1 rounded bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-40'>
+        Save
+      </button>
+      <button onClick={() => setEditing(false)}
+        className='text-[11px] px-2 py-1 rounded bg-white/5 text-gray-400 hover:bg-white/10'>
+        Cancel
+      </button>
+      {problem && <span className='text-[10px] text-amber-400'>{problem}</span>}
+    </div>
+  )
+}
+
+function budgetProblem(value: string): string {
+  const amount = Number(value)
+  if (!value.trim() || !Number.isFinite(amount)) return 'enter an amount in USD'
+  if (amount < 0) return 'a budget cannot be negative'
+  return ''
+}
+
 /** `$1.23 of $15.00` — what a ticket has spent against what it may spend. */
 function money(n: number): string {
   return '$' + n.toFixed(2)
 }
 
-function TicketCard({ ticket, busy, onMove, onRun, onBudget, onArea, onReview }: {
+function TicketCard({ ticket, busy, focus = false, error = '', onMove, onRun, onBudget, onArea, onReview }: {
   ticket: Ticket
   busy: boolean
+  focus?: boolean
+  error?: string
   onMove: (id: number, status: TicketStatus) => void
   onRun: (id: number) => void
   onBudget: (id: number, amount: number) => void
   onArea: (id: number, area: string) => void
   onReview: (id: number) => void
 }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(focus)
+  const cardRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (focus) cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }, [focus])
   const criteria = (ticket.acceptance_criteria ?? '').trim()
   const nexts = NEXT[ticket.status] ?? []
   const limit = ticket.budget_usd
@@ -127,7 +193,8 @@ function TicketCard({ ticket, busy, onMove, onRun, onBudget, onArea, onReview }:
   const blocked = ticket.blocked === true
 
   return (
-    <div className='bg-[#161927] rounded-lg border border-white/5 p-3'>
+    <div ref={cardRef}
+      className={'bg-[#161927] rounded-lg border p-3 ' + (focus ? 'border-violet-500/40' : 'border-white/5')}>
       <div className='flex items-start gap-2'>
         <button onClick={() => setOpen(!open)} className='flex-1 min-w-0 text-left group'>
           <p className='text-sm text-white group-hover:text-violet-300 transition-colors truncate'>
@@ -175,6 +242,12 @@ function TicketCard({ ticket, busy, onMove, onRun, onBudget, onArea, onReview }:
         )}
       </div>
 
+      {error && (
+        <p className='mt-2 text-[11px] text-red-300 bg-red-500/10 border border-red-500/30 rounded px-2 py-1'>
+          {error}
+        </p>
+      )}
+
       {open && (
         <div className='mt-3 pt-3 border-t border-white/5 space-y-3'>
           {ticket.description && (
@@ -202,14 +275,9 @@ function TicketCard({ ticket, busy, onMove, onRun, onBudget, onArea, onReview }:
           <div>
             <p className='text-[10px] uppercase text-gray-500 font-bold mb-1'>Area</p>
             <p className='text-xs text-gray-400'>{ticket.area || 'Unassigned'}</p>
-            <button disabled={busy}
-              onClick={() => {
-                const answer = window.prompt('Area for this ticket (empty to clear):', ticket.area ?? '')
-                if (answer !== null) onArea(ticket.id, answer.trim())
-              }}
-              className='mt-1.5 text-[11px] px-2 py-1 rounded bg-white/5 text-gray-300 hover:bg-white/10 disabled:opacity-40'>
-              Change area
-            </button>
+            <InlineEdit label='Change area' initial={ticket.area ?? ''} busy={busy}
+              placeholder='empty to clear'
+              onSave={area => onArea(ticket.id, area)} />
           </div>
 
           {limit !== undefined && (
@@ -219,15 +287,9 @@ function TicketCard({ ticket, busy, onMove, onRun, onBudget, onArea, onReview }:
                 {money(spent)} spent of {money(limit)}
                 {overBudget && ' — work is stopped until someone raises it'}
               </p>
-              <button disabled={busy}
-                onClick={() => {
-                  const answer = window.prompt('New budget for this ticket, in USD:', limit.toFixed(2))
-                  const amount = Number(answer)
-                  if (answer !== null && Number.isFinite(amount) && amount >= 0) onBudget(ticket.id, amount)
-                }}
-                className='mt-1.5 text-[11px] px-2 py-1 rounded bg-white/5 text-gray-300 hover:bg-white/10 disabled:opacity-40'>
-                Change budget
-              </button>
+              <InlineEdit label='Change budget' initial={limit.toFixed(2)} busy={busy}
+                validate={budgetProblem}
+                onSave={amount => onBudget(ticket.id, Number(amount))} />
             </div>
           )}
 
@@ -307,15 +369,10 @@ function RoadmapCardView({ card, busy, onArea }: {
           {ROADMAP_LABEL[card.state]}
         </span>
         <span className='text-[10px] text-gray-500'>{LANE_LABEL[card.status] ?? card.status}</span>
-        <button disabled={busy}
-          onClick={() => {
-            const answer = window.prompt('Area for this ticket (empty to clear):', card.area)
-            if (answer !== null) onArea(card.id, answer.trim())
-          }}
-          title='Move this ticket to another area.'
-          className='text-[10px] text-gray-600 hover:text-violet-300 disabled:opacity-40'>
-          change area
-        </button>
+        <InlineEdit label='change area' initial={card.area} busy={busy}
+          placeholder='empty to clear'
+          onSave={area => onArea(card.id, area)}
+          className='text-[10px] text-gray-600 hover:text-violet-300 disabled:opacity-40' />
       </div>
       {card.state === 'blocked' && (
         <p className='text-[11px] text-amber-400'>
@@ -395,6 +452,12 @@ export default function ProjectTasks() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<number | null>(null)
   const [error, setError] = useState('')
+  // The ticket a refused action belonged to: its card shows the refusal too,
+  // since the banner at the top is out of sight from a card further down.
+  const [errorTicket, setErrorTicket] = useState<number | null>(null)
+  // ?ticket=<id> — the ticket the Tickets page sent us to, opened on arrival.
+  const [searchParams] = useSearchParams()
+  const focusId = Number(searchParams.get('ticket')) || null
   const [planning, setPlanning] = useState(false)
   const [planningFailed, setPlanningFailed] = useState(false)
   const [goal, setGoal] = useState('')
@@ -436,9 +499,9 @@ export default function ProjectTasks() {
   }, [live, load])
 
   const act = async (ticketId: number, fn: () => Promise<unknown>) => {
-    setBusy(ticketId); setError('')
+    setBusy(ticketId); setError(''); setErrorTicket(null)
     try { await fn() }
-    catch (e) { setError(errorText(e)) }
+    catch (e) { setError(errorText(e)); setErrorTicket(ticketId) }
     finally { setBusy(null); await load() }
   }
 
@@ -573,6 +636,8 @@ export default function ProjectTasks() {
                 ? <p className='text-[11px] text-gray-700 italic px-1'>empty</p>
                 : lane.items.map(t => (
                     <TicketCard key={t.id} ticket={t} busy={busy === t.id}
+                      focus={focusId === t.id}
+                      error={errorTicket === t.id ? error : ''}
                       onMove={(tid, status) => act(tid, () => moveTicket(tid, status))}
                       onRun={tid => act(tid, () => runTicket(tid))}
                       onBudget={(tid, amount) => act(tid, () => setTicketBudget(tid, amount))}

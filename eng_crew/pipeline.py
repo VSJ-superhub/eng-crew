@@ -439,6 +439,7 @@ def run_pipeline(
         "verification_red_phase": None,
         "verify_fix_count": 0,
         "cli_session_id": None,
+        "cli_session_cost_usd": None,
         "worktree_path": worktree_path,
         "main_project_path": main_project_path,
     }
