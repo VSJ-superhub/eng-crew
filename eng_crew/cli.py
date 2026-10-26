@@ -393,6 +393,36 @@ def review(
 
 
 @app.command()
+def resolve(
+    ticket_id: int = typer.Argument(..., help="Ticket whose build was refused for conflicts."),
+    env_file: Optional[Path] = typer.Option(None, "--env", help="Path to .env file."),
+) -> None:
+    """Resolve the conflicts that stop a ticket being built on its prerequisites.
+
+    An agent merges the prerequisites' unmerged branches onto HEAD on a branch
+    of their own and fixes the conflicts there; the next build forks from it.
+    Charged to the ticket's budget. Your checkout is not touched, and this
+    starts no build.
+    """
+    from eng_crew import budget as budget_mod
+    from eng_crew import resolve as resolve_mod
+
+    console.print(f"resolving ticket {ticket_id}'s prerequisite conflicts…")
+    try:
+        outcome = resolve_mod.resolve(ticket_id, load_settings(env_file))
+    except (resolve_mod.ResolveRefused, resolve_mod.ResolveFailed,
+            budget_mod.BudgetExhausted) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    if not outcome.branch:
+        console.print(outcome.summary)
+        return
+    console.print(f"[green]resolved[/green] on {outcome.branch} (${outcome.cost_usd:.2f}) — "
+                  f"{outcome.summary}")
+    console.print(f"build it with: eng-crew ticket {ticket_id}")
+
+
+@app.command()
 def ticket(
     ticket_id: int = typer.Argument(..., help="Ticket ID to build (see `eng-crew queue`)."),
     env_file: Optional[Path] = typer.Option(None, "--env", help="Path to .env file."),

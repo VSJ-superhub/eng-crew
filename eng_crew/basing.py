@@ -23,6 +23,11 @@ The rule, in order:
     cannot be combined, the build is refused *before* it starts, naming the
     prerequisites that conflict — with each other, or with HEAD — and nothing
     is left behind: a half-merged base is worse than no build.
+  * A conflict is resolved by an agent, not by hand (:mod:`eng_crew.resolve`):
+    it merges the branches onto HEAD on :func:`resolved_branch` and fixes the
+    conflicts there. That branch then stands in for every prerequisite branch
+    it contains, by the same rules — fork from it while it contains HEAD, merge
+    it onto HEAD once HEAD has moved on.
 
 :func:`resolve_base` is called by the one command every surface launches
 (``eng-crew ticket <id>``), so the CLI, the dashboard, Discord's ``/build`` and
@@ -41,6 +46,20 @@ log = logging.getLogger(__name__)
 #: Distinct from a run's own prefix: this one carries no new work, only the
 #: combination a run is about to be built on.
 BASE_PREFIX = "eng-crew/base"
+
+#: Branch prefix for a base whose conflicts an agent resolved. Kept apart from
+#: BASE_PREFIX because a trial base is deleted as soon as it is made, and this
+#: one is the work a person paid for.
+RESOLVED_PREFIX = "eng-crew/resolved"
+
+#: What every conflict refusal says, so a surface can recognise one and offer
+#: to resolve it.
+REFUSED = "cannot be built on its prerequisites"
+
+
+def resolved_branch(ticket_id: int) -> str:
+    """Where an agent's resolution of a ticket's prerequisite conflicts lives."""
+    return f"{RESOLVED_PREFIX}/ticket-{ticket_id}"
 
 
 @dataclass
@@ -75,12 +94,12 @@ class ConflictingPrerequisites(Exception):
         self.with_head = with_head
         named = ", ".join(f"#{i}" for i in conflicting)
         if with_head:
-            what = (f"{named}'s branch conflicts with HEAD — merge it into HEAD "
-                    f"yourself first")
+            what = f"{named}'s branch conflicts with HEAD"
         else:
-            what = f"{named} conflict with each other — merge them yourself first"
+            what = f"{named} conflict with each other"
+        what += f" — resolve the conflicts first (eng-crew resolve {ticket_id})"
         super().__init__(
-            f"ticket {ticket_id} cannot be built on its prerequisites: {what}"
+            f"ticket {ticket_id} {REFUSED}: {what}"
             + (f" ({detail})" if detail else "")
         )
 
@@ -130,17 +149,7 @@ def resolve_base(ticket: dict | int, *, explicit_base: str = "") -> Base:
     if not prereqs or not project_path or not git_skill.is_git_repo(project_path):
         return Base()
 
-    unmerged: list[tuple[int, str]] = []
-    for prerequisite_id in prereqs:
-        try:
-            branch = _unmerged_branch(project_path, prerequisite_id)
-        except Exception as exc:
-            # Basing is an improvement on forking from HEAD, not a precondition
-            # for building. An unreadable repo must not block the work.
-            log.warning("could not read #%s's branch: %s", prerequisite_id, exc)
-            continue
-        if branch:
-            unmerged.append((prerequisite_id, branch))
+    unmerged, refs = unmerged_prerequisites(row)
 
     if not unmerged:
         return Base(
@@ -151,17 +160,17 @@ def resolve_base(ticket: dict | int, *, explicit_base: str = "") -> Base:
         )
 
     ids = [i for i, _ in unmerged]
-    # A branch another prerequisite's branch already contains (its run was
-    # stacked on this one) is carried by that branch; merging it again adds
-    # nothing, and would only muddy who a conflict is with.
-    refs = list(dict.fromkeys(
-        b for _, b in unmerged
-        if not any(other != b and git_skill.is_contained_in(project_path, b, other)
-                   for _, other in unmerged)
-    ))
+    resolved = resolved_branch(ticket_id)
+    stands_in = (git_skill.branch_exists(project_path, resolved)
+                 and all(git_skill.is_contained_in(project_path, r, resolved) for r in refs))
+    if stands_in:
+        refs = [resolved]
 
     if len(refs) == 1 and git_skill.is_contained_in(project_path, "HEAD", refs[0]):
         named = ", ".join(f"#{i}" for i in ids)
+        if stands_in:
+            return Base(resolved, f"{resolved} — the conflicts merging {named} "
+                                  f"onto HEAD were resolved there", ids)
         return Base(
             refs[0],
             f"{named}'s branch {refs[0]} — the work is done but not in HEAD yet"
@@ -173,6 +182,9 @@ def resolve_base(ticket: dict | int, *, explicit_base: str = "") -> Base:
     branch = git_skill.make_branch_name(BASE_PREFIX, f"ticket-{ticket_id}")
     failed, merged = git_skill.merge_branches(project_path, branch, refs)
     if failed:
+        if stands_in:
+            # HEAD moved on and no longer agrees with the resolution.
+            raise ConflictingPrerequisites(ticket_id, ids, failed, with_head=True)
         failed_ids = [i for i, b in unmerged if b == failed]
         # The first branch merged onto HEAD alone, so a failure there can only
         # be with HEAD; a later one may still be, if it fails against HEAD too.
@@ -184,7 +196,10 @@ def resolve_base(ticket: dict | int, *, explicit_base: str = "") -> Base:
         raise ConflictingPrerequisites(ticket_id, conflicting or ids, failed)
 
     named = ", ".join(f"#{i}" for i in ids)
-    if len(refs) == 1:
+    if stands_in:
+        reason = (f"{branch} — the conflicts merging {named} were resolved on "
+                  f"{resolved}, and HEAD has moved on since, so it was merged onto it")
+    elif len(refs) == 1:
         reason = (f"{branch} — {named} {'is' if len(ids) == 1 else 'are'} done "
                   f"but not in HEAD yet, and HEAD has moved on since, so "
                   f"{refs[0]} was merged onto it")
@@ -192,6 +207,41 @@ def resolve_base(ticket: dict | int, *, explicit_base: str = "") -> Base:
         reason = (f"{branch} — {named} are done but not in HEAD yet, so their "
                   f"branches were merged onto it")
     return Base(branch, reason, ids)
+
+
+def unmerged_prerequisites(ticket: dict | int) -> tuple[list[tuple[int, str]], list[str]]:
+    """A ticket's prerequisites whose work HEAD lacks, and the branches to merge.
+
+    ``(unmerged, refs)``: each unmerged prerequisite with the branch holding its
+    work, and the distinct branches that carry all of it — a branch another of
+    them already contains is left out.
+    """
+    from . import git_skill, tickets
+
+    row = _as_ticket(ticket)
+    project_path = row.get("project_path") or ""
+    if not project_path or not git_skill.is_git_repo(project_path):
+        return [], []
+    unmerged: list[tuple[int, str]] = []
+    for prerequisite_id in tickets.dependencies(row):
+        try:
+            branch = _unmerged_branch(project_path, prerequisite_id)
+        except Exception as exc:
+            # Basing is an improvement on forking from HEAD, not a precondition
+            # for building. An unreadable repo must not block the work.
+            log.warning("could not read #%s's branch: %s", prerequisite_id, exc)
+            continue
+        if branch:
+            unmerged.append((prerequisite_id, branch))
+    # A branch another prerequisite's branch already contains (its run was
+    # stacked on this one) is carried by that branch; merging it again adds
+    # nothing, and would only muddy who a conflict is with.
+    refs = list(dict.fromkeys(
+        b for _, b in unmerged
+        if not any(other != b and git_skill.is_contained_in(project_path, b, other)
+                   for _, other in unmerged)
+    ))
+    return unmerged, refs
 
 
 def ensure_buildable(ticket: dict | int, *, explicit_base: str = "") -> None:

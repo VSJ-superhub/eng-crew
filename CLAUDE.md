@@ -44,7 +44,14 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   prerequisite branch another one already contains is carried by it, not
   merged twice. If they cannot be combined the build is refused before it
   starts, naming the conflicting prerequisites and whether they conflict with
-  each other or with HEAD, and the ticket stays where it was. The branch a
+  each other or with HEAD, and the ticket stays where it was. That refusal
+  is not a dead end: `eng-crew resolve <id>`, or the card's Resolve conflicts
+  button, has an agent merge the prerequisites onto HEAD in a worktree on
+  `eng-crew/resolved/ticket-<id>`, fix the conflicts and pass the project's
+  checks there (`eng_crew/resolve.py`). It is charged to the ticket's budget,
+  never touches the checkout and starts no build; the next build forks from
+  that branch — merged onto HEAD if HEAD has moved on since — and a resolution
+  that leaves a conflict or breaks the checks is thrown away. The branch a
   run was based on and why are recorded on the run (`runs.base_branch`,
   `runs.base_reason`) and shown with it. Every surface gets this, because
   `eng-crew ticket <id>` — what the CLI, the dashboard, Discord `/build` and a

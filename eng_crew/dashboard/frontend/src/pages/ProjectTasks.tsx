@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import {
   ApiError, createProjectPlan, getProjectPlan, getRoadmap, getTicketQueue, getTicketEvents,
-  moveTicket, planFromClaudeMd, reviewTicket, runQueue, runTicket, setTicketArea, setTicketBudget,
+  moveTicket, planFromClaudeMd, resolveConflicts, reviewTicket, runQueue, runTicket, setTicketArea,
+  setTicketBudget,
   ROADMAP_STATES,
 } from '../api/client';
 import type {
@@ -167,7 +168,7 @@ function money(n: number): string {
   return '$' + n.toFixed(2)
 }
 
-function TicketCard({ ticket, busy, focus = false, error = '', onMove, onRun, onBudget, onArea, onReview }: {
+function TicketCard({ ticket, busy, focus = false, error = '', onMove, onRun, onBudget, onArea, onReview, onResolve }: {
   ticket: Ticket
   busy: boolean
   focus?: boolean
@@ -177,6 +178,7 @@ function TicketCard({ ticket, busy, focus = false, error = '', onMove, onRun, on
   onBudget: (id: number, amount: number) => void
   onArea: (id: number, area: string) => void
   onReview: (id: number) => void
+  onResolve: (id: number) => void
 }) {
   const [open, setOpen] = useState(focus)
   const cardRef = useRef<HTMLDivElement>(null)
@@ -188,6 +190,10 @@ function TicketCard({ ticket, busy, focus = false, error = '', onMove, onRun, on
   const limit = ticket.budget_usd
   const spent = ticket.spent_usd ?? 0
   const overBudget = ticket.budget_exhausted === true
+  // Every refusal for prerequisite conflicts says this (eng_crew.basing.REFUSED).
+  const conflicted = error.includes('cannot be built on its prerequisites')
+  const resolution = ticket.resolution ?? ''
+  const resolved = resolution.startsWith('resolve: resolved')
   const prereqs = ticket.prerequisites ?? []
   const unmet = ticket.unmet_prerequisites ?? []
   const blocked = ticket.blocked === true
@@ -246,6 +252,30 @@ function TicketCard({ ticket, busy, focus = false, error = '', onMove, onRun, on
         <p className='mt-2 text-[11px] text-red-300 bg-red-500/10 border border-red-500/30 rounded px-2 py-1'>
           {error}
         </p>
+      )}
+
+      {(conflicted || ticket.resolving || resolution) && (
+        <div className='mt-2 space-y-1.5'>
+          {ticket.resolving ? (
+            <p className='text-[11px] text-gray-400'>
+              An agent is resolving the conflicts on a branch of its own — Build once it is done.
+            </p>
+          ) : resolution && !conflicted && (
+            <p className={'text-[11px] ' + (resolved ? 'text-emerald-400' : 'text-amber-400')}>
+              {resolution.replace(/^resolve:\s*/, '')}
+            </p>
+          )}
+          {!ticket.resolving && (conflicted || (resolution && !resolved)) && (
+            <button disabled={busy || overBudget}
+              onClick={() => onResolve(ticket.id)}
+              title={overBudget
+                ? 'This ticket has spent its budget. Raise it first.'
+                : 'An agent merges the prerequisites onto HEAD on its own branch and fixes the conflicts. Charged to this ticket; your checkout is not touched.'}
+              className='text-[11px] px-2 py-1 rounded bg-indigo-500/20 text-indigo-200 hover:bg-indigo-500/30 disabled:opacity-40'>
+              Resolve conflicts
+            </button>
+          )}
+        </div>
       )}
 
       {open && (
@@ -499,7 +529,7 @@ export default function ProjectTasks() {
   // Planning, builds and the review a landed build starts all finish out of
   // band; poll while any of them is live.
   const live = planning || tickets.some(t => t.status === 'in_progress'
-    || (t.awaiting_review && !t.review_stopped))
+    || (t.awaiting_review && !t.review_stopped) || t.resolving)
   useEffect(() => {
     if (!live) return
     const iv = setInterval(load, 4000)
@@ -530,7 +560,10 @@ export default function ProjectTasks() {
     setError('')
     try {
       const result = await runQueue(projectId)
-      if (result.refused.length > 0) setError(result.refused[0].detail)
+      if (result.refused.length > 0) {
+        setError(result.refused[0].detail)
+        setErrorTicket(result.refused[0].ticket_id)
+      }
       else if (result.started.length === 0) setError('Nothing in the queue is ready to build.')
     } catch (e) {
       setError(errorText(e))
@@ -650,7 +683,8 @@ export default function ProjectTasks() {
                       onRun={tid => act(tid, () => runTicket(tid))}
                       onBudget={(tid, amount) => act(tid, () => setTicketBudget(tid, amount))}
                       onArea={(tid, area) => act(tid, () => setTicketArea(tid, area))}
-                      onReview={tid => act(tid, () => reviewTicket(tid))} />
+                      onReview={tid => act(tid, () => reviewTicket(tid))}
+                      onResolve={tid => act(tid, () => resolveConflicts(tid))} />
                   ))}
             </div>
           ))}

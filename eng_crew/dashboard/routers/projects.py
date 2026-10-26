@@ -252,6 +252,45 @@ async def api_ticket_review(ticket_id: int):
     return JSONResponse({"ok": True, "started": True})
 
 
+@router.post("/tickets/{ticket_id}/resolve")
+async def api_ticket_resolve(ticket_id: int):
+    """Have an agent resolve the conflicts that refused this ticket's build.
+
+    Refused up front for what can be known now — no such ticket, one past
+    building, one already being resolved, a spent budget — so the person who
+    clicked hears why. The resolution itself takes minutes and runs off the
+    request thread; its outcome lands in the ticket's history.
+    """
+    from ... import resolve
+
+    ticket = get_backlog_item(ticket_id)
+    if not ticket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if ticket["status"] not in resolve.RESOLVABLE:
+        return JSONResponse(
+            {"error": f"#{ticket_id} is {ticket['status']}; conflicts are resolved "
+                      f"before a ticket is built"}, status_code=409,
+        )
+    if resolve.resolving(ticket_id):
+        return JSONResponse(
+            {"error": "an agent is already resolving this ticket's conflicts"}, status_code=409,
+        )
+    state = budget.status(ticket_id)
+    if state and state["exhausted"]:
+        return JSONResponse(
+            {"error": "this ticket has spent its budget — raise it first"}, status_code=409,
+        )
+
+    def work() -> None:
+        try:
+            resolve.resolve(ticket_id)
+        except Exception as exc:
+            print(f"[resolve] ticket {ticket_id}: {exc}", file=sys.stderr)
+
+    threading.Thread(target=work, daemon=True, name=f"resolve-{ticket_id}").start()
+    return JSONResponse({"ok": True, "started": True})
+
+
 class TicketAreaIn(BaseModel):
     """Which part of the product a ticket belongs to, and who decided."""
     area: str = ""
@@ -297,7 +336,7 @@ async def api_project_queue(project_id: int):
     p = get_project(project_id)
     if not p:
         return JSONResponse({"error": "not found"}, status_code=404)
-    from ... import review
+    from ... import resolve, review
 
     all_tickets = [
         {
@@ -308,6 +347,11 @@ async def api_project_queue(project_id: int):
             # What stopped that review, or None while it is still on its way.
             "review_stopped": review.why_unreviewed(t["id"])
             if t["status"] == tickets.IN_REVIEW else None,
+            # An agent resolving the conflicts that refused its build, and how
+            # the last resolution went.
+            "resolving": resolve.resolving(t["id"]),
+            "resolution": resolve.latest_note(t["id"])
+            if t["status"] in resolve.RESOLVABLE else None,
         }
         for t in list_project_tickets(p["project_path"])
     ]

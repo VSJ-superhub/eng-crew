@@ -287,7 +287,12 @@ def _launch_response(ticket_id: int, *, require_approval: bool = False):
     if not outcome:
         return JSONResponse({"error": "launch timed out"}, status_code=504)
     if not outcome["ok"]:
+        from ... import basing
+
         detail = outcome["detail"]
+        if basing.REFUSED in detail:
+            # The card offers to resolve it, so it has to know that is what this was.
+            return JSONResponse({"error": detail, "conflict": True}, status_code=409)
         code = 409 if ("Already running" in detail or "WIP limit" in detail) else 400
         return JSONResponse({"error": detail}, status_code=code)
     return JSONResponse({"ok": True, "log_path": outcome["detail"]})

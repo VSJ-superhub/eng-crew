@@ -60,7 +60,7 @@ export interface HealthMetrics {
 export type TicketStatus = 'backlog' | 'ready' | 'in_progress' | 'in_review' | 'in_qa' | 'done' | 'rejected' | 'shipped'
 export const TICKET_STATUSES: TicketStatus[] = ['backlog', 'ready', 'in_progress', 'in_review', 'in_qa', 'done', 'rejected', 'shipped']
 /** A ticket. `BacklogItem` is the legacy name for the same row. */
-export interface BacklogItem { id: number; title: string; description?: string; project_path?: string; claude_md_path?: string; priority: number; status: TicketStatus | string; acceptance_criteria?: string; created_at: string; project_id?: number; plan_id?: number; type?: string; run_id?: number; budget_usd?: number; spent_usd?: number; budget_exhausted?: boolean; depends_on?: number[]; prerequisites?: TicketRef[]; unmet_prerequisites?: TicketRef[]; blocked?: boolean; area?: string; awaiting_review?: boolean; review_stopped?: string | null }
+export interface BacklogItem { id: number; title: string; description?: string; project_path?: string; claude_md_path?: string; priority: number; status: TicketStatus | string; acceptance_criteria?: string; created_at: string; project_id?: number; plan_id?: number; type?: string; run_id?: number; budget_usd?: number; spent_usd?: number; budget_exhausted?: boolean; depends_on?: number[]; prerequisites?: TicketRef[]; unmet_prerequisites?: TicketRef[]; blocked?: boolean; area?: string; awaiting_review?: boolean; review_stopped?: string | null; resolving?: boolean; resolution?: string | null }
 
 /** A ticket this one waits on, as the tracker reports it. */
 export interface TicketRef { id: number; title: string; status: string }
@@ -146,6 +146,11 @@ export function reviewTicket(id: number): Promise<{ ok: boolean; started: boolea
 }
 export function getTicketEvents(id: number): Promise<{ events: TicketEvent[] }> { return api('/api/tickets/' + id + '/events') }
 export function runTicket(id: number): Promise<{ ok: boolean }> { return post('/api/tickets/' + id + '/run', {}) }
+/** Have an agent resolve the conflicts that refused this ticket's build, on a
+ *  branch of its own. Charged to the ticket; starts no build. */
+export function resolveConflicts(id: number): Promise<{ ok: boolean; started: boolean }> {
+  return post('/api/tickets/' + id + '/resolve', {})
+}
 /** Which part of the product a ticket belongs to. '' clears it. */
 export function setTicketArea(id: number, area: string, actor = 'user'): Promise<{ ok: boolean; area: string }> {
   return put('/api/tickets/' + id + '/area', { area, actor })

@@ -22,6 +22,8 @@ AGENT_SKILLS = {
     "test-first": {"criteria": "C"},
     "repair-verification-failure": {"task": "T", "failures": "F"},
     "repair-verification-failure-resumed": {"failures": "F"},
+    "resolve-merge-conflicts": {"ref": "R", "ticket_id": 1, "title": "T",
+                                "prerequisites": "P", "conflicted": "C"},
 }
 
 
