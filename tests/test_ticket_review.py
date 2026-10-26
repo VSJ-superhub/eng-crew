@@ -835,3 +835,58 @@ def test_an_unable_to_judge_reply_parses_as_unavailable():
     )
     assert verdict == review.UNAVAILABLE
     assert "tracker.py" in reasons
+
+
+# --- a review on its way is not reported as stopped -------------------------
+#
+# #100760: the run landed in in_review and the reviewer approved it 22 seconds
+# later, but the Tickets page had stopped polling at in_review and kept saying
+# "the review was stopped or could not run" — about a review that was running.
+
+
+def test_a_review_on_its_way_is_not_called_stopped(db):
+    from datetime import datetime, timedelta, timezone
+
+    ticket_id, _ = over_budget_in_review(spent=1.0)
+
+    assert review.awaiting_review(ticket_id) is not None
+    assert review.why_unreviewed(ticket_id) is None
+    later = datetime.now(timezone.utc) + timedelta(seconds=review.REVIEW_START_GRACE_S + 60)
+    assert review.why_unreviewed(ticket_id, now=later) == review.NEVER_RAN
+
+
+def test_a_review_the_budget_stopped_says_so(db, reviewer):
+    ticket_id, run_id = over_budget_in_review()
+    with pytest.raises(review.ReviewUnavailable):
+        review.review_ticket(ticket_id, run_id, settings=Settings())
+
+    assert "budget" in review.why_unreviewed(ticket_id)
+
+
+def test_a_ticket_with_a_verdict_has_nothing_unreviewed(db, reviewer):
+    reviewer["box"]["text"] = "CHANGES_REQUESTED\n- the button is red"
+    ticket_id, _ = landed_ticket()
+
+    assert review.why_unreviewed(ticket_id) is None
+
+
+def test_the_queue_tells_a_running_review_from_a_stopped_one(db, reviewer):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from eng_crew.dashboard.app import app
+
+    running, _ = over_budget_in_review(spent=1.0)
+    stopped, run_id = over_budget_in_review()
+    with pytest.raises(review.ReviewUnavailable):
+        review.review_ticket(stopped, run_id, settings=Settings())
+    project_id = tracker.add_project("proj", "/proj", "")
+
+    with TestClient(app) as client:
+        body = client.get(f"/api/projects/{project_id}/queue").json()
+
+    cards = {t["id"]: t for t in body["tickets"]}
+    assert cards[running]["awaiting_review"] is True
+    assert cards[running]["review_stopped"] is None
+    assert cards[stopped]["awaiting_review"] is True
+    assert "budget" in cards[stopped]["review_stopped"]

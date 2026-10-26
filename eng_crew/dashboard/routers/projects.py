@@ -158,6 +158,7 @@ async def api_ticket_get(ticket_id: int):
         # In review with no verdict yet — stopped for budget, or the reviewer was
         # unreachable — so the page can offer to run it.
         "awaiting_review": review.awaiting_review(ticket_id) is not None,
+        "review_stopped": review.why_unreviewed(ticket_id),
         "allowed_transitions": sorted(tickets.allowed_transitions(ticket["status"])),
     })
 
@@ -304,6 +305,9 @@ async def api_project_queue(project_id: int):
             # In review with no verdict yet, so the card can offer to run it.
             "awaiting_review": t["status"] == tickets.IN_REVIEW
             and review.awaiting_review(t["id"]) is not None,
+            # What stopped that review, or None while it is still on its way.
+            "review_stopped": review.why_unreviewed(t["id"])
+            if t["status"] == tickets.IN_REVIEW else None,
         }
         for t in list_project_tickets(p["project_path"])
     ]

@@ -46,6 +46,7 @@ import logging
 import os
 import re
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 from . import prompts, tracing, tracker
@@ -391,6 +392,19 @@ def awaiting_review(ticket_id: int) -> int | None:
     ticket = tracker.get_backlog_item(ticket_id)
     if not ticket or ticket.get("status") != tickets.IN_REVIEW:
         return None
+    for event in _since_review_began(ticket_id)[1]:
+        if event.get("actor") == REVIEWER_ACTOR and (event.get("note") or "").startswith(_NOTE_PREFIX):
+            return None
+    run = tracker.get_ticket_run(ticket_id)
+    if not run or run.get("status") not in LANDED:
+        return None
+    return run.get("id")
+
+
+def _since_review_began(ticket_id: int) -> tuple[dict | None, list[dict]]:
+    """The event that last brought a ticket into ``in_review``, and what followed."""
+    from . import tickets
+
     history = tickets.events(ticket_id)
     arrived = max(
         (i for i, e in enumerate(history)
@@ -398,13 +412,46 @@ def awaiting_review(ticket_id: int) -> int | None:
          and e.get("from_status") != tickets.IN_REVIEW),
         default=-1,
     )
-    for event in history[arrived + 1:]:
-        if event.get("actor") == REVIEWER_ACTOR and (event.get("note") or "").startswith(_NOTE_PREFIX):
-            return None
-    run = tracker.get_ticket_run(ticket_id)
-    if not run or run.get("status") not in LANDED:
+    return (history[arrived] if arrived >= 0 else None), history[arrived + 1:]
+
+
+#: How long after a run lands its review may take before a surface stops
+#: calling it "running". The review is one cheap call; a build process that
+#: died before making it would otherwise leave the ticket looking busy forever.
+REVIEW_START_GRACE_S = 300
+
+#: Why a review is missing when nothing recorded a stop and the grace is up.
+NEVER_RAN = "no review has run since the build landed"
+
+
+def why_unreviewed(ticket_id: int, now: datetime | None = None) -> str | None:
+    """Why the review a ticket is waiting on has not happened, or None.
+
+    None while nothing has stopped it — the review a landed run starts is still
+    on its way — so a surface can say "running" instead of "stopped", and not
+    offer to start a second one. Otherwise the note that stopped it (the
+    reviewer could not run, or the budget refused it), or :data:`NEVER_RAN`
+    once :data:`REVIEW_START_GRACE_S` has passed with no word at all.
+    """
+    from . import budget
+
+    if awaiting_review(ticket_id) is None:
         return None
-    return run.get("id")
+    arrival, since = _since_review_began(ticket_id)
+    reason = None
+    for event in since:
+        note = event.get("note") or ""
+        if (event.get("actor") == REVIEWER_ACTOR and note.startswith(_UNAVAILABLE_PREFIX)) or (
+                event.get("actor") == budget.ACTOR and note.startswith(budget.NOTE_PREFIX)):
+            reason = note
+    if reason:
+        return reason
+    try:
+        landed = datetime.fromisoformat((arrival or {}).get("created_at", "").replace("Z", "+00:00"))
+    except ValueError:
+        return NEVER_RAN
+    now = now or datetime.now(timezone.utc)
+    return NEVER_RAN if (now - landed).total_seconds() > REVIEW_START_GRACE_S else None
 
 
 def review_if_waiting(ticket_id: int, settings: Any = None) -> dict | None:

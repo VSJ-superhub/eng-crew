@@ -296,17 +296,23 @@ function TicketCard({ ticket, busy, focus = false, error = '', onMove, onRun, on
           {ticket.awaiting_review && (
             <div>
               <p className='text-[10px] uppercase text-gray-500 font-bold mb-1'>Review</p>
-              <p className='text-xs text-amber-400'>
-                No verdict yet — the review was stopped or could not run.
-              </p>
-              <button disabled={busy || overBudget}
+              {ticket.review_stopped ? (
+                <p className='text-xs text-amber-400'>
+                  No verdict — {ticket.review_stopped}
+                </p>
+              ) : (
+                <p className='text-xs text-gray-400'>
+                  Review running — the verdict will appear here.
+                </p>
+              )}
+              {ticket.review_stopped && <button disabled={busy || overBudget}
                 onClick={() => onReview(ticket.id)}
                 title={overBudget
                   ? 'This ticket has spent its budget. Raise it first; the review then runs on its own.'
                   : 'Check the run against this ticket’s acceptance criteria.'}
                 className='mt-1.5 text-[11px] px-2 py-1 rounded bg-white/5 text-gray-300 hover:bg-white/10 disabled:opacity-40'>
                 Run review
-              </button>
+              </button>}
             </div>
           )}
 
@@ -490,8 +496,10 @@ export default function ProjectTasks() {
 
   useEffect(() => { load() }, [load])
 
-  // Planning and builds both finish out of band; poll while either is live.
-  const live = planning || tickets.some(t => t.status === 'in_progress')
+  // Planning, builds and the review a landed build starts all finish out of
+  // band; poll while any of them is live.
+  const live = planning || tickets.some(t => t.status === 'in_progress'
+    || (t.awaiting_review && !t.review_stopped))
   useEffect(() => {
     if (!live) return
     const iv = setInterval(load, 4000)

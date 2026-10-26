@@ -60,7 +60,7 @@ export interface HealthMetrics {
 export type TicketStatus = 'backlog' | 'ready' | 'in_progress' | 'in_review' | 'in_qa' | 'done' | 'rejected' | 'shipped'
 export const TICKET_STATUSES: TicketStatus[] = ['backlog', 'ready', 'in_progress', 'in_review', 'in_qa', 'done', 'rejected', 'shipped']
 /** A ticket. `BacklogItem` is the legacy name for the same row. */
-export interface BacklogItem { id: number; title: string; description?: string; project_path?: string; claude_md_path?: string; priority: number; status: TicketStatus | string; acceptance_criteria?: string; created_at: string; project_id?: number; plan_id?: number; type?: string; run_id?: number; budget_usd?: number; spent_usd?: number; budget_exhausted?: boolean; depends_on?: number[]; prerequisites?: TicketRef[]; unmet_prerequisites?: TicketRef[]; blocked?: boolean; area?: string; awaiting_review?: boolean }
+export interface BacklogItem { id: number; title: string; description?: string; project_path?: string; claude_md_path?: string; priority: number; status: TicketStatus | string; acceptance_criteria?: string; created_at: string; project_id?: number; plan_id?: number; type?: string; run_id?: number; budget_usd?: number; spent_usd?: number; budget_exhausted?: boolean; depends_on?: number[]; prerequisites?: TicketRef[]; unmet_prerequisites?: TicketRef[]; blocked?: boolean; area?: string; awaiting_review?: boolean; review_stopped?: string | null }
 
 /** A ticket this one waits on, as the tracker reports it. */
 export interface TicketRef { id: number; title: string; status: string }
