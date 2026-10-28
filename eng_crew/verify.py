@@ -11,10 +11,12 @@ FAILED. A project with no detectable checks is "unverified", not "failed".
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -31,6 +33,11 @@ PASSED = "passed"
 FAILED = "failed"
 SKIPPED = "skipped"
 
+LINT = "lint"  # a Check.kind, alongside "test" and "build"
+# Line/column numbers inside a lint finding: noise when comparing against a
+# baseline, since an edit anywhere above a violation moves it.
+_NUMBERS = re.compile(r"\d+")
+
 
 @dataclass
 class Check:
@@ -38,7 +45,13 @@ class Check:
 
     name: str
     cmd: list[str]
-    kind: str  # "test" | "build"
+    kind: str  # "test" | "build" | "lint" | "red"
+    # Lint checks only. ``suffixes`` are the file types the check judges, and
+    # ``accepts_paths`` says the tool takes the files to check as arguments —
+    # both exist so a linter is pointed at what the run changed rather than at
+    # a codebase whose pre-existing violations it did not cause.
+    suffixes: tuple[str, ...] = ()
+    accepts_paths: bool = False
 
 
 @dataclass
@@ -148,7 +161,137 @@ def python_for(root: Path) -> str:
     return sys.executable
 
 
-def detect_checks(project_path: str | Path) -> list[Check]:
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+_PY_SUFFIXES = (".py", ".pyi")
+_JS_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+_ESLINT_CONFIGS = (
+    "eslint.config.js", "eslint.config.mjs", "eslint.config.cjs", "eslint.config.ts",
+    ".eslintrc", ".eslintrc.js", ".eslintrc.cjs", ".eslintrc.json",
+    ".eslintrc.yml", ".eslintrc.yaml",
+)
+
+
+def detect_lint_checks(project_path: str | Path) -> list[Check]:
+    """Detect the linters and type checkers this project has *configured*.
+
+    Configured is the operative word: a linter that happens to be installed on
+    the machine says nothing about whether the project wants it, and running
+    one uninvited would fail runs over style the project never adopted. So
+    every check here keys off a file in the repo — a config section, a config
+    file, an npm script.
+    """
+    root = Path(project_path).expanduser().resolve()
+    checks: list[Check] = []
+
+    # Every command below is asked for one finding per line with the file name
+    # on it (--output-format=concise, --format=unix, --message-format=short):
+    # the gate attributes findings by reading them, and a tool whose default
+    # format puts the path on a separate line cannot be scoped to a run.
+    pyproject = _read(root / "pyproject.toml")
+    if (
+        "[tool.ruff" in pyproject
+        or (root / "ruff.toml").exists()
+        or (root / ".ruff.toml").exists()
+    ):
+        checks.append(
+            Check(
+                name="ruff",
+                cmd=[python_for(root), "-m", "ruff", "check", "--output-format=concise"],
+                kind=LINT,
+                suffixes=_PY_SUFFIXES,
+                accepts_paths=True,
+            )
+        )
+    if (
+        "[tool.mypy" in pyproject
+        or (root / "mypy.ini").exists()
+        or (root / ".mypy.ini").exists()
+        or "[mypy]" in _read(root / "setup.cfg")
+    ):
+        checks.append(
+            Check(
+                name="mypy",
+                cmd=[python_for(root), "-m", "mypy"],
+                kind=LINT,
+                suffixes=_PY_SUFFIXES,
+                accepts_paths=True,
+            )
+        )
+
+    scripts = _npm_scripts(root)
+    lint_script = next((k for k in ("lint", "eslint") if scripts.get(k)), None)
+    if lint_script:
+        checks.append(
+            Check(
+                name=f"npm run {lint_script}",
+                cmd=["npm", "run", lint_script, "--silent"],
+                kind=LINT,
+                suffixes=_JS_SUFFIXES,
+            )
+        )
+    elif any((root / name).exists() for name in _ESLINT_CONFIGS) and (
+        root / "node_modules" / "eslint"
+    ).is_dir():
+        # --no-install: a gate must never reach the network to fetch a tool.
+        checks.append(
+            Check(
+                name="eslint",
+                cmd=["npx", "--no-install", "eslint", "--format=unix"],
+                kind=LINT,
+                suffixes=_JS_SUFFIXES,
+                accepts_paths=True,
+            )
+        )
+
+    type_script = next(
+        (k for k in ("typecheck", "type-check", "tsc") if scripts.get(k)), None
+    )
+    if type_script:
+        checks.append(
+            Check(
+                name=f"npm run {type_script}",
+                cmd=["npm", "run", type_script, "--silent"],
+                kind=LINT,
+                suffixes=_JS_SUFFIXES,
+            )
+        )
+    elif (root / "tsconfig.json").exists() and (root / "node_modules" / "typescript").is_dir():
+        # tsc is given no paths on purpose: passing files overrides tsconfig's
+        # own include/compilerOptions, so the project would be checked under
+        # different settings than it configured.
+        checks.append(
+            Check(
+                name="tsc",
+                cmd=["npx", "--no-install", "tsc", "--noEmit"],
+                kind=LINT,
+                suffixes=_JS_SUFFIXES,
+            )
+        )
+
+    if (root / "Cargo.toml").exists() and (
+        (root / "clippy.toml").exists()
+        or (root / ".clippy.toml").exists()
+        or "clippy" in _read(root / "Cargo.toml")
+    ):
+        checks.append(
+            Check(
+                name="cargo clippy",
+                cmd=["cargo", "clippy", "--quiet", "--all-targets", "--message-format=short"],
+                kind=LINT,
+                suffixes=(".rs",),
+            )
+        )
+
+    return checks
+
+
+def detect_checks(project_path: str | Path, *, lint: bool = True) -> list[Check]:
     """Detect the verification commands this project supports."""
     root = Path(project_path).expanduser().resolve()
     checks: list[Check] = []
@@ -174,6 +317,9 @@ def detect_checks(project_path: str | Path) -> list[Check]:
 
     if (root / "go.mod").exists():
         checks.append(Check(name="go test", cmd=["go", "test", "./..."], kind="test"))
+
+    if lint:
+        checks.extend(detect_lint_checks(root))
 
     return checks
 
@@ -234,25 +380,193 @@ def run_check(check: Check, project_path: str | Path, timeout: int = 300) -> Che
     return CheckResult(check.name, check.kind, status, output[:4000], printable)
 
 
+def changed_files(project_path: str | Path, base: str = "HEAD") -> list[str]:
+    """Repo-relative paths this run changed, for scoping the lint checks.
+
+    Empty when we cannot tell — not in a repo, git missing. A lint check with
+    nothing to judge stands down: failing a run over violations it provably did
+    not cause is worse than not linting it.
+    """
+    from . import git_skill
+
+    try:
+        return [p.replace("\\", "/") for p in git_skill.changed_paths(project_path, base)]
+    except Exception as exc:  # not a repo, git missing, bad base
+        log.info("verify: cannot list changed paths (%s)", exc)
+        return []
+
+
+def _blames(line: str, paths: list[str]) -> bool:
+    """Does this line of tool output name one of these files?"""
+    normalised = line.replace("\\", "/")
+    return any(p in normalised for p in paths)
+
+
+def _fingerprint(line: str) -> str:
+    """A finding stripped of what an unrelated edit shifts.
+
+    Line and column numbers move when code above them changes, so comparing
+    raw output would call every pre-existing violation new. The file, the rule
+    and the message are what identify a finding.
+    """
+    return _NUMBERS.sub("#", line.replace("\\", "/")).strip()
+
+
+def new_findings(after: list[str], before: list[str]) -> list[str]:
+    """Findings in ``after`` that were not already there in ``before``.
+
+    Compared as a multiset: two copies of a violation where there was one is a
+    new one. This is what makes the gate judge what the run introduced rather
+    than what the project already lives with.
+    """
+    counts: dict[str, int] = {}
+    for line in before:
+        counts[_fingerprint(line)] = counts.get(_fingerprint(line), 0) + 1
+    fresh = []
+    for line in after:
+        key = _fingerprint(line)
+        if counts.get(key):
+            counts[key] -= 1
+            continue
+        fresh.append(line)
+    return fresh
+
+
+def _findings_at_base(
+    check: Check,
+    project_path: str | Path,
+    base: str,
+    relevant: list[str],
+    timeout: int,
+) -> list[str] | None:
+    """The same check's findings against pre-change code, or None if unknowable.
+
+    A scratch checkout of ``base`` is the cheapest honest baseline: the files
+    the run changed, as they were. None means we could not build one — git
+    missing, a bad base — and the caller then reports the findings as they are
+    rather than silently passing a run.
+    """
+    from . import git_skill
+
+    root = Path(project_path).expanduser().resolve()
+    worktree = None
+    try:
+        worktree = git_skill.create_detached_worktree(root, base)
+        git_skill.link_into_worktree(root, worktree, _LINK_DIRS)
+        existing = [p for p in relevant if (worktree / p).is_file()]
+        if check.accepts_paths and not existing:
+            return []  # every file the check judges is new in this run
+        cmd = [*check.cmd, *existing] if check.accepts_paths else list(check.cmd)
+        proc = subprocess.run(
+            cmd,
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            shell=False,
+        )
+        output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        return [ln for ln in output.splitlines() if _blames(ln, existing)]
+    except Exception as exc:
+        log.info("verify: no lint baseline for %s (%s)", check.name, exc)
+        return None
+    finally:
+        if worktree is not None:
+            try:
+                git_skill.remove_worktree(root, worktree, force=True)
+            except Exception as exc:
+                log.info("verify: baseline worktree cleanup failed (%s)", exc)
+
+
+def run_lint_check(
+    check: Check,
+    project_path: str | Path,
+    changed: list[str],
+    timeout: int = 300,
+    base: str | None = None,
+) -> CheckResult:
+    """Run one lint check and hold the run to what it introduced.
+
+    Three filters, in order. The check is pointed at the files the run changed
+    (a tool that takes paths is handed them; tsc and clippy need the whole
+    project, so they are run whole). Its findings are then narrowed to lines
+    naming one of those files — mypy follows imports and will happily report a
+    module the run never opened. Whatever survives is compared against the same
+    check run against ``base``, so a violation the project already had is not
+    this run's to answer for.
+    """
+    relevant = [p for p in changed if not check.suffixes or p.endswith(check.suffixes)]
+    printable = " ".join(check.cmd)
+    if not relevant:
+        return CheckResult(
+            check.name, check.kind, SKIPPED,
+            "run changed no files this check judges", printable,
+        )
+
+    scoped = check
+    if check.accepts_paths:
+        scoped = dataclasses.replace(check, cmd=[*check.cmd, *relevant])
+
+    result = run_check(scoped, project_path, timeout=timeout)
+    if result.status != FAILED:
+        return result
+
+    own = [line for line in result.output.splitlines() if _blames(line, relevant)]
+    if not own:
+        return dataclasses.replace(
+            result,
+            status=SKIPPED,
+            output="only pre-existing violations, in files this run did not touch",
+        )
+
+    before = _findings_at_base(check, project_path, base, relevant, timeout) if base else None
+    if before is not None:
+        own = new_findings(own, before)
+        if not own:
+            return dataclasses.replace(
+                result,
+                status=SKIPPED,
+                output="violations, but every one of them predates this run",
+            )
+
+    return dataclasses.replace(result, output="\n".join(own)[:4000])
+
+
 def verify(
     project_path: str | Path,
     *,
     agent_output: str = "",
     truncated: bool = False,
     timeout: int = 300,
+    base: str = "HEAD",
+    lint: bool = True,
 ) -> VerificationResult:
     """Run every detected check. ``agent_output`` is scanned for truncation.
 
     ``truncated`` carries a truncation already established by an earlier pass,
     for a re-verify that deliberately ignores the agent's own narration.
+    ``base`` is the commit the run started from; the lint checks are scoped to
+    what changed since it.
     """
     truncated = truncated or TRUNCATION_MARKER in (agent_output or "")
-    checks = detect_checks(project_path)
+    checks = detect_checks(project_path, lint=lint)
     if not checks:
         log.info("verify: no checks detected for %s", project_path)
         return VerificationResult(results=[], truncated=truncated)
 
-    results = [run_check(c, project_path, timeout=timeout) for c in checks]
+    results: list[CheckResult] = []
+    changed: list[str] | None = None
+    for c in checks:
+        if c.kind == LINT:
+            if changed is None:
+                changed = changed_files(project_path, base)
+            results.append(
+                run_lint_check(c, project_path, changed, timeout=timeout, base=base)
+            )
+        else:
+            results.append(run_check(c, project_path, timeout=timeout))
     result = VerificationResult(results=results, truncated=truncated)
     log.info("verify: %s", result.summary())
     return result

@@ -184,6 +184,18 @@ This is a generalized, pip-installable version of a private internal tool. It mu
 - Every execution tier (simple / single-agent / full graph) exits through a deterministic
   verification gate (`eng_crew/verify.py`) that runs the project's own tests and build.
   A run that leaves the tree broken is recorded as `failed`, not `completed`.
+- The gate also runs the linters and type checkers the project has *configured*
+  — ruff, mypy, eslint/`npm run lint`, tsc/`npm run typecheck`, cargo clippy —
+  detected from files in the repo, never from what happens to be installed, so
+  a project with none configured verifies exactly as it did before
+  (`ENG_CREW_VERIFICATION_LINT=false` turns them off). A run answers only for what it
+  introduced: the check is pointed at the files the run changed (one that needs
+  the whole project, like tsc or clippy, is run whole and its findings filtered
+  to lines naming those files — mypy reports modules the run never opened), and
+  what survives is compared against the same check run against the run's base
+  in a scratch worktree, so a violation that only moved, or that the project
+  already lived with, is not this run's. The new findings go into the failure
+  report a repair pass is handed, like a failing test.
 - When a task carries acceptance criteria (tickets do), the single-agent builder
   works test-first: it writes tests encoding the criteria, confirms they fail,
   then implements until they pass. The gate's red phase then replays those tests

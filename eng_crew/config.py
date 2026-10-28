@@ -180,6 +180,10 @@ class Settings(BaseSettings):
     # gate should hold it to, not a note in the log. A run that adds no tests
     # skips this rather than failing it. "warn" only reports, "off" disables.
     verification_red_phase: str = "strict"  # strict | warn | off
+    # Run the linters and type checkers the project has configured (ruff, mypy,
+    # eslint, tsc, clippy) alongside its tests, scoped to the files the run
+    # changed. A project with none configured is unaffected either way.
+    verification_lint: bool = True
 
     # --- Ticket queue ---
     # There are no sprints: tickets form one continuous queue, and this is the

@@ -232,3 +232,259 @@ def test_pipeline_status_requires_an_explicit_pass():
     assert status_for(True) == "completed"
     assert status_for(False) == "failed"
     assert status_for(None) == "failed", "run 100239 reported completed on a 529"
+
+
+# --- linters and type checkers ------------------------------------------
+
+
+def _lint_names(root: Path) -> list[str]:
+    return [c.name for c in detect_checks(root) if c.kind == verify.LINT]
+
+
+def test_detects_ruff_and_mypy_configured_in_pyproject():
+    root = _tmp()
+    (root / "tests").mkdir()
+    (root / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\n\n[tool.ruff]\nline-length = 100\n"
+        "\n[tool.mypy]\nstrict = true\n",
+        encoding="utf-8",
+    )
+    assert _lint_names(root) == ["ruff", "mypy"]
+
+
+def test_detects_ruff_from_its_own_config_file():
+    root = _tmp()
+    (root / "ruff.toml").write_text("line-length = 100\n", encoding="utf-8")
+    assert _lint_names(root) == ["ruff"]
+
+
+def test_detects_mypy_from_setup_cfg_section():
+    root = _tmp()
+    (root / "setup.cfg").write_text("[mypy]\nstrict = True\n", encoding="utf-8")
+    assert _lint_names(root) == ["mypy"]
+
+
+def test_detects_npm_lint_and_typecheck_scripts():
+    root = _tmp()
+    (root / "package.json").write_text(
+        json.dumps({"scripts": {"lint": "eslint .", "typecheck": "tsc --noEmit"}}),
+        encoding="utf-8",
+    )
+    assert _lint_names(root) == ["npm run lint", "npm run typecheck"]
+
+
+def test_detects_tsc_from_tsconfig_with_typescript_installed():
+    root = _tmp()
+    (root / "tsconfig.json").write_text("{}", encoding="utf-8")
+    (root / "node_modules" / "typescript").mkdir(parents=True)
+    assert _lint_names(root) == ["tsc"]
+
+
+def test_detects_cargo_clippy_only_when_configured():
+    root = _tmp()
+    (root / "Cargo.toml").write_text("[package]\nname='x'\n", encoding="utf-8")
+    assert _lint_names(root) == []
+    (root / "clippy.toml").write_text("msrv = \"1.70\"\n", encoding="utf-8")
+    assert _lint_names(root) == ["cargo clippy"]
+
+
+def test_project_without_linters_detects_exactly_the_checks_it_did_before():
+    """Criterion: a project with nothing configured verifies as it does today."""
+    root = _tmp()
+    (root / "tests").mkdir()
+    (root / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+    (root / "package.json").write_text(
+        json.dumps({"scripts": {"test": "vitest run", "build": "tsc"}}), encoding="utf-8"
+    )
+    assert [c.name for c in detect_checks(root)] == ["pytest", "npm test", "npm run build"]
+    assert _lint_names(root) == []
+
+
+def test_lint_disabled_detects_no_lint_checks():
+    root = _tmp()
+    (root / "ruff.toml").write_text("line-length = 100\n", encoding="utf-8")
+    assert detect_checks(root, lint=False) == []
+
+
+def _violation_check(text: str, **kw) -> Check:
+    cmd = [sys.executable, "-c", f"import sys; print({text!r}); sys.exit(1)"]
+    return Check("ruff", cmd, verify.LINT, suffixes=(".py",), **kw)
+
+
+def test_lint_failure_fails_the_gate_with_the_tool_output():
+    root = _tmp()
+    check = _violation_check("app/thing.py:3:1: F821 undefined name 'nope'")
+    res = verify.run_lint_check(check, root, ["app/thing.py"], timeout=60)
+    assert res.status == FAILED
+    assert "F821 undefined name" in res.output
+    result = VerificationResult(results=[res])
+    assert result.passed is False
+    assert "ruff" in result.summary()
+    assert "F821" in result.failure_report()
+
+
+def test_pre_existing_violations_in_untouched_files_do_not_fail_the_run():
+    root = _tmp()
+    check = _violation_check("legacy/old.py:9:1: E501 line too long")
+    res = verify.run_lint_check(check, root, ["app/thing.py"], timeout=60)
+    assert res.status == SKIPPED
+    assert res.ok is True
+
+
+def test_lint_check_is_skipped_when_the_run_changed_nothing_it_judges():
+    root = _tmp()
+    check = _violation_check("whatever")
+    res = verify.run_lint_check(check, root, ["README.md"], timeout=60)
+    assert res.status == SKIPPED
+
+
+def test_path_scoped_lint_check_runs_only_on_the_changed_files():
+    root = _tmp()
+    cmd = [sys.executable, "-c", "import sys; print(' '.join(sys.argv[1:])); sys.exit(1)"]
+    check = Check("ruff", cmd, verify.LINT, suffixes=(".py",), accepts_paths=True)
+    res = verify.run_lint_check(check, root, ["app/thing.py", "docs/readme.md"], timeout=60)
+    assert res.status == FAILED
+    assert res.output.strip() == "app/thing.py"
+
+
+def test_verify_runs_detected_lint_checks_against_the_runs_changed_files():
+    root = _tmp()
+    (root / "ruff.toml").write_text("line-length = 100\n", encoding="utf-8")
+    sentinel = Check(
+        "ruff",
+        [sys.executable, "-c", "import sys; print('app/x.py:1:1: F401'); sys.exit(1)"],
+        verify.LINT,
+        suffixes=(".py",),
+    )
+    orig_detect, orig_changed = verify.detect_checks, verify.changed_files
+    verify.detect_checks = lambda *a, **k: [sentinel]
+    verify.changed_files = lambda *a, **k: ["app/x.py"]
+    try:
+        result = verify.verify(root, timeout=60)
+    finally:
+        verify.detect_checks, verify.changed_files = orig_detect, orig_changed
+    assert result.passed is False
+    assert [r.name for r in result.failures] == ["ruff"]
+    assert "F401" in result.failure_report()
+
+
+def test_the_gate_fails_a_run_whose_change_introduces_lint_errors():
+    """Criterion: a lint error in a changed file is recorded as a failed run."""
+    from eng_crew.agents.verifier import VerifierAgent
+    from eng_crew.config import Settings
+
+    root = _tmp()
+    sentinel = Check(
+        "ruff",
+        [sys.executable, "-c",
+         "import sys; print('app/x.py:1:1: F401 unused'); sys.exit(1)"],
+        verify.LINT,
+        suffixes=(".py",),
+    )
+    orig_detect, orig_changed = verify.detect_checks, verify.changed_files
+    verify.detect_checks = lambda *a, **k: [sentinel]
+    verify.changed_files = lambda *a, **k: ["app/x.py"]
+    try:
+        out = VerifierAgent(Settings(verification_max_fix_attempts=0)).run(
+            {"raw_task": "do it", "project_path": str(root), "run_id": 0, "final_summary": ""}
+        )
+    finally:
+        verify.detect_checks, verify.changed_files = orig_detect, orig_changed
+
+    assert out["verification_passed"] is False
+    assert "ruff" in out["verification_summary"]
+    assert "VERIFICATION FAILED" in out["final_summary"]
+
+
+# --- what the run introduced, versus what the project already had -------
+
+# A stand-in linter: one finding per line containing BAD, in the format the
+# gate asks real tools for (path:line: CODE message).
+_FAKE_LINTER = (
+    "import sys\n"
+    "rows = []\n"
+    "for p in sys.argv[1:]:\n"
+    "    for i, line in enumerate(open(p, encoding='utf-8'), 1):\n"
+    "        if 'BAD' in line:\n"
+    "            rows.append(f'{p}:{i}: E999 bad line')\n"
+    "print(chr(10).join(rows))\n"
+    "sys.exit(1 if rows else 0)\n"
+)
+
+
+def test_new_findings_ignores_a_violation_that_only_moved():
+    before = ["app/x.py:4: E999 bad line"]
+    after = ["app/x.py:9: E999 bad line"]
+    assert verify.new_findings(after, before) == []
+
+
+def test_new_findings_keeps_a_second_copy_of_an_existing_violation():
+    before = ["app/x.py:4: E999 bad line"]
+    after = ["app/x.py:4: E999 bad line", "app/x.py:11: E999 bad line"]
+    assert verify.new_findings(after, before) == ["app/x.py:11: E999 bad line"]
+
+
+def _lint_repo() -> Path:
+    import subprocess
+
+    root = Path(tempfile.mkdtemp(prefix="engcrew_lint_"))
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=root, check=True)
+    (root / "app").mkdir()
+    (root / "app" / "x.py").write_text("x = 1  # BAD\n", encoding="utf-8")
+    (root / "app" / "untouched.py").write_text("y = 2  # BAD\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=root, check=True)
+    return root
+
+
+def _fake_lint_check(**kw) -> Check:
+    return Check(
+        "fakelint",
+        [sys.executable, "-c", _FAKE_LINTER],
+        verify.LINT,
+        suffixes=(".py",),
+        accepts_paths=True,
+        **kw,
+    )
+
+
+def test_a_violation_that_predates_the_run_does_not_fail_it():
+    root = _lint_repo()
+    # The run edits the file without adding a violation; the old one just moves.
+    (root / "app" / "x.py").write_text("import os\nx = 1  # BAD\n", encoding="utf-8")
+    res = verify.run_lint_check(
+        _fake_lint_check(), root, verify.changed_files(root), timeout=120, base="HEAD"
+    )
+    assert res.status == SKIPPED
+    assert "predates" in res.output
+
+
+def test_a_violation_the_run_introduced_fails_it():
+    root = _lint_repo()
+    (root / "app" / "x.py").write_text("x = 1  # BAD\nz = 3  # BAD\n", encoding="utf-8")
+    res = verify.run_lint_check(
+        _fake_lint_check(), root, verify.changed_files(root), timeout=120, base="HEAD"
+    )
+    assert res.status == FAILED
+    assert res.output.count("E999") == 1
+    assert "app/x.py:2" in res.output.replace("\\", "/")
+
+
+def test_violations_in_files_the_run_never_touched_are_not_its_problem():
+    root = _lint_repo()
+    # untouched.py is full of violations, and a whole-project check will find
+    # them; only the file this run changed is reported against it.
+    (root / "app" / "x.py").write_text("x = 1\n", encoding="utf-8")
+    whole_project = Check(
+        "fakelint",
+        [sys.executable, "-c", _FAKE_LINTER, "app/x.py", "app/untouched.py"],
+        verify.LINT,
+        suffixes=(".py",),
+    )
+    res = verify.run_lint_check(
+        whole_project, root, verify.changed_files(root), timeout=120, base="HEAD"
+    )
+    assert res.status == SKIPPED
+    assert "did not touch" in res.output
