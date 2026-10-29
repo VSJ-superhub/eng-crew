@@ -38,6 +38,14 @@ entirely on a file you were not shown, so that you cannot honestly say whether
 it is met, answer UNABLE_TO_JUDGE and name the file and the criterion — do not
 treat it as unimplemented, and do not approve around it.
 
+A diff shows only the lines that changed, not the files around them. A name the
+diff uses but never defines — a constant, a function, an import, a fixture — is
+almost always defined in unchanged code you were not shown. Never return
+CHANGES_REQUESTED on the grounds that such a name is undefined or would raise at
+runtime unless the diff itself removes or renames its definition. The
+verification gate above ran the project's tests against the whole tree; if it
+passed, code those tests exercise did not crash.
+
 Style preferences, refactors you would rather see, and work the ticket did not
 ask for are not grounds for changes.
 

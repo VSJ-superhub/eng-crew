@@ -355,6 +355,20 @@ def test_the_skill_forbids_requesting_changes_over_a_file_it_was_not_shown():
         "the template does not forbid CHANGES_REQUESTED over a file it was not shown"
 
 
+def test_the_skill_forbids_requesting_changes_over_a_name_defined_outside_the_diff():
+    """Ticket #100778: the reviewer called a module constant the diff used but
+    did not touch "undefined" and requested changes over a NameError that the
+    passing test suite showed could not happen."""
+    from eng_crew import prompts
+
+    body = prompts.load("review-ticket", refresh=True).body.lower()
+    assert "unchanged code" in body, \
+        "the template never says a diff omits the code around the change"
+    rule = body.split("unchanged code", 1)[1]
+    assert "changes_requested" in rule and "undefined" in rule, \
+        "the template does not forbid CHANGES_REQUESTED over a name defined outside the diff"
+
+
 def test_a_file_cut_from_a_real_branch_diff_is_reported_as_unshown(db, reviewer, tmp_path):
     """The #100646 reproduction, on a real repository: the change is complete,
     the diff is not, and the reviewer is told which file it is missing."""
