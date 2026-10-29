@@ -37,8 +37,16 @@ class VerifierAgent(BaseAgent):
         timeout = getattr(self.settings, "verification_timeout", 300)
         max_fixes = getattr(self.settings, "verification_max_fix_attempts", 1)
 
+        lint = getattr(self.settings, "verification_lint", True)
+
         agent_output = self._agent_output(state)
-        result = verify_mod.verify(project_path, agent_output=agent_output, timeout=timeout)
+        result = verify_mod.verify(
+            project_path,
+            agent_output=agent_output,
+            timeout=timeout,
+            base=self._base(state),
+            lint=lint,
+        )
         # Truncation is a fact about the implementation, not about the repair's
         # account of it, so it has to survive the re-verify below.
         was_truncated = result.truncated
@@ -85,7 +93,12 @@ class VerifierAgent(BaseAgent):
             # repair that accomplished nothing (or died on a provider error)
             # clears the flag and a third-finished run passes the gate.
             result = verify_mod.verify(
-                project_path, agent_output="", truncated=was_truncated, timeout=timeout
+                project_path,
+                agent_output="",
+                truncated=was_truncated,
+                timeout=timeout,
+                base=self._base(state),
+                lint=lint,
             )
             if was_truncated and result.ran_any and not result.failures:
                 # Real checks ran and vouch for the tree: positive evidence that
