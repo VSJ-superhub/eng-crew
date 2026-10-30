@@ -681,6 +681,11 @@ def lock_violations(
     return violations
 
 
+def changed_tests(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    """Test files added, changed or deleted between two snapshots."""
+    return sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+
+
 # ----------------------------------------------------------------------
 # Red phase
 #

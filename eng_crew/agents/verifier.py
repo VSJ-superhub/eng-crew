@@ -18,6 +18,13 @@ from ..providers import call_llm
 from ..providers.base import LLMResult
 from ..state import TeamState
 
+#: Run event naming the test files the pass that finished a truncated build
+#: changed. Read by eng_crew.review, which asks the reviewer to check them.
+CONTINUATION_TESTS_EVENT = "verify_continuation_tests"
+#: Run event naming the test files a repair changed that the failures never
+#: named. In warn mode the run still passes, so the reviewer is told too.
+TEST_LOCK_EVENT = "verify_test_lock"
+
 
 class VerifierAgent(BaseAgent):
     agent_type = "verifier"
@@ -54,9 +61,18 @@ class VerifierAgent(BaseAgent):
 
         lock_mode = getattr(self.settings, "verification_test_lock", verify_mod.LOCK_STRICT)
         locking = lock_mode != verify_mod.LOCK_OFF and max_fixes > 0
+        # A builder cut off by its turn limit left its own tests half-written.
+        # The first pass after it finishes the build rather than repairing a
+        # failure, so the lock does not hold it to the tests as they were left
+        # (runs 100326 and 100327 were rejected for exactly that). The tests it
+        # touched go to the ticket reviewer instead, and the lock covers every
+        # pass after it.
+        continuation = was_truncated
         # Snapshot before the first repair — the last state of the tests that
         # nobody under pressure to turn the gate green has touched.
-        tests_before = verify_mod.snapshot_tests(project_path) if locking else {}
+        tests_before = (
+            verify_mod.snapshot_tests(project_path) if locking or continuation else {}
+        )
         exempt_output = ""
 
         attempts = 0
@@ -106,9 +122,22 @@ class VerifierAgent(BaseAgent):
                 result = dc_replace(result, truncated=False)
                 was_truncated = False
             print(f"[verify] after repair {attempts}: {result.summary()}", file=sys.stderr)
+            if continuation and attempts == 1:
+                tests_after = verify_mod.snapshot_tests(project_path)
+                touched = verify_mod.changed_tests(tests_before, tests_after)
+                if touched:
+                    print(
+                        f"[verify] the pass that finished the truncated build changed "
+                        f"{len(touched)} test file(s); left to the reviewer: "
+                        + ", ".join(touched),
+                        file=sys.stderr,
+                    )
+                    self._note(run_id, CONTINUATION_TESTS_EVENT, "\n".join(touched))
+                tests_before = tests_after
+                exempt_output = ""
 
         violations: list[str] = []
-        if locking and attempts:
+        if locking and attempts > (1 if continuation else 0):
             violations = verify_mod.lock_violations(
                 tests_before,
                 verify_mod.snapshot_tests(project_path),
@@ -121,7 +150,7 @@ class VerifierAgent(BaseAgent):
                     + ", ".join(violations),
                     file=sys.stderr,
                 )
-                self._note(run_id, "verify_test_lock", "\n".join(violations))
+                self._note(run_id, TEST_LOCK_EVENT, "\n".join(violations))
 
         lock_failed = bool(violations) and lock_mode == verify_mod.LOCK_STRICT
 

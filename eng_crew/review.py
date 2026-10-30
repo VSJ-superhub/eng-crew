@@ -678,10 +678,46 @@ def _ask(ticket: dict, run: dict | None, diff: str, *, run_id: int,
 def _verification_note(run: dict | None) -> str:
     status = (run or {}).get("status") or "unknown"
     if status == VERIFIED:
-        return "The run passed the project's tests and build."
-    if status == "unverified":
-        return "The run produced no verifiable evidence — treat its tests as unproven."
-    return f"The run finished as {status}."
+        note = "The run passed the project's tests and build."
+    elif status == "unverified":
+        note = "The run produced no verifiable evidence — treat its tests as unproven."
+    else:
+        note = f"The run finished as {status}."
+    return note + _test_changes_note((run or {}).get("id"))
+
+
+def _test_changes_note(run_id: int | None) -> str:
+    """Tests the gate let a later pass change, for the reviewer to check.
+
+    The gate does not lock the pass that finishes a truncated build, nor any
+    repair in warn mode. The tests those passes changed were changed after the
+    gate had seen them fail, so the reviewer is the one left to judge them.
+    """
+    if not run_id:
+        return ""
+    from .agents.verifier import CONTINUATION_TESTS_EVENT, TEST_LOCK_EVENT
+
+    reasons = {
+        CONTINUATION_TESTS_EVENT: "The builder hit its turn limit and a second "
+        "pass finished the work. That pass changed these test files",
+        TEST_LOCK_EVENT: "A repair pass changed these test files, which the "
+        "failures it was fixing never named",
+    }
+    parts = []
+    for event in tracker.get_run_events(run_id):
+        reason = reasons.get(event.get("agent_name"))
+        files = [f for f in (event.get("result_text") or "").splitlines() if f.strip()]
+        if reason and files:
+            parts.append(f"{reason}:\n" + "\n".join(f"- {f}" for f in files))
+    if not parts:
+        return ""
+    return (
+        "\n\n" + "\n\n".join(parts) + "\n\nThey were changed after the gate had "
+        "already run, so nothing checked them but you. For each, check that it "
+        "still tests what its criterion asks: no assertion loosened or removed, "
+        "nothing skipped, no expected value changed to match the code rather "
+        "than the criterion. A criterion whose only test was weakened is not met."
+    )
 
 
 def _advance(ticket_id: int, reasons: str) -> str:
