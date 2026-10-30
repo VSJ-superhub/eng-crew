@@ -203,6 +203,11 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   without the change fails the run. A run that adds no tests skips the phase,
   unless the task carried acceptance criteria and the project has a test suite:
   then adding no tests fails the run too, since test-first never happened.
+  A repair pass may not rewrite a test the failures it was handed never named
+  (the test lock) — except the pass that finishes a build cut off by its turn
+  limit, which is still the build writing its own tests. The test files that
+  pass changed, and any a warn-mode lock let through, are named to the ticket
+  reviewer, who is told to check they were not weakened.
 - The **Entroly** context optimizer (`eng_crew/entroly_integration.py`) is an
   optional extra, off by default (`ENTROLY_ENABLED`, with `ENTROLY_QUALITY` and
   `ENTROLY_TOKEN_BUDGET`). Enabled and installed, a run refreshes the project's
