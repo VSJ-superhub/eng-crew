@@ -5,6 +5,7 @@ Written without fixtures so they run under a bare runner as well as pytest.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -184,6 +185,84 @@ def test_run_check_times_out_as_failure():
     res = run_check(check, _tmp(), timeout=1)
     assert res.status == FAILED
     assert "timed out" in res.output
+
+
+# --- launching shimmed commands (npm & friends on Windows) --------------
+#
+# `npm` on Windows is `npm.cmd`; CreateProcess cannot start it by its bare
+# name, so a bare ["npm", ...] raised [WinError 2] and every JS/TS run came
+# back unverified.
+
+
+def _shim(root: Path, name: str, message: str) -> Path:
+    """A tiny executable on PATH named like a toolchain, .cmd on Windows."""
+    if os.name == "nt":
+        path = root / f"{name}.cmd"
+        path.write_text("@echo off\r\necho " + message, encoding="utf-8")
+    else:
+        path = root / name
+        path.write_text("#!/bin/sh\necho " + message, encoding="utf-8")
+        path.chmod(0o755)
+    return path
+
+
+def test_run_check_launches_a_shimmed_command_by_its_resolved_path():
+    """A .cmd/.bat shim is resolved through PATHEXT and actually executed."""
+    bin_dir = _tmp()
+    _shim(bin_dir, "npmshim", "shim-ran")
+
+    launched: list[list[str]] = []
+    real_run = verify.subprocess.run
+
+    def spy(cmd, *a, **kw):
+        launched.append(list(cmd))
+        return real_run(cmd, *a, **kw)
+
+    old_path = os.environ["PATH"]
+    verify.subprocess.run = spy
+    os.environ["PATH"] = str(bin_dir) + os.pathsep + old_path
+    try:
+        res = run_check(Check("npmshim", ["npmshim", "run", "lint"], "lint"), _tmp(), timeout=30)
+    finally:
+        verify.subprocess.run = real_run
+        os.environ["PATH"] = old_path
+
+    # Launched by the path shutil.which resolved, not the bare name, and
+    # without a shell.
+    assert launched, "the check was never launched"
+    assert Path(launched[-1][0]).is_file()
+    assert launched[-1][1:] == ["run", "lint"]
+    assert res.status == PASSED
+    assert "shim-ran" in res.output
+
+
+def test_run_check_fails_when_an_available_command_cannot_be_launched():
+    """A positive probe followed by an OSError is a failure, never a skip."""
+    boom = OSError(2, "[WinError 2] The system cannot find the file specified")
+    real_run = verify.subprocess.run
+    real_which = verify.shutil.which
+
+    def explode(cmd, *a, **kw):
+        raise boom
+
+    verify.subprocess.run = explode
+    verify.shutil.which = lambda exe, *a, **kw: f"/usr/bin/{exe}"
+    try:
+        res = run_check(Check("npm test", ["npm", "test", "--silent"], "test"), _tmp(), timeout=30)
+    finally:
+        verify.subprocess.run = real_run
+        verify.shutil.which = real_which
+
+    assert res.status == FAILED
+    assert "WinError 2" in res.output
+
+
+def test_run_check_still_skips_a_toolchain_that_is_not_installed():
+    """Nothing on PATH is still a quiet skip, as before."""
+    check = Check("ghostly", ["eng-crew-no-such-tool-zzz", "--version"], "test")
+    res = run_check(check, _tmp(), timeout=30)
+    assert res.status == SKIPPED
+    assert "not installed" in res.output
 
 
 # --- false completion ---------------------------------------------------

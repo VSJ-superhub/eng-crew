@@ -7,7 +7,9 @@ run that leaves the tree broken cannot be recorded as a success.
 
 Detection is deliberately conservative: a check is only emitted when the
 project clearly supports it, and a missing toolchain yields SKIPPED rather than
-FAILED. A project with no detectable checks is "unverified", not "failed".
+FAILED. A project with no detectable checks is "unverified", not "failed". A
+toolchain that is *present* but cannot be launched is a different thing, and is
+reported FAILED: a skip there would quietly leave the run unverified.
 """
 from __future__ import annotations
 
@@ -342,6 +344,41 @@ def _tool_available(check: Check) -> bool:
     return shutil.which(exe) is not None
 
 
+def resolved_cmd(cmd: list[str]) -> list[str]:
+    """``cmd`` with its executable resolved to a real path on disk.
+
+    On Windows, npm, eslint and tsc are `.cmd` shims. CreateProcess cannot
+    start one from the bare name "npm" — it raises [WinError 2] — so without
+    this every JS/TS project's checks died before they ran. ``shutil.which``
+    applies PATHEXT and hands back the `npm.cmd` that CreateProcess *can*
+    start, which keeps us on ``shell=False``: the arguments still go to the
+    process untouched by a shell.
+
+    A command given as a path, or one nothing on PATH answers to, is returned
+    as it came.
+    """
+    exe = cmd[0]
+    seps = [os.sep] + ([os.altsep] if os.altsep else [])
+    if any(sep in exe for sep in seps):
+        return list(cmd)
+    found = shutil.which(exe)
+    return [found, *cmd[1:]] if found else list(cmd)
+
+
+def _launch(cmd: list[str], cwd: Path, timeout: int) -> subprocess.CompletedProcess:
+    """Run a detected check command. Never with a shell."""
+    return subprocess.run(
+        resolved_cmd(cmd),
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        shell=False,
+    )
+
+
 def run_check(check: Check, project_path: str | Path, timeout: int = 300) -> CheckResult:
     root = Path(project_path).expanduser().resolve()
     is_python = check.cmd[0] == sys.executable or Path(check.cmd[0]).stem.startswith("python")
@@ -352,23 +389,23 @@ def run_check(check: Check, project_path: str | Path, timeout: int = 300) -> Che
         return CheckResult(check.name, check.kind, SKIPPED, "toolchain not installed", printable)
 
     try:
-        proc = subprocess.run(
-            check.cmd,
-            cwd=root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            shell=False,
-        )
+        proc = _launch(check.cmd, root, timeout)
     except subprocess.TimeoutExpired:
         return CheckResult(
             check.name, check.kind, FAILED, f"timed out after {timeout}s", printable
         )
     except OSError as exc:
-        # Executable vanished between the which() probe and the call.
-        return CheckResult(check.name, check.kind, SKIPPED, str(exc), printable)
+        # The probe said this toolchain is installed, so a launch failure is a
+        # real problem with the project or the environment, not an absence.
+        # Skipping it quietly left JS/TS runs on Windows "unverified", and the
+        # ticket reviewer then refused to judge them.
+        return CheckResult(
+            check.name,
+            check.kind,
+            FAILED,
+            f"could not launch {printable}: {exc}",
+            printable,
+        )
 
     output = ((proc.stdout or "") + (proc.stderr or "")).strip()
 
@@ -457,16 +494,7 @@ def _findings_at_base(
         if check.accepts_paths and not existing:
             return []  # every file the check judges is new in this run
         cmd = [*check.cmd, *existing] if check.accepts_paths else list(check.cmd)
-        proc = subprocess.run(
-            cmd,
-            cwd=worktree,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            shell=False,
-        )
+        proc = _launch(cmd, worktree, timeout)
         output = ((proc.stdout or "") + (proc.stderr or "")).strip()
         return [ln for ln in output.splitlines() if _blames(ln, existing)]
     except Exception as exc:
@@ -794,16 +822,7 @@ def verify_red(
             return CheckResult(name, RED, SKIPPED, "could not stage tests into base tree", printable)
 
         try:
-            proc = subprocess.run(
-                cmd,
-                cwd=worktree,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                shell=False,
-            )
+            proc = _launch(cmd, worktree, timeout)
         except subprocess.TimeoutExpired:
             return CheckResult(name, RED, SKIPPED, f"timed out after {timeout}s", printable)
         except OSError as exc:
