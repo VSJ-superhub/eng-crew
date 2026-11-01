@@ -213,6 +213,43 @@ ticket `ready` in the queue and starts nothing.
 `start_services` keeps the bot's output in `<data dir>/logs/discord_bot.log`, so
 a bot that dies at startup leaves its reason there and in `services_status()`.
 
+### Getting told when a ticket needs you
+
+The bot is for asking. This is for being told — a push to your phone the moment
+a ticket is waiting on you, with no bot running and no browser open.
+
+```bash
+# in your .env
+ENG_CREW_DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/.../...
+ENG_CREW_DISCORD_NOTIFY_USER_ID=123456789012345678
+```
+
+**The webhook URL:** in Discord, open the channel you want the messages in →
+*Edit Channel* → *Integrations* → *Webhooks* → *New Webhook* → *Copy Webhook
+URL*. Treat it like a password — anyone holding it can post to that channel.
+eng-crew never logs it, never writes it into a ticket's history and never shows
+it on the dashboard.
+
+**Your user id** (optional, but it is what makes a phone actually buzz): Discord
+→ *User Settings* → *Advanced* → turn on **Developer Mode**, then right-click
+your own name → *Copy User ID*. You are then the only person the message is
+allowed to mention: an `@everyone` or `@here` sitting in a ticket's title pings
+nobody. Leave it unset and no one is mentioned at all.
+
+You get a message when a ticket **is done**, when the reviewer **asks for
+changes** or **could not be reached**, when a **run fails** or the ticket is
+**rejected**, and when its **budget stops it**. Nothing else posts. Each one
+names the ticket, its project, what it has spent against its budget, the
+one-line reason — the review verdict, the verification gate's failure line, or
+the budget note — and links straight to the ticket on the dashboard (set
+`ENG_CREW_DASHBOARD_URL` if you reach the dashboard through a tunnel or proxy).
+
+The push comes from the ticket lifecycle itself, so it does not matter which
+surface started the build — the CLI, the dashboard, MCP `run_task`, Discord or a
+queue pull all notify the same way. It is best-effort: a webhook that times out
+or errors is logged and dropped, never failing or slowing a build. With no
+webhook configured, nothing is posted and nothing else changes.
+
 ## CLI reference
 
 ```

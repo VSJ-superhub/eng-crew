@@ -454,6 +454,14 @@ def move(ticket_id: int, to_status: str, actor: str, note: str = "",
         from . import retro
         retro.on_shipped(ticket_id, settings)
 
+    # And the push to whoever is waiting, for the same reason again: a ticket
+    # that is done, failed or rejected is a ticket needing a person, and this
+    # is the one place every surface that moves one passes through. It never
+    # raises (:func:`eng_crew.notify.ticket_event`) — the move already landed.
+    from . import notify as notify_mod
+    notify_mod.on_transition(ticket_id, from_status, to_status, note,
+                             settings=settings)
+
     return tracker.get_backlog_item(ticket_id) or ticket
 
 
@@ -469,7 +477,13 @@ def note(ticket_id: int, actor: str, text: str) -> bool:
     if not ticket:
         return False
     status = ticket.get("status") or BACKLOG
-    return _tracker().add_ticket_event(ticket_id, status, status, actor, text)
+    recorded = _tracker().add_ticket_event(ticket_id, status, status, actor, text)
+    if recorded:
+        # A changes-requested verdict, an unavailable review and a budget stop
+        # move the ticket nowhere, which is exactly why somebody has to be told.
+        from . import notify as notify_mod
+        notify_mod.on_note(ticket_id, actor, text)
+    return recorded
 
 
 def events(ticket_id: int) -> list[dict]:

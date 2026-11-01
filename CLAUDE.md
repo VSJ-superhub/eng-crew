@@ -156,6 +156,26 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   instead of being reported as "started" and then, silently, "stopped".
   `eng-crew discord [--check]` runs it in the foreground with the reason
   printed at you.
+- A ticket that needs a person reaches one (`eng_crew/notify.py`): with
+  `ENG_CREW_DISCORD_WEBHOOK_URL` set to a Discord channel webhook, eng-crew
+  posts when a ticket moves to `done`, when a review comes back
+  `changes_requested` or is recorded as review unavailable, when its run
+  finishes `failed` or the ticket is `rejected`, and when its budget stops it.
+  No other transition posts. The push fires from the ticket lifecycle itself —
+  `tickets.move` and `tickets.note`, beside the budget check and the retro — so
+  a build started from the CLI, the dashboard, MCP `run_task`, Discord or a
+  queue pull all notify identically, and the Discord bot does not have to be
+  running. Each message names the ticket id, title, project, what happened, the
+  spend against budget, the one-line reason (the review verdict, the
+  verification gate's own failure line, or the budget note) and a dashboard link
+  to the ticket. `ENG_CREW_DISCORD_NOTIFY_USER_ID` @mentions you so the mobile
+  push fires, and is the *only* mention the message allows: `@everyone`, `@here`
+  and any mention in a ticket's own text ping nobody. Posting is best-effort —
+  a timeout (4s), a network error or a non-2xx reply is logged and dropped,
+  never failing or delaying a build or a status change — one transition posts
+  once, and the webhook URL is a bearer credential, so it is never written to a
+  log, to `ticket_events` or to the dashboard. With no webhook configured
+  nothing is posted and behaviour is exactly as it was.
 - Every agent CLI call eng-crew makes — builders, repair passes, the ticket
   reviewer, the manager, the discussion agent — runs with an explicit MCP
   configuration and `--strict-mcp-config` (`eng_crew/mcp_policy.py`), so it
