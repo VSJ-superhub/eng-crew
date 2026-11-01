@@ -5,6 +5,7 @@ Written without fixtures so they run under a bare runner as well as pytest.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -184,6 +185,84 @@ def test_run_check_times_out_as_failure():
     res = run_check(check, _tmp(), timeout=1)
     assert res.status == FAILED
     assert "timed out" in res.output
+
+
+# --- launching shimmed commands (npm & friends on Windows) --------------
+#
+# `npm` on Windows is `npm.cmd`; CreateProcess cannot start it by its bare
+# name, so a bare ["npm", ...] raised [WinError 2] and every JS/TS run came
+# back unverified.
+
+
+def _shim(root: Path, name: str, message: str) -> Path:
+    """A tiny executable on PATH named like a toolchain, .cmd on Windows."""
+    if os.name == "nt":
+        path = root / f"{name}.cmd"
+        path.write_text("@echo off\r\necho " + message, encoding="utf-8")
+    else:
+        path = root / name
+        path.write_text("#!/bin/sh\necho " + message, encoding="utf-8")
+        path.chmod(0o755)
+    return path
+
+
+def test_run_check_launches_a_shimmed_command_by_its_resolved_path():
+    """A .cmd/.bat shim is resolved through PATHEXT and actually executed."""
+    bin_dir = _tmp()
+    _shim(bin_dir, "npmshim", "shim-ran")
+
+    launched: list[list[str]] = []
+    real_run = verify.subprocess.run
+
+    def spy(cmd, *a, **kw):
+        launched.append(list(cmd))
+        return real_run(cmd, *a, **kw)
+
+    old_path = os.environ["PATH"]
+    verify.subprocess.run = spy
+    os.environ["PATH"] = str(bin_dir) + os.pathsep + old_path
+    try:
+        res = run_check(Check("npmshim", ["npmshim", "run", "lint"], "lint"), _tmp(), timeout=30)
+    finally:
+        verify.subprocess.run = real_run
+        os.environ["PATH"] = old_path
+
+    # Launched by the path shutil.which resolved, not the bare name, and
+    # without a shell.
+    assert launched, "the check was never launched"
+    assert Path(launched[-1][0]).is_file()
+    assert launched[-1][1:] == ["run", "lint"]
+    assert res.status == PASSED
+    assert "shim-ran" in res.output
+
+
+def test_run_check_fails_when_an_available_command_cannot_be_launched():
+    """A positive probe followed by an OSError is a failure, never a skip."""
+    boom = OSError(2, "[WinError 2] The system cannot find the file specified")
+    real_run = verify.subprocess.run
+    real_which = verify.shutil.which
+
+    def explode(cmd, *a, **kw):
+        raise boom
+
+    verify.subprocess.run = explode
+    verify.shutil.which = lambda exe, *a, **kw: f"/usr/bin/{exe}"
+    try:
+        res = run_check(Check("npm test", ["npm", "test", "--silent"], "test"), _tmp(), timeout=30)
+    finally:
+        verify.subprocess.run = real_run
+        verify.shutil.which = real_which
+
+    assert res.status == FAILED
+    assert "WinError 2" in res.output
+
+
+def test_run_check_still_skips_a_toolchain_that_is_not_installed():
+    """Nothing on PATH is still a quiet skip, as before."""
+    check = Check("ghostly", ["eng-crew-no-such-tool-zzz", "--version"], "test")
+    res = run_check(check, _tmp(), timeout=30)
+    assert res.status == SKIPPED
+    assert "not installed" in res.output
 
 
 # --- false completion ---------------------------------------------------
@@ -488,3 +567,84 @@ def test_violations_in_files_the_run_never_touched_are_not_its_problem():
     )
     assert res.status == SKIPPED
     assert "did not touch" in res.output
+
+
+# --- a launch failure is never a skip, wherever the gate launches -------
+#
+# `_launch` is called from four places: a test/build check, a lint check, the
+# lint baseline in the base tree, and the red phase. A positive availability
+# probe followed by a launch failure means a broken environment, not a missing
+# toolchain, and every one of them must say so rather than skip.
+
+
+def _boom() -> OSError:
+    return OSError(2, "[WinError 2] The system cannot find the file specified")
+
+
+def test_lint_check_reports_a_launch_failure_instead_of_skipping_it():
+    """A launch failure names no changed file, so the "violations in files this
+    run did not touch" filter must not quietly turn it into a skip. tsc is the
+    case that bites: it is run whole, so the message carries no path at all."""
+    boom = _boom()
+    real_launch = verify._launch
+    real_which = verify.shutil.which
+
+    def explode(cmd, cwd, timeout):
+        raise boom
+
+    verify._launch = explode
+    verify.shutil.which = lambda exe, *a, **kw: f"/usr/bin/{exe}"
+    try:
+        check = Check("tsc", ["tsc", "--noEmit"], verify.LINT, suffixes=(".ts",))
+        res = verify.run_lint_check(check, _tmp(), ["app/thing.ts"], timeout=30)
+    finally:
+        verify._launch = real_launch
+        verify.shutil.which = real_which
+
+    assert res.status == FAILED
+    assert "WinError 2" in res.output
+
+
+def test_lint_check_still_skips_a_toolchain_that_is_not_installed():
+    check = Check("ghostly", ["eng-crew-no-such-tool-zzz", "--version"], verify.LINT,
+                  suffixes=(".py",), accepts_paths=True)
+    res = verify.run_lint_check(check, _tmp(), ["app/thing.py"], timeout=30)
+    assert res.status == SKIPPED
+    assert "not installed" in res.output
+
+
+def test_a_base_tree_launch_failure_leaves_the_run_answering_for_its_findings():
+    """The lint baseline runs in a scratch worktree. If the check starts in the
+    project but not there, there is no honest baseline: the findings stand, and
+    the report says why nothing was compared."""
+    root = _lint_repo()
+    (root / "app" / "x.py").write_text("x = 1  # BAD\nz = 3  # BAD\n", encoding="utf-8")
+    boom = _boom()
+    real_launch = verify._launch
+
+    def only_in_the_project(cmd, cwd, timeout):
+        if Path(cwd).resolve() != root.resolve():
+            raise boom
+        return real_launch(cmd, cwd, timeout)
+
+    verify._launch = only_in_the_project
+    try:
+        res = verify.run_lint_check(
+            _fake_lint_check(), root, verify.changed_files(root), timeout=120, base="HEAD"
+        )
+    finally:
+        verify._launch = real_launch
+
+    assert res.status == FAILED
+    assert "E999" in res.output, "the run's own findings are still reported"
+    assert "could not launch" in res.output
+    assert "WinError 2" in res.output
+
+
+def test_resolved_cmd_docstring_warns_about_cmd_exe_and_fixed_arguments():
+    """Resolving to `npm.cmd` hands the command to cmd.exe, which parses the
+    arguments. The docstring is where the next reader learns not to pass
+    anything a user or a model wrote."""
+    doc = (verify.resolved_cmd.__doc__ or "").lower()
+    assert "cmd.exe" in doc
+    assert "argument" in doc

@@ -202,3 +202,75 @@ def test_leaves_no_worktree_behind():
         assert not any("redphase" in w["path"] for w in after)
     finally:
         _cleanup(root)
+
+
+# --- the replay itself failing to launch --------------------------------
+#
+# The red phase shells out like every other check. A pytest the probe found
+# but that then would not start used to be recorded as a skip, which reads as
+# "there was nothing to replay" — the one thing it did not mean.
+
+
+def _stage_a_red_test(root: Path) -> None:
+    _write(root, "app.py", "def compute():\n    return 2\n")
+    _write(
+        root,
+        "tests/test_feature.py",
+        "from app import compute\n\n\ndef test_compute():\n    assert compute() == 2\n",
+    )
+
+
+def test_launch_failure_after_a_positive_probe_is_a_failed_red_check():
+    root = _repo()
+    boom = OSError(2, "[WinError 2] The system cannot find the file specified")
+    real_launch = verify._launch
+
+    def explode(cmd, cwd, timeout):
+        raise boom
+
+    try:
+        _stage_a_red_test(root)
+        verify._launch = explode
+        result = verify_red(root, timeout=120)
+    finally:
+        verify._launch = real_launch
+        _cleanup(root)
+
+    assert result.status == FAILED, result.output
+    assert "WinError 2" in result.output
+
+
+def test_red_phase_skips_when_the_test_runner_is_not_installed():
+    """Genuinely absent is still a skip, in this path as in every other."""
+    root = _repo()
+    real_available = verify._tool_available
+    try:
+        _stage_a_red_test(root)
+        verify._tool_available = lambda check: False
+        result = verify_red(root, timeout=120)
+    finally:
+        verify._tool_available = real_available
+        _cleanup(root)
+
+    assert result.status == SKIPPED
+    assert "not installed" in result.output
+
+
+def test_red_phase_timeout_is_reported_as_it_is_today():
+    """A timeout is a slow replay, not a verdict about the tests: unchanged."""
+    root = _repo()
+    real_launch = verify._launch
+
+    def stall(cmd, cwd, timeout):
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+    try:
+        _stage_a_red_test(root)
+        verify._launch = stall
+        result = verify_red(root, timeout=7)
+    finally:
+        verify._launch = real_launch
+        _cleanup(root)
+
+    assert result.status == SKIPPED
+    assert "timed out after 7s" in result.output
