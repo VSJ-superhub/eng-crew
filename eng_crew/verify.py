@@ -63,6 +63,10 @@ class CheckResult:
     status: str
     output: str = ""
     cmd: str = ""
+    # The probe found this toolchain and it still would not start. Set so the
+    # filters downstream of a check — which look for findings that name the
+    # run's own files — cannot mistake the absence of findings for a clean run.
+    launch_error: bool = False
 
     @property
     def ok(self) -> bool:
@@ -356,6 +360,14 @@ def resolved_cmd(cmd: list[str]) -> list[str]:
 
     A command given as a path, or one nothing on PATH answers to, is returned
     as it came.
+
+    One consequence to keep in mind: Windows cannot execute a `.cmd`/`.bat`
+    directly either, so CreateProcess runs the resolved shim through cmd.exe,
+    which re-parses the argument string with its own metacharacters (`&`,
+    `|`, `^`, `"`). ``shell=False`` does not protect the arguments here. Only
+    pass arguments eng-crew constructs itself — a detected check's fixed flags
+    and repo-relative paths — never text from a user, a model or a project
+    file.
     """
     exe = cmd[0]
     seps = [os.sep] + ([os.altsep] if os.altsep else [])
@@ -363,6 +375,21 @@ def resolved_cmd(cmd: list[str]) -> list[str]:
         return list(cmd)
     found = shutil.which(exe)
     return [found, *cmd[1:]] if found else list(cmd)
+
+
+class LaunchFailed(Exception):
+    """A check the availability probe found, launched, and would not start."""
+
+
+def _launch_failure(printable: str, exc: OSError) -> str:
+    """How every launch path words a check that would not start.
+
+    The probe said this toolchain is installed, so a launch failure is a real
+    problem with the project or the environment, not an absence. Skipping it
+    quietly left JS/TS runs on Windows "unverified", and the ticket reviewer
+    then refused to judge them.
+    """
+    return f"could not launch {printable}: {exc}"
 
 
 def _launch(cmd: list[str], cwd: Path, timeout: int) -> subprocess.CompletedProcess:
@@ -395,16 +422,13 @@ def run_check(check: Check, project_path: str | Path, timeout: int = 300) -> Che
             check.name, check.kind, FAILED, f"timed out after {timeout}s", printable
         )
     except OSError as exc:
-        # The probe said this toolchain is installed, so a launch failure is a
-        # real problem with the project or the environment, not an absence.
-        # Skipping it quietly left JS/TS runs on Windows "unverified", and the
-        # ticket reviewer then refused to judge them.
         return CheckResult(
             check.name,
             check.kind,
             FAILED,
-            f"could not launch {printable}: {exc}",
+            _launch_failure(printable, exc),
             printable,
+            launch_error=True,
         )
 
     output = ((proc.stdout or "") + (proc.stderr or "")).strip()
@@ -494,9 +518,17 @@ def _findings_at_base(
         if check.accepts_paths and not existing:
             return []  # every file the check judges is new in this run
         cmd = [*check.cmd, *existing] if check.accepts_paths else list(check.cmd)
-        proc = _launch(cmd, worktree, timeout)
+        try:
+            proc = _launch(cmd, worktree, timeout)
+        except OSError as exc:
+            # The check started in the project tree, so this is the same broken
+            # environment every other launch path reports — not a baseline we
+            # merely could not build. Say so rather than compare against silence.
+            raise LaunchFailed(_launch_failure(" ".join(cmd), exc)) from exc
         output = ((proc.stdout or "") + (proc.stderr or "")).strip()
         return [ln for ln in output.splitlines() if _blames(ln, existing)]
+    except LaunchFailed:
+        raise
     except Exception as exc:
         log.info("verify: no lint baseline for %s (%s)", check.name, exc)
         return None
@@ -538,7 +570,9 @@ def run_lint_check(
         scoped = dataclasses.replace(check, cmd=[*check.cmd, *relevant])
 
     result = run_check(scoped, project_path, timeout=timeout)
-    if result.status != FAILED:
+    if result.status != FAILED or result.launch_error:
+        # A launch failure names no file, so the filters below would read it as
+        # "no findings of ours" and skip the check. It stands as a failure.
         return result
 
     own = [line for line in result.output.splitlines() if _blames(line, relevant)]
@@ -549,7 +583,15 @@ def run_lint_check(
             output="only pre-existing violations, in files this run did not touch",
         )
 
-    before = _findings_at_base(check, project_path, base, relevant, timeout) if base else None
+    try:
+        before = _findings_at_base(check, project_path, base, relevant, timeout) if base else None
+    except LaunchFailed as exc:
+        return dataclasses.replace(
+            result,
+            output=(
+                "\n".join(own) + f"\n\nNo baseline to compare against: {exc}"
+            )[:4000],
+        )
     if before is not None:
         own = new_findings(own, before)
         if not own:
@@ -806,6 +848,13 @@ def verify_red(
     cmd = [python_for(root), "-m", "pytest", "-q", "--no-header", "--tb=line", *replayed]
     printable = "python -m pytest " + " ".join(replayed) + f"  (against {base})"
 
+    # Probe before building a worktree, so a project without pytest installed
+    # is skipped here as it is in every other path — and so a launch failure
+    # after this point can only mean a broken environment.
+    if not _tool_available(Check(name=name, cmd=cmd, kind=RED)):
+        log.info("red: pytest unavailable — skipping")
+        return CheckResult(name, RED, SKIPPED, "toolchain not installed", printable)
+
     worktree = None
     try:
         worktree = git_skill.create_detached_worktree(root, base)
@@ -826,7 +875,10 @@ def verify_red(
         except subprocess.TimeoutExpired:
             return CheckResult(name, RED, SKIPPED, f"timed out after {timeout}s", printable)
         except OSError as exc:
-            return CheckResult(name, RED, SKIPPED, str(exc), printable)
+            return CheckResult(
+                name, RED, FAILED, _launch_failure(printable, exc), printable,
+                launch_error=True,
+            )
 
         output = ((proc.stdout or "") + (proc.stderr or "")).strip()
 
