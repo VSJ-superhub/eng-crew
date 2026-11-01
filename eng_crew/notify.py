@@ -93,11 +93,6 @@ _GATE_MARKERS = (
 #: rejection that is really a failed run is reported as one.
 _RUN_NOTE = re.compile(r"\brun (\d+) (?:finished as (\w+)|raised)")
 
-#: The note prefixes that mean "a person is needed", written by
-#: :mod:`eng_crew.review` and :mod:`eng_crew.budget`. A budget *raise* shares
-#: the budget prefix and is nobody's emergency, so the stop is matched in full.
-_UNAVAILABLE_PREFIX = "review unavailable:"
-_BUDGET_STOP_PREFIX = "budget: stopped before"
 
 #: A mention, as Discord writes one: a user, a nickname, or a role.
 _MENTION = re.compile(r"<@[!&]?(\d+)>")
@@ -328,21 +323,21 @@ def on_note(ticket_id: int, actor: str, text: str,
         )
     if note.startswith(resolve_mod.NOTE_PREFIX):
         outcome = note[len(resolve_mod.NOTE_PREFIX):].strip()
-        kind = RESOLVE_FAILED if outcome.startswith("could not") else RESOLVED
+        kind = RESOLVE_FAILED if outcome.startswith(resolve_mod.FAILED_OUTCOME) else RESOLVED
         return ticket_event(ticket_id, kind, outcome, settings=settings)
     if actor == review_mod.REVIEWER_ACTOR:
-        changes = f"review: {review_mod.CHANGES_REQUESTED}"
+        changes = f"{review_mod.NOTE_PREFIX} {review_mod.CHANGES_REQUESTED}"
         if note.startswith(changes):
             return ticket_event(
                 ticket_id, CHANGES_REQUESTED,
                 note[len(changes):].lstrip(" —-:"), settings=settings,
             )
-        if note.startswith(_UNAVAILABLE_PREFIX):
+        if note.startswith(review_mod.UNAVAILABLE_PREFIX):
             return ticket_event(
                 ticket_id, REVIEW_UNAVAILABLE,
-                note[len(_UNAVAILABLE_PREFIX):].strip(), settings=settings,
+                note[len(review_mod.UNAVAILABLE_PREFIX):].strip(), settings=settings,
             )
-    if actor == budget_mod.ACTOR and note.startswith(_BUDGET_STOP_PREFIX):
+    if actor == budget_mod.ACTOR and note.startswith(budget_mod.STOP_NOTE_PREFIX):
         return ticket_event(
             ticket_id, BUDGET_STOPPED,
             note[len(f"{budget_mod.NOTE_PREFIX}"):].strip(), settings=settings,

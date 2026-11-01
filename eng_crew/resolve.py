@@ -52,6 +52,8 @@ ACTOR = "resolver"
 
 #: Every note this module writes starts here.
 NOTE_PREFIX = "resolve:"
+#: How a resolution that failed is noted (after NOTE_PREFIX).
+FAILED_OUTCOME = "could not resolve the conflicts"
 
 #: The run a resolution is charged to is titled with this.
 TASK_PREFIX = "Resolve merge conflicts"
@@ -240,7 +242,7 @@ def _resolve(ticket_id: int, settings: Any, credit: str = ACTOR) -> Resolution:
             pass
         reason = str(exc) or type(exc).__name__
         tracker.finish_run(run_id, status="failed", final_summary=reason)
-        tickets.note(ticket_id, credit, f"{NOTE_PREFIX} could not resolve the conflicts "
+        tickets.note(ticket_id, credit, f"{NOTE_PREFIX} {FAILED_OUTCOME} "
                                        f"merging {named} onto HEAD — {reason}")
         if isinstance(exc, ResolveFailed):
             raise

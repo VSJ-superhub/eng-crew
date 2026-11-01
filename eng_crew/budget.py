@@ -46,6 +46,8 @@ ACTOR = "budget"
 
 #: Every note this module writes starts here, so the history is greppable.
 NOTE_PREFIX = "budget:"
+#: How a stop is noted, distinct from a budget change sharing NOTE_PREFIX.
+STOP_NOTE_PREFIX = f"{NOTE_PREFIX} stopped before"
 
 #: The sentence a stopped ticket's history ends on. A ticket stopped for budget
 #: is not failed and not retryable — it is waiting on someone with authority.
@@ -188,6 +190,6 @@ def _record_stop(ticket_id: int, step: str, state: dict) -> None:
 
     tickets.note(
         ticket_id, ACTOR,
-        f"{NOTE_PREFIX} stopped before {step} — ${state['spent_usd']:.2f} spent of a "
+        f"{STOP_NOTE_PREFIX} {step} — ${state['spent_usd']:.2f} spent of a "
         f"${state['budget_usd']:.2f} budget; {ESCALATION}",
     )

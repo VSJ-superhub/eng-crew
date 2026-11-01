@@ -358,3 +358,46 @@ def test_the_settings_are_documented(doc):
     text = (Path(__file__).resolve().parents[1] / doc).read_text(encoding="utf-8")
     assert "ENG_CREW_DISCORD_WEBHOOK_URL" in text
     assert "ENG_CREW_DISCORD_NOTIFY_USER_ID" in text
+
+
+# -- the notes are recognised as their writers write them ----------------------
+#
+# The notifier recognises these events by how the reviewer and the budget word
+# their notes. Producing each note through the code that really writes it, not
+# a copy of the wording, means rewording one fails here instead of silently
+# ending the notification.
+
+def test_the_reviewers_own_changes_requested_note_posts(db, webhook, posts):
+    from eng_crew import review
+
+    ticket_id = building()
+    tickets.move(ticket_id, tickets.IN_REVIEW, "queue", "run 1 finished as completed")
+    posts.clear()
+    tickets.note(ticket_id, review.REVIEWER_ACTOR,
+                 review._note(review.CHANGES_REQUESTED, "criterion 2 has no test"))
+
+    assert len(posts) == 1
+    assert "changes requested" in contents(posts)[0]
+    assert "criterion 2 has no test" in contents(posts)[0]
+
+
+def test_the_reviewers_own_unavailable_note_posts(db, webhook, posts):
+    from eng_crew import review
+
+    ticket_id = building()
+    tickets.move(ticket_id, tickets.IN_REVIEW, "queue", "run 1 finished as completed")
+    posts.clear()
+    review._unavailable(ticket_id, "no API key for the ticket reviewer")
+
+    assert len(posts) == 1
+    assert "review unavailable" in contents(posts)[0]
+    assert "no API key" in contents(posts)[0]
+
+
+def test_the_budgets_own_stop_note_posts(db, webhook, posts):
+    ticket_id = building()
+    posts.clear()
+    budget._record_stop(ticket_id, "a review", {"spent_usd": 15.94, "budget_usd": 15.0})
+
+    assert len(posts) == 1
+    assert "15.94" in contents(posts)[0]
