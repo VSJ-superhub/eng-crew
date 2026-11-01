@@ -31,6 +31,11 @@ log = logging.getLogger(__name__)
 # budget. A truncated implementation must never pass the gate.
 TRUNCATION_MARKER = "[TRUNCATED:"
 
+# How much of a check's output is kept for storage and for a repair pass. It is
+# a storage cap, never a judgement cap: the lint baseline comparison is done on
+# the complete output and only the result it produces is cut down to this.
+MAX_CHECK_OUTPUT = 4000
+
 PASSED = "passed"
 FAILED = "failed"
 SKIPPED = "skipped"
@@ -108,7 +113,7 @@ class VerificationResult:
         ran = [r.name for r in self.results if r.status == PASSED]
         return f"PASSED ({', '.join(ran)})"
 
-    def failure_report(self, max_chars: int = 4000) -> str:
+    def failure_report(self, max_chars: int = MAX_CHECK_OUTPUT) -> str:
         """Failure output, for feeding back to a repair pass."""
         chunks = []
         if self.truncated:
@@ -406,7 +411,15 @@ def _launch(cmd: list[str], cwd: Path, timeout: int) -> subprocess.CompletedProc
     )
 
 
-def run_check(check: Check, project_path: str | Path, timeout: int = 300) -> CheckResult:
+def run_check(
+    check: Check,
+    project_path: str | Path,
+    timeout: int = 300,
+    max_output: int | None = MAX_CHECK_OUTPUT,
+) -> CheckResult:
+    """Run one check. ``max_output`` caps the stored output; None keeps it whole,
+    which is what the lint path needs — its baseline comparison has to see every
+    finding, and a cut-off last line would be blamed on the run."""
     root = Path(project_path).expanduser().resolve()
     is_python = check.cmd[0] == sys.executable or Path(check.cmd[0]).stem.startswith("python")
     printable = ("python " + " ".join(check.cmd[1:])) if is_python else " ".join(check.cmd)
@@ -438,7 +451,9 @@ def run_check(check: Check, project_path: str | Path, timeout: int = 300) -> Che
         return CheckResult(check.name, check.kind, SKIPPED, "no tests collected", printable)
 
     status = PASSED if proc.returncode == 0 else FAILED
-    return CheckResult(check.name, check.kind, status, output[:4000], printable)
+    if max_output is not None:
+        output = output[:max_output]
+    return CheckResult(check.name, check.kind, status, output, printable)
 
 
 def changed_files(project_path: str | Path, base: str = "HEAD") -> list[str]:
@@ -491,6 +506,29 @@ def new_findings(after: list[str], before: list[str]) -> list[str]:
             continue
         fresh.append(line)
     return fresh
+
+
+def cap_findings(findings: list[str], max_chars: int = MAX_CHECK_OUTPUT) -> str:
+    """Findings as text, cut to ``max_chars`` on finding boundaries.
+
+    Only what is stored and handed to a repair pass is cut, never what the
+    baseline comparison judges, and never mid-line: half a finding is not a
+    finding. A report that left some out says how many.
+    """
+    kept: list[str] = []
+    used = 0
+    for line in findings:
+        extra = len(line) + (1 if kept else 0)
+        if kept and used + extra > max_chars:
+            break
+        kept.append(line)
+        used += extra
+    text = "\n".join(kept)
+    left = len(findings) - len(kept)
+    if left:
+        plural = "s" if left != 1 else ""
+        text += f"\n[{left} more finding{plural} omitted]"
+    return text
 
 
 def _findings_at_base(
@@ -569,11 +607,14 @@ def run_lint_check(
     if check.accepts_paths:
         scoped = dataclasses.replace(check, cmd=[*check.cmd, *relevant])
 
-    result = run_check(scoped, project_path, timeout=timeout)
-    if result.status != FAILED or result.launch_error:
+    # Uncapped: the comparison below has to see every finding of both runs.
+    result = run_check(scoped, project_path, timeout=timeout, max_output=None)
+    if result.launch_error:
         # A launch failure names no file, so the filters below would read it as
         # "no findings of ours" and skip the check. It stands as a failure.
         return result
+    if result.status != FAILED:
+        return dataclasses.replace(result, output=result.output[:MAX_CHECK_OUTPUT])
 
     own = [line for line in result.output.splitlines() if _blames(line, relevant)]
     if not own:
@@ -601,7 +642,7 @@ def run_lint_check(
                 output="violations, but every one of them predates this run",
             )
 
-    return dataclasses.replace(result, output="\n".join(own)[:4000])
+    return dataclasses.replace(result, output=cap_findings(own))
 
 
 def verify(
