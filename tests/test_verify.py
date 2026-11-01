@@ -488,3 +488,115 @@ def test_violations_in_files_the_run_never_touched_are_not_its_problem():
     )
     assert res.status == SKIPPED
     assert "did not touch" in res.output
+
+
+# --- lint output larger than the stored-report cap ----------------------
+#
+# run_check caps what it stores so a repair pass is not handed a megabyte of
+# linter output. That cap must not reach the baseline comparison: a cut-off
+# last line matches nothing in the baseline and gets blamed on the run, and
+# findings past the cap are never judged at all.
+
+_CAP = verify.MAX_CHECK_OUTPUT
+
+
+def _noisy_lint_repo(lines: int = 400) -> Path:
+    """A repo whose one changed file already carries more findings than fit."""
+    import subprocess
+
+    root = Path(tempfile.mkdtemp(prefix="engcrew_lintcap_"))
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=root, check=True)
+    (root / "app").mkdir()
+    body = "".join(f"a{i} = {i}  # BAD\n" for i in range(lines))
+    (root / "app" / "x.py").write_text(body, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=root, check=True)
+    assert lines * len("app/x.py:000: E999 bad line\n") > _CAP
+    return root
+
+
+def test_a_run_adding_nothing_to_a_file_full_of_old_findings_passes():
+    """Criterion: more pre-existing findings than fit in the cap, none new -> passes."""
+    root = _noisy_lint_repo()
+    # The run only prepends a line: every old finding shifts down by one, and
+    # the full output is far longer than the stored-output cap.
+    body = (root / "app" / "x.py").read_text(encoding="utf-8")
+    (root / "app" / "x.py").write_text("import os\n" + body, encoding="utf-8")
+    res = verify.run_lint_check(
+        _fake_lint_check(), root, verify.changed_files(root), timeout=180, base="HEAD"
+    )
+    assert res.status == SKIPPED, res.output
+    assert "predates" in res.output
+
+
+def test_a_new_finding_past_the_output_cap_still_fails_the_run():
+    """Criterion: a new finding beyond the old cut-off fails the run and is named."""
+    root = _noisy_lint_repo()
+    body = (root / "app" / "x.py").read_text(encoding="utf-8")
+    (root / "app" / "x.py").write_text(body + "fresh = 1  # BAD\n", encoding="utf-8")
+    changed = verify.changed_files(root)
+    res = verify.run_lint_check(_fake_lint_check(), root, changed, timeout=180, base="HEAD")
+    assert res.status == FAILED
+    # The new violation is on the last line, well past 4000 characters of output.
+    assert "app/x.py:401:" in res.output.replace("\\", "/")
+    assert "E999" in VerificationResult(results=[res]).failure_report()
+
+
+def test_the_baseline_comparison_sees_the_uncapped_output_and_only_the_report_is_capped():
+    """Criterion: comparison gets both checks whole; the stored report is capped
+    and says how many findings it left out."""
+    root = _noisy_lint_repo()
+    seen: list[int] = []
+    orig = verify.run_check
+
+    def spy(check, project_path, timeout=300, **kw):
+        res = orig(check, project_path, timeout=timeout, **kw)
+        seen.append(len(res.output))
+        return res
+
+    # Every finding is new: the base tree has no such file at all.
+    (root / "app" / "new.py").write_text(
+        "".join(f"b{i} = {i}  # BAD\n" for i in range(400)), encoding="utf-8"
+    )
+    verify.run_check = spy
+    try:
+        res = verify.run_lint_check(
+            _fake_lint_check(), root, ["app/new.py"], timeout=180, base="HEAD"
+        )
+    finally:
+        verify.run_check = orig
+    assert res.status == FAILED
+    assert seen and seen[0] > _CAP, seen  # the run's own check was read whole
+    assert len(res.output) <= _CAP + 200  # stored result is capped
+    assert "omitted" in res.output
+    kept = [ln for ln in res.output.splitlines() if "E999" in ln]
+    assert 0 < len(kept) < 400
+    assert f"{400 - len(kept)} more finding" in res.output
+
+
+def test_a_capped_report_never_ends_in_a_partial_finding():
+    """Criterion: a partial line can never be counted as a finding."""
+    findings = [f"app/x.py:{i}: E999 bad line" for i in range(50)]
+    text = verify.cap_findings(findings, max_chars=100)
+    lines = [ln for ln in text.splitlines() if "E999" in ln]
+    assert lines and all(ln in findings for ln in lines)
+    assert f"{50 - len(lines)} more findings omitted" in text
+    # A single finding longer than the cap is kept whole rather than sliced.
+    one = verify.cap_findings(["app/x.py:1: E999 " + "x" * 200], max_chars=20)
+    assert "x" * 200 in one
+
+
+def test_test_and_build_checks_keep_their_existing_output_handling():
+    """Criterion: only the lint path changed."""
+    root = _tmp()
+    noise = [
+        sys.executable,
+        "-c",
+        "import sys; print('E' * 9000); sys.exit(1)",
+    ]
+    for kind in ("test", "build"):
+        res = run_check(Check("noisy", noise, kind), root, timeout=60)
+        assert res.status == FAILED
+        assert len(res.output) == _CAP
