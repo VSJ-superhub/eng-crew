@@ -23,6 +23,15 @@ Thin, single-agent-first bot:
   /build ticket_id:<id>               Build a ticket that already exists. A
                                       backlog ticket is approved to `ready` in
                                       your name first; nothing new is filed.
+  /resolve ticket_id:<id>             Resolve the merge conflicts that refused a
+                                      ticket's build: an agent merges its
+                                      prerequisites onto HEAD on a branch of
+                                      their own and fixes the conflicts there.
+                                      Charged to the ticket's budget, credited
+                                      to you, and it starts no build — the next
+                                      `/build` forks from the resolved branch.
+                                      This is what the conflict notification in
+                                      your channel tells you to run.
   /status                             Recent and active runs
   /projects                           Configured project aliases
   /newtopic                           Forget this channel's conversation
@@ -172,6 +181,52 @@ def build_reply(ticket_id: int, actor: str, settings=None) -> str:
         f"🚀 Building ticket **#{ticket_id}** — "
         f"{result.wip.get('in_flight', '?')}/{result.wip.get('limit', '?')} in flight. "
         f"Track it on the dashboard; the result lands on an `ai-team/*` branch."
+    )
+
+
+# ── Unblocking a build the branches refused ─────────────────────────────────────
+# A build refused because its prerequisites' branches conflict is a dead end from
+# a phone: the fix was a terminal or the dashboard. These two are the same
+# resolution `eng-crew resolve` runs, split so the command can answer at once
+# and report the outcome when the agent is done.
+def resolve_start(ticket_id: int, actor: str, settings=None) -> tuple[bool, str]:
+    """(will it run, what to say now) for `/resolve <ticket_id>`.
+
+    Every reason it cannot run is known before anything is paid for, so the
+    person who typed it hears why instead of watching nothing happen. The
+    checks are :func:`eng_crew.resolve.refusal`'s, the same ones the dashboard's
+    Resolve conflicts button and `eng-crew resolve` are bound by.
+    """
+    from . import resolve as resolve_mod
+
+    reason = resolve_mod.refusal(ticket_id, actor=actor, settings=settings)
+    if reason:
+        return False, f"❌ {reason}"
+    return True, (
+        f"🔧 Resolving **#{ticket_id}**'s prerequisite conflicts — an agent is "
+        f"merging them onto HEAD on a branch of its own. This takes a few "
+        f"minutes and starts no build; I'll report back here."
+    )
+
+
+def resolve_outcome(ticket_id: int, actor: str, settings=None) -> str:
+    """Run the resolution and say how it went. The slow half of `/resolve`."""
+    from . import budget as budget_mod
+    from . import resolve as resolve_mod
+
+    try:
+        outcome = resolve_mod.resolve(ticket_id, settings, actor=actor)
+    except (resolve_mod.ResolveRefused, resolve_mod.ResolveFailed,
+            budget_mod.BudgetExhausted) as exc:
+        return f"❌ **#{ticket_id}**'s conflicts were not resolved — {exc}"
+    except Exception as exc:                                  # pragma: no cover
+        return f"❌ **#{ticket_id}**'s conflicts were not resolved — {exc}"
+    if not outcome.branch:
+        return f"✅ Nothing to resolve on **#{ticket_id}** — {outcome.summary}"
+    return (
+        f"✅ Resolved **#{ticket_id}**'s conflicts on `{outcome.branch}` "
+        f"(${outcome.cost_usd:.2f}) — the next build forks from it. "
+        f"Build it with `/build {ticket_id}`."
     )
 
 
@@ -883,6 +938,39 @@ async def cmd_build(interaction: discord.Interaction, ticket_id: int):
         await interaction.followup.send(f"❌ {e}")
         return
     await interaction.followup.send(message[:2000])
+
+
+@bot.tree.command(name="resolve",
+                  description="Resolve the merge conflicts that refused a ticket's build")
+@app_commands.describe(ticket_id="Ticket ID — the one the conflict notification named")
+async def cmd_resolve(interaction: discord.Interaction, ticket_id: int):
+    """Have an agent merge a ticket's prerequisites onto HEAD and fix the conflicts.
+
+    The same resolution `eng-crew resolve` and the dashboard's Resolve conflicts
+    button run, charged to the ticket's budget and credited to whoever asked. It
+    starts no build. The reply is immediate; the outcome follows it.
+    """
+    loop = asyncio.get_running_loop()
+    await interaction.response.defer()
+    actor = str(getattr(interaction.user, "name", None) or interaction.user)
+    try:
+        started, message = await loop.run_in_executor(
+            bot.executor, resolve_start, ticket_id, actor
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ {e}")
+        return
+    await interaction.followup.send(message[:2000])
+    if not started:
+        return
+    try:
+        outcome = await loop.run_in_executor(
+            bot.executor, resolve_outcome, ticket_id, actor
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ {e}")
+        return
+    await interaction.followup.send(outcome[:2000])
 
 
 @bot.tree.command(name="status", description="Show recent and active eng-crew runs")

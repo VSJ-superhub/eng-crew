@@ -217,6 +217,21 @@ class Settings(BaseSettings):
     # --- Dashboard ---
     dashboard_port: int = 9000
     dashboard_host: str = "127.0.0.1"
+    # Where the dashboard is reachable from outside this machine, for the links
+    # in notifications. Left empty it is worked out from the host and port.
+    dashboard_url: str = ""
+
+    # --- Discord notifications (optional) ---
+    # A channel webhook URL eng-crew posts to when a ticket needs a person: it
+    # is done, the reviewer asked for changes or could not be reached, its run
+    # failed, it was rejected, or its budget stopped it. Independent of the
+    # Discord bot — the bot does not need to be running. Empty: nothing is
+    # posted. The URL is a bearer credential and is never logged or stored
+    # (eng_crew/notify.py).
+    discord_webhook_url: str = ""
+    # Your Discord user id. Set it and the notification @mentions you, so the
+    # push reaches your phone; it is the only mention the message allows.
+    discord_notify_user_id: str = ""
 
     # --- Pipeline ---
     branch_prefix: str = "ai-team"

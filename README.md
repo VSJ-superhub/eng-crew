@@ -201,6 +201,7 @@ eng-crew discord                        # run it in the foreground
 | `/backlog <project> [status]` | The whole tracker as an embed: WIP, a tally per status, and the tickets grouped in lifecycle order — optionally one status only |
 | `/ticket <id>` | One ticket in full: description, acceptance criteria, spend, the latest review verdict, its runs and its history |
 | `/build <ticket_id>` | Build a ticket that already exists. A `backlog` ticket is approved to `ready` in your name first; nothing new is filed |
+| `/resolve <ticket_id>` | Resolve the merge conflicts that refused a ticket's build: an agent merges its prerequisites onto HEAD on a branch of their own and fixes them there. Charged to the ticket's budget, credited to you, and it starts no build — the next `/build` forks from the resolved branch |
 | `/task <project> <task>` | File *new* work as a ticket and build it |
 | `/ideate <project>` | Talk an idea through with the Manager; it ends in a ticket proposal |
 | `/status` | Recent and active runs |
@@ -210,8 +211,59 @@ ticket with no acceptance criteria is refused, a ticket that has spent its
 budget is refused with the figure, and a project at its WIP limit leaves the
 ticket `ready` in the queue and starts nothing.
 
+`/resolve` is `eng-crew resolve` and the dashboard's **Resolve conflicts**
+button, reached from a phone: it replies at once that an agent has started, and
+reports back when it is done — the branch the next build forks from, or why it
+could not (a conflict it left, or the project's own checks failing on the merged
+tree). It is refused, with the reason, on a ticket that has no conflict, does
+not exist, is already being resolved, is past building or has spent its budget,
+and no part of eng-crew can ask for it: a resolution spends money and rewrites a
+merge, so it is a person's call.
+
 `start_services` keeps the bot's output in `<data dir>/logs/discord_bot.log`, so
 a bot that dies at startup leaves its reason there and in `services_status()`.
+
+### Getting told when a ticket needs you
+
+The bot is for asking. This is for being told — a push to your phone the moment
+a ticket is waiting on you, with no bot running and no browser open.
+
+```bash
+# in your .env
+ENG_CREW_DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/.../...
+ENG_CREW_DISCORD_NOTIFY_USER_ID=123456789012345678
+```
+
+**The webhook URL:** in Discord, open the channel you want the messages in →
+*Edit Channel* → *Integrations* → *Webhooks* → *New Webhook* → *Copy Webhook
+URL*. Treat it like a password — anyone holding it can post to that channel.
+eng-crew never logs it, never writes it into a ticket's history and never shows
+it on the dashboard.
+
+**Your user id** (optional, but it is what makes a phone actually buzz): Discord
+→ *User Settings* → *Advanced* → turn on **Developer Mode**, then right-click
+your own name → *Copy User ID*. You are then the only person the message is
+allowed to mention: an `@everyone` or `@here` sitting in a ticket's title pings
+nobody. Leave it unset and no one is mentioned at all.
+
+You get a message when a ticket **is done**, when the reviewer **asks for
+changes** or **could not be reached**, when a **run fails** or the ticket is
+**rejected**, when its **budget stops it**, and when a build is **refused
+because its prerequisites' branches conflict** — that one names the
+prerequisites, says whether they conflict with each other or with HEAD, and
+tells you the command that fixes it, `/resolve <ticket_id>`, so the whole round
+trip happens on your phone. The outcome of that resolution posts too, either
+way. Nothing else posts. Each one
+names the ticket, its project, what it has spent against its budget, the
+one-line reason — the review verdict, the verification gate's failure line, or
+the budget note — and links straight to the ticket on the dashboard (set
+`ENG_CREW_DASHBOARD_URL` if you reach the dashboard through a tunnel or proxy).
+
+The push comes from the ticket lifecycle itself, so it does not matter which
+surface started the build — the CLI, the dashboard, MCP `run_task`, Discord or a
+queue pull all notify the same way. It is best-effort: a webhook that times out
+or errors is logged and dropped, never failing or slowing a build. With no
+webhook configured, nothing is posted and nothing else changes.
 
 ## CLI reference
 

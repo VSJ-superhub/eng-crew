@@ -372,8 +372,12 @@ def latest_verdict(ticket_id: int) -> dict | None:
     return None
 
 
-_NOTE_PREFIX = "review:"
-_UNAVAILABLE_PREFIX = "review unavailable:"
+#: How every verdict note starts, and how a review that could not run is noted.
+#: Public because eng_crew.notify recognises these notes by them.
+NOTE_PREFIX = "review:"
+UNAVAILABLE_PREFIX = "review unavailable:"
+_NOTE_PREFIX = NOTE_PREFIX
+_UNAVAILABLE_PREFIX = UNAVAILABLE_PREFIX
 #: The note on an approval that did not see every changed file.
 PARTIAL_PREFIX = "review partial:"
 

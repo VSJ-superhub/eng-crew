@@ -56,6 +56,15 @@ RESOLVED_PREFIX = "eng-crew/resolved"
 #: to resolve it.
 REFUSED = "cannot be built on its prerequisites"
 
+#: Who the ticket's history credits with noticing the conflict. Not a person:
+#: nobody decided this, the branches did.
+ACTOR = "basing"
+
+#: The note a recorded conflict starts with. :mod:`eng_crew.notify` keys off
+#: it, so every refusal recorded through :func:`record_conflict` reaches the
+#: phone by one path rather than one per surface.
+CONFLICT_NOTE_PREFIX = "conflict:"
+
 
 def resolved_branch(ticket_id: int) -> str:
     """Where an agent's resolution of a ticket's prerequisite conflicts lives."""
@@ -92,16 +101,45 @@ class ConflictingPrerequisites(Exception):
         self.ticket_id = ticket_id
         self.conflicting = conflicting
         self.with_head = with_head
+        self.detail = detail
         named = ", ".join(f"#{i}" for i in conflicting)
         if with_head:
             what = f"{named}'s branch conflicts with HEAD"
         else:
             what = f"{named} conflict with each other"
+        #: The facts without the advice: which prerequisites, and what they
+        #: conflict with. What a notification repeats back.
+        self.summary = what + (f" ({detail})" if detail else "")
         what += f" — resolve the conflicts first (eng-crew resolve {ticket_id})"
         super().__init__(
             f"ticket {ticket_id} {REFUSED}: {what}"
             + (f" ({detail})" if detail else "")
         )
+
+
+def record_conflict(exc: ConflictingPrerequisites) -> bool:
+    """Write a refused-for-conflicts build into the ticket's history.
+
+    The one place a merge conflict becomes a recorded fact, so the push that
+    tells somebody about it (:mod:`eng_crew.notify`) hangs off the lifecycle
+    like every other notification — the CLI, the dashboard, MCP ``run_task``,
+    Discord's ``/build`` and a queue pull all reach it through
+    :func:`ensure_buildable`, and a future action that refuses for the same
+    reason calls it directly rather than growing a push of its own.
+
+    Best-effort, like the push itself: a tracker that cannot record this must
+    not turn a refusal into a crash.
+    """
+    from . import tickets
+
+    try:
+        return tickets.note(
+            exc.ticket_id, ACTOR,
+            f"{CONFLICT_NOTE_PREFIX} {exc.summary} — the build was refused",
+        )
+    except Exception as error:                                # pragma: no cover
+        log.warning("could not record #%s's conflict: %s", exc.ticket_id, error)
+        return False
 
 
 def _as_ticket(ticket: dict | int) -> dict:
@@ -244,16 +282,26 @@ def unmerged_prerequisites(ticket: dict | int) -> tuple[list[tuple[int, str]], l
     return unmerged, refs
 
 
-def ensure_buildable(ticket: dict | int, *, explicit_base: str = "") -> None:
+def ensure_buildable(ticket: dict | int, *, explicit_base: str = "",
+                     record: bool = True) -> None:
     """Raise if this ticket cannot be based on its prerequisites. Creates nothing.
 
     The pre-flight for a surface that claims a ticket before launching the
     build: the refusal has to arrive before the claim, or the ticket holds a WIP
     slot for a build that was never going to start.
+
+    A refusal is recorded on the ticket on its way past, which is what reaches
+    the person's phone. ``record=False`` is for a caller only *asking* whether
+    there is a conflict — :mod:`eng_crew.resolve`, which is the answer to one.
     """
     from . import git_skill
 
-    base = resolve_base(ticket, explicit_base=explicit_base)
+    try:
+        base = resolve_base(ticket, explicit_base=explicit_base)
+    except ConflictingPrerequisites as exc:
+        if record:
+            record_conflict(exc)
+        raise
     if base.ref and base.ref.startswith(BASE_PREFIX + "/"):
         # This check made a merge branch to prove the merge works; the build
         # will make its own. Leaving this one would litter the repo.
