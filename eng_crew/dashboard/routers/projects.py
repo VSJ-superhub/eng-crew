@@ -263,23 +263,13 @@ async def api_ticket_resolve(ticket_id: int):
     """
     from ... import resolve
 
-    ticket = get_backlog_item(ticket_id)
-    if not ticket:
+    if not get_backlog_item(ticket_id):
         return JSONResponse({"error": "not found"}, status_code=404)
-    if ticket["status"] not in resolve.RESOLVABLE:
-        return JSONResponse(
-            {"error": f"#{ticket_id} is {ticket['status']}; conflicts are resolved "
-                      f"before a ticket is built"}, status_code=409,
-        )
-    if resolve.resolving(ticket_id):
-        return JSONResponse(
-            {"error": "an agent is already resolving this ticket's conflicts"}, status_code=409,
-        )
-    state = budget.status(ticket_id)
-    if state and state["exhausted"]:
-        return JSONResponse(
-            {"error": "this ticket has spent its budget — raise it first"}, status_code=409,
-        )
+    # The same pre-flight Discord's /resolve and `eng-crew resolve` are bound
+    # by, so the three surfaces cannot disagree about what is resolvable.
+    reason = resolve.refusal(ticket_id)
+    if reason:
+        return JSONResponse({"error": reason}, status_code=409)
 
     def work() -> None:
         try:

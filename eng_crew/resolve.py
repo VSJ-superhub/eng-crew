@@ -24,6 +24,14 @@ the ticket's work. The outcome is a note in the ticket's history.
 
 A resolution starts no build. Building is still the person's call, and the
 next build finds the resolved branch and forks from it.
+
+Who may ask: `eng-crew resolve <id>`, the dashboard's Resolve conflicts button
+and Discord's ``/resolve <ticket_id>`` — the last of those is what the conflict
+notification (:mod:`eng_crew.notify`) names, so a refused build can be cleared
+from the phone it was reported to. All three go through :func:`refusal` first,
+so they cannot disagree about what is resolvable, and all three credit the
+person who asked. No eng-crew actor can ask: it spends money and rewrites a
+merge.
 """
 from __future__ import annotations
 
@@ -89,8 +97,45 @@ def resolving(ticket_id: int) -> bool:
         return ticket_id in _resolving
 
 
-def resolve(ticket_id: int, settings: Any = None) -> Resolution:
+def refusal(ticket_id: int, *, actor: str = "", settings: Any = None) -> str | None:
+    """Why a resolution of this ticket cannot start, or None if it can.
+
+    The pre-flight every surface shares, so a person who asks hears the same
+    reason whether they clicked, typed or sent a slash command — and hears it
+    *before* anything paid starts. :func:`resolve` re-checks what it must, for
+    the race where two surfaces ask at once.
+    """
+    who = (actor or "").strip()
+    if who.lower() in tickets.ROBOTS:
+        return (f"{who} is eng-crew itself — resolving a conflict is a person's "
+                f"call, so it is not started on a robot's word")
+    row = tracker.get_backlog_item(ticket_id)
+    if not row:
+        return f"there is no ticket {ticket_id}"
+    if row.get("status") not in RESOLVABLE:
+        return (f"#{ticket_id} is {row.get('status')}; conflicts are resolved "
+                f"before a ticket is built")
+    if resolving(ticket_id):
+        return f"conflicts on #{ticket_id} are already being resolved"
+    state = budget.status(ticket_id, settings)
+    if state and state.get("exhausted"):
+        return (f"#{ticket_id} has spent ${state['spent_usd']:.2f} of its "
+                f"${state['budget_usd']:.2f} budget — raise it first "
+                f"(`eng-crew budget {ticket_id} <amount>`)")
+    try:
+        basing.ensure_buildable(row, record=False)
+    except basing.ConflictingPrerequisites:
+        return None
+    return f"#{ticket_id} has no conflicts to resolve — its build can start"
+
+
+def resolve(ticket_id: int, settings: Any = None, *, actor: str = "") -> Resolution:
     """Merge a ticket's unmerged prerequisites onto HEAD, resolving conflicts.
+
+    ``actor`` is who asked, and is who the ticket's history credits with the
+    outcome; it defaults to :data:`ACTOR` for a caller that is eng-crew's own
+    machinery. An eng-crew robot may not ask: a resolution spends money and
+    rewrites a merge, and both are a person's call.
 
     Raises :class:`ResolveRefused` when the ticket is not waiting to be built
     or a resolution of it is already running, :class:`budget.BudgetExhausted`
@@ -98,12 +143,15 @@ def resolve(ticket_id: int, settings: Any = None) -> Resolution:
     could not produce a merge that passes the project's checks — recorded in
     the ticket's history either way.
     """
+    if (actor or "").strip().lower() in tickets.ROBOTS:
+        raise ResolveRefused(
+            f"{actor} is eng-crew itself — resolving a conflict is a person's call")
     with _resolving_lock:
         if ticket_id in _resolving:
             raise ResolveRefused(f"conflicts on #{ticket_id} are already being resolved")
         _resolving.add(ticket_id)
     try:
-        return _resolve(ticket_id, settings)
+        return _resolve(ticket_id, settings, (actor or "").strip() or ACTOR)
     finally:
         with _resolving_lock:
             _resolving.discard(ticket_id)
@@ -117,7 +165,7 @@ def _settings(settings: Any) -> Any:
     return Settings()
 
 
-def _resolve(ticket_id: int, settings: Any) -> Resolution:
+def _resolve(ticket_id: int, settings: Any, credit: str = ACTOR) -> Resolution:
     settings = _settings(settings)
     row = tracker.get_backlog_item(ticket_id)
     if not row:
@@ -129,7 +177,7 @@ def _resolve(ticket_id: int, settings: Any) -> Resolution:
     project_path = row.get("project_path") or ""
 
     try:
-        basing.ensure_buildable(row)
+        basing.ensure_buildable(row, record=False)
     except basing.ConflictingPrerequisites:
         pass
     else:
@@ -192,7 +240,7 @@ def _resolve(ticket_id: int, settings: Any) -> Resolution:
             pass
         reason = str(exc) or type(exc).__name__
         tracker.finish_run(run_id, status="failed", final_summary=reason)
-        tickets.note(ticket_id, ACTOR, f"{NOTE_PREFIX} could not resolve the conflicts "
+        tickets.note(ticket_id, credit, f"{NOTE_PREFIX} could not resolve the conflicts "
                                        f"merging {named} onto HEAD — {reason}")
         if isinstance(exc, ResolveFailed):
             raise
@@ -201,7 +249,7 @@ def _resolve(ticket_id: int, settings: Any) -> Resolution:
     _remove(project_path, wt)
     summary = " ".join(a for a in accounts if a) or "merged"
     tracker.finish_run(run_id, status="completed", final_summary=summary)
-    tickets.note(ticket_id, ACTOR, f"{NOTE_PREFIX} resolved the conflicts merging {named} "
+    tickets.note(ticket_id, credit, f"{NOTE_PREFIX} resolved the conflicts merging {named} "
                                    f"onto HEAD on {branch} — {summary[:600]}")
     return Resolution(branch, summary, cost, run_id)
 
@@ -212,7 +260,9 @@ def latest_note(ticket_id: int) -> str | None:
     for event in tickets.events(ticket_id):
         if event.get("to_status") == tickets.IN_PROGRESS and event.get("from_status") != tickets.IN_PROGRESS:
             last = None
-        elif event.get("actor") == ACTOR and (event.get("note") or "").startswith(NOTE_PREFIX):
+        elif (event.get("note") or "").startswith(NOTE_PREFIX):
+            # Matched on the note, not the actor: a resolution asked for from
+            # Discord is credited to the person who asked, not to `resolver`.
             last = event["note"]
     return last
 

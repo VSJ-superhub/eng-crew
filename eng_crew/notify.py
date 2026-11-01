@@ -3,7 +3,8 @@
 A ticket's whole point is that nobody has to watch it. The gap that left was at
 the other end: when a ticket *did* need a person — it finished, the reviewer
 asked for changes, no reviewer could be reached, the run failed, somebody
-rejected it, or it spent its budget — it waited silently in the tracker until
+rejected it, it spent its budget, or its prerequisites' branches would not
+combine — it waited silently in the tracker until
 whoever dispatched it thought to look. This module closes that gap with the
 cheapest push that reaches a phone: a POST to a Discord channel webhook,
 optionally @mentioning one configured user so the mobile notification fires.
@@ -54,6 +55,9 @@ REVIEW_UNAVAILABLE = "review_unavailable"
 RUN_FAILED = "run_failed"
 REJECTED = "rejected"
 BUDGET_STOPPED = "budget_stopped"
+CONFLICT = "conflict"
+RESOLVED = "resolved"
+RESOLVE_FAILED = "resolve_failed"
 
 #: How each reads in the message's first line.
 HEADLINES: dict[str, str] = {
@@ -63,6 +67,18 @@ HEADLINES: dict[str, str] = {
     RUN_FAILED: "had its run fail",
     REJECTED: "was rejected",
     BUDGET_STOPPED: "was stopped by its budget",
+    CONFLICT: "cannot be built — its prerequisites conflict",
+    RESOLVED: "has its conflicts resolved",
+    RESOLVE_FAILED: "still has its conflicts",
+}
+
+#: The last line of the message for the kinds where there is something to do
+#: about it from the same chat the message arrived in. ``{id}`` is the ticket's.
+#: A conflict is the one refusal a phone can actually clear, so it says how.
+TRAILERS: dict[str, str] = {
+    CONFLICT: "Resolve it here: `/resolve {id}`",
+    RESOLVED: "The next build forks from it — `/build {id}`.",
+    RESOLVE_FAILED: "Try again with `/resolve {id}`, or merge it by hand.",
 }
 
 #: The bracketed line the verification gate leaves in a run's final summary.
@@ -200,6 +216,9 @@ def compose(ticket: dict, kind: str, reason: str = "",
     lines.append(detail)
     if reason:
         lines.append(defang(_one_line(reason)))
+    trailer = TRAILERS.get(kind)
+    if trailer:
+        lines.append(trailer.format(id=ticket.get("id")))
     lines.append(f"<{ticket_link(ticket, cfg)}>")
 
     return {
@@ -287,13 +306,30 @@ def on_note(ticket_id: int, actor: str, text: str,
 
     Two of those are a person's problem — a changes-requested verdict and a
     review that could not run — and so is a budget stop, which is recorded the
-    same way. The rest (an approval, an area change, a budget raise, a
-    dependency edit) are not, and are left alone.
+    same way. So is a build refused because its prerequisites' branches do not
+    combine, and the outcome of resolving that, either way. The rest (an
+    approval, an area change, a budget raise, a dependency edit) are not, and
+    are left alone.
+
+    A conflict and a resolution are matched on the note itself rather than on
+    who wrote it: a resolution is credited to whoever asked for it, which may
+    be a person's Discord name.
     """
+    from . import basing as basing_mod
     from . import budget as budget_mod
+    from . import resolve as resolve_mod
     from . import review as review_mod
 
     note = (text or "").strip()
+    if note.startswith(basing_mod.CONFLICT_NOTE_PREFIX):
+        return ticket_event(
+            ticket_id, CONFLICT,
+            note[len(basing_mod.CONFLICT_NOTE_PREFIX):].strip(), settings=settings,
+        )
+    if note.startswith(resolve_mod.NOTE_PREFIX):
+        outcome = note[len(resolve_mod.NOTE_PREFIX):].strip()
+        kind = RESOLVE_FAILED if outcome.startswith("could not") else RESOLVED
+        return ticket_event(ticket_id, kind, outcome, settings=settings)
     if actor == review_mod.REVIEWER_ACTOR:
         changes = f"review: {review_mod.CHANGES_REQUESTED}"
         if note.startswith(changes):

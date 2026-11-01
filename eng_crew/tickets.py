@@ -77,6 +77,7 @@ LEGACY_STATUS = {
 ROBOTS: frozenset[str] = frozenset({
     "queue", "cleanup", "system", "migration", "planner", "manager",
     "architect", "builder", "reviewer", "qa", "budget", "retro",
+    "basing", "resolver",
 })
 
 

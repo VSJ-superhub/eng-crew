@@ -51,7 +51,20 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   checks there (`eng_crew/resolve.py`). It is charged to the ticket's budget,
   never touches the checkout and starts no build; the next build forks from
   that branch — merged onto HEAD if HEAD has moved on since — and a resolution
-  that leaves a conflict or breaks the checks is thrown away. The branch a
+  that leaves a conflict or breaks the checks is thrown away. A refusal is
+  also recorded on the ticket (`basing.record_conflict`, actor `basing`, note
+  `conflict:`) and that one record is what notifies — so the refusal reaches
+  the phone naming the conflicting prerequisites, whether they conflict with
+  each other or with HEAD, and the `/resolve <ticket_id>` that fixes it, and
+  any later action refused for a merge conflict posts the same message by
+  recording the same note rather than growing a push of its own. Discord's
+  `/resolve <ticket_id>` runs exactly that resolution — credited in
+  `ticket_events` to the Discord user who asked, charged to the ticket's
+  budget, refused with its reason when the budget is spent, when the ticket
+  has no conflict, does not exist or is already being resolved, and never on
+  an eng-crew robot's word (`tickets.ROBOTS`) — replies at once that it
+  started and reports the outcome, resolved (with the branch the next build
+  forks from) or not, when the agent is done. The branch a
   run was based on and why are recorded on the run (`runs.base_branch`,
   `runs.base_reason`) and shown with it. Every surface gets this, because
   `eng-crew ticket <id>` — what the CLI, the dashboard, Discord `/build` and a
@@ -160,8 +173,9 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   `ENG_CREW_DISCORD_WEBHOOK_URL` set to a Discord channel webhook, eng-crew
   posts when a ticket moves to `done`, when a review comes back
   `changes_requested` or is recorded as review unavailable, when its run
-  finishes `failed` or the ticket is `rejected`, and when its budget stops it.
-  No other transition posts. The push fires from the ticket lifecycle itself —
+  finishes `failed` or the ticket is `rejected`, when its budget stops it, when
+  a build is refused because its prerequisites' branches conflict, and when a
+  resolution of those conflicts lands or fails. No other transition posts. The push fires from the ticket lifecycle itself —
   `tickets.move` and `tickets.note`, beside the budget check and the retro — so
   a build started from the CLI, the dashboard, MCP `run_task`, Discord or a
   queue pull all notify identically, and the Discord bot does not have to be

@@ -91,7 +91,15 @@ def run_ticket(ticket_id: int, *, actor: str = "queue", log_path: str | None = N
     unmet = tickets.unmet_prerequisites(ticket)
     if unmet:
         raise tickets.Blocked(ticket_id, unmet)
-    base = basing.resolve_base(ticket, explicit_base=base_branch or "")
+    try:
+        base = basing.resolve_base(ticket, explicit_base=base_branch or "")
+    except basing.ConflictingPrerequisites as exc:
+        # Recorded on the ticket on the way out, which is what tells somebody
+        # (eng_crew.notify) that a `/resolve` is waiting to be run. A surface
+        # that pre-flighted with ensure_buildable has already recorded it and
+        # never gets here.
+        basing.record_conflict(exc)
+        raise
 
     if ticket["status"] != tickets.IN_PROGRESS:
         tickets.move(ticket_id, tickets.IN_PROGRESS, actor, "build started", settings=cfg)
