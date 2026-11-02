@@ -21,3 +21,25 @@ def no_real_llm_calls(monkeypatch):
         )
 
     monkeypatch.setattr("eng_crew.agents.base.call_llm", refuse)
+
+
+@pytest.fixture(autouse=True)
+def no_real_discord_posts(monkeypatch):
+    """The developer's `.env` webhook must never receive a test's ticket.
+
+    Any test that moves a ticket to `done` would otherwise push to the real
+    channel. The configured webhook is blanked, and the post itself refused in
+    case a test builds its own settings from `.env`. A test that wants a push
+    sets the webhook and stubs `eng_crew.notify.httpx.post`, which overrides
+    this.
+    """
+    from eng_crew import config, notify
+
+    monkeypatch.setattr(config.settings, "discord_webhook_url", "")
+    monkeypatch.setattr(config.settings, "discord_notify_user_id", "")
+
+    def refuse(url, **kwargs):
+        raise RuntimeError("a test tried to post to Discord for real — stub "
+                           "eng_crew.notify.httpx.post in the test that needs it")
+
+    monkeypatch.setattr(notify.httpx, "post", refuse)
