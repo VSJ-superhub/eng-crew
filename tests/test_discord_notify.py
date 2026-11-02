@@ -401,3 +401,29 @@ def test_the_budgets_own_stop_note_posts(db, webhook, posts):
 
     assert len(posts) == 1
     assert "15.94" in contents(posts)[0]
+
+
+def test_a_push_trusts_the_operating_systems_certificates_too(webhook, monkeypatch):
+    # An antivirus web shield or a corporate proxy re-signs HTTPS with a root
+    # only the OS store holds; httpx's certifi-only default rejects every push.
+    seen: dict = {}
+
+    def fake_post(url, *, json=None, timeout=None, verify=True, **kw):
+        seen["verify"] = verify
+
+        class Reply:
+            status_code = 204
+            text = ""
+        return Reply()
+
+    loaded: list[bool] = []
+    monkeypatch.setattr(notify.ssl.SSLContext, "load_default_certs",
+                        lambda self, *a, **kw: loaded.append(True))
+    notify.tls_context.cache_clear()
+    monkeypatch.setattr(notify.httpx, "post", fake_post)
+    try:
+        assert notify.post({"content": "hi"}, webhook) is True
+        assert isinstance(seen["verify"], notify.ssl.SSLContext)
+        assert loaded == [True]
+    finally:
+        notify.tls_context.cache_clear()

@@ -33,11 +33,14 @@ With no webhook configured, nothing here does anything at all.
 """
 from __future__ import annotations
 
+import functools
 import logging
 import re
+import ssl
 from collections import OrderedDict
 from typing import Any
 
+import certifi
 import httpx
 
 from . import tracker
@@ -222,13 +225,27 @@ def compose(ticket: dict, kind: str, reason: str = "",
     }
 
 
+@functools.lru_cache(maxsize=1)
+def tls_context() -> ssl.SSLContext:
+    """The CAs a push trusts: certifi's bundle *and* the operating system's store.
+
+    httpx on its own trusts only certifi, so a machine whose HTTPS is re-signed
+    by a root the OS trusts — antivirus web shields, corporate proxies — fails
+    every push with CERTIFICATE_VERIFY_FAILED while the browser works fine.
+    """
+    context = ssl.create_default_context(cafile=certifi.where())
+    context.load_default_certs()
+    return context
+
+
 def post(payload: dict, settings: Any = None) -> bool:
     """POST the payload. Never raises; True only when Discord accepted it."""
     url = webhook_url(settings)
     if not url:
         return False
     try:
-        reply = httpx.post(url, json=payload, timeout=TIMEOUT_SECONDS)
+        reply = httpx.post(url, json=payload, timeout=TIMEOUT_SECONDS,
+                           verify=tls_context())
     except Exception as exc:
         log.warning(
             "discord notification not delivered: %s", redact(exc, settings)
