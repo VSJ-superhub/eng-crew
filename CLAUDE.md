@@ -242,6 +242,15 @@ This is a generalized, pip-installable version of a private internal tool. It mu
   limit, which is still the build writing its own tests. The test files that
   pass changed, and any a warn-mode lock let through, are named to the ticket
   reviewer, who is told to check they were not weakened.
+- When the project has a web frontend — a package.json depending on a UI
+  framework, or HTML pages/templates of its own, found by a shallow scan that
+  skips dependencies and build output (`agents/single_agent.has_web_frontend`)
+  — the builder's prompt carries a UI quality bar (`.claude/skills/ui-quality`):
+  a type scale, neutrals with brand colours as accents, elevation and
+  interaction states, designed fallbacks for images, empty, loading and error
+  states, human labels instead of raw enum values, phone-width layout and
+  accessibility, building on the project's own tokens and shared components
+  rather than inventing new ones. A project with no UI is not handed it.
 - The **Entroly** context optimizer (`eng_crew/entroly_integration.py`) is an
   optional extra, off by default (`ENTROLY_ENABLED`, with `ENTROLY_QUALITY` and
   `ENTROLY_TOKEN_BUDGET`). Enabled and installed, a run refreshes the project's

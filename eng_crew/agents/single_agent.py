@@ -8,13 +8,68 @@ one capable agent editing directly, not a multi-agent decomposition.
 """
 from __future__ import annotations
 
+import json
+import os
 import sys
+from pathlib import Path
 
-from .base import BaseAgent
-from .. import prompts, tickets
+from .. import prompts, tickets, tracker
 from ..providers import call_llm
 from ..state import TeamState
-from .. import tracker
+from .base import BaseAgent
+
+# Dependencies that mean a package.json is a web frontend, not a Node backend.
+_FRONTEND_DEPS = frozenset({
+    "react", "react-dom", "next", "vue", "nuxt", "svelte", "@sveltejs/kit",
+    "@angular/core", "solid-js", "preact", "astro", "@remix-run/react",
+})
+# Directories that never hold a project's own UI: dependencies, build output,
+# reports, and eng-crew's own worktrees of the project.
+_SKIP_DIRS = frozenset({
+    "node_modules", ".git", ".venv", "venv", "__pycache__", "dist", "build",
+    "out", ".next", ".nuxt", "coverage", "htmlcov", ".eng-crew-worktrees",
+    ".eng-crew", "site-packages",
+})
+_FRONTEND_SCAN_DEPTH = 3
+
+
+def _is_frontend_package(path: Path) -> bool:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    deps: set[str] = set()
+    for key in ("dependencies", "devDependencies", "peerDependencies"):
+        section = data.get(key)
+        if isinstance(section, dict):
+            deps.update(section)
+    return bool(deps & _FRONTEND_DEPS)
+
+
+def has_web_frontend(project_path: str | os.PathLike) -> bool:
+    """Whether the project ships a user-facing web UI.
+
+    Read from the files in the repo: a package.json depending on a frontend
+    framework, or HTML pages/templates of its own. The scan is shallow and
+    skips dependencies and build output, so it costs a directory walk, not a
+    read of the project.
+    """
+    root = Path(project_path)
+    if not root.is_dir():
+        return False
+    base_depth = len(root.parts)
+    for dirpath, dirnames, filenames in os.walk(root):
+        depth = len(Path(dirpath).parts) - base_depth
+        dirnames[:] = [] if depth >= _FRONTEND_SCAN_DEPTH else [
+            d for d in dirnames if d not in _SKIP_DIRS
+        ]
+        if any(name.endswith((".html", ".htm")) for name in filenames):
+            return True
+        if "package.json" in filenames and _is_frontend_package(Path(dirpath) / "package.json"):
+            return True
+    return False
 
 
 def _progress_reporter(run_id: int, label: str):
@@ -59,6 +114,19 @@ class SingleAgentEngineer(BaseAgent):
         print("[single_agent] acceptance criteria present — test-first mode", file=sys.stderr)
         return "\n" + prompts.render("test-first", criteria=criteria) + "\n"
 
+    def _ui_quality_block(self, project_path: str) -> str:
+        """The UI quality bar, when the project has a web frontend.
+
+        Left to its defaults a builder ships UI that works and looks
+        unfinished: the system font, flat bordered boxes, raw enum values,
+        blank image slots. The bar is what it is held to instead. A project
+        with no UI is not handed it.
+        """
+        if not has_web_frontend(project_path):
+            return ""
+        print("[single_agent] web frontend detected — UI quality bar attached", file=sys.stderr)
+        return "\n" + prompts.render("ui-quality") + "\n"
+
     def _lessons_block(self, state: TeamState) -> str:
         """Retros from tickets this project already shipped.
 
@@ -99,6 +167,7 @@ class SingleAgentEngineer(BaseAgent):
             "single-agent-implement",
             task=task,
             test_first_block=test_first_block,
+            ui_quality_block=self._ui_quality_block(project_path),
             context_block=context_block,
             lessons_block=self._lessons_block(state),
         )
